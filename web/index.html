@@ -86,6 +86,22 @@
       </fieldset>
 
       <fieldset>
+        <legend>Druhá kamera</legend>
+        <div class="grid">
+          <label class="field">Název kamery
+            <input data-key="camera2_name" type="text">
+            <span class="hint">prázdné = jen jedna kamera</span>
+          </label>
+          <label class="field">Index / cesta
+            <input data-key="camera2_index" type="text">
+          </label>
+          <label class="field">Šířka <input data-key="camera2_width" type="number"></label>
+          <label class="field">Výška <input data-key="camera2_height" type="number"></label>
+          <label class="field">FPS kamery <input data-key="camera2_fps" type="number"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>Úloha a její kroky</legend>
         <div class="grid">
           <label class="field">Slug úlohy
@@ -161,6 +177,14 @@
         „full-shared" (jinak si LeRobot stěžuje, že nemůže načíst torchcodec, a videa nezakóduje).
         Volitelně <code class="inline">pip install pynput</code> — klávesy pak fungují i když terminál
         není v popředí.</div>
+      <div class="note"><b>Verze FFmpeg musí být 4–8</b> — torchcodec (dekódování videa při čtení
+        datasetu, tedy při <code class="inline">split_dataset.py</code>/<code class="inline">merge_datasets.py</code>/tréninku)
+        novější verze (9+) nezná a spadne na <code class="inline">Could not load libtorchcodec</code>.
+        Na Windows nejrychleji přes <code class="inline">winget install BtbN.FFmpeg.GPL.Shared.7.1</code>.
+        Aby se PATH aplikoval, ať funguje hned po <code class="inline">conda activate</code> a nečekal na
+        odhlášení z Windows, dej hook do
+        <code class="inline">&lt;env&gt;/etc/conda/activate.d/ffmpeg_path.ps1</code> s obsahem
+        <code class="inline">$env:Path = 'C:\cesta\k\ffmpeg\bin;' + $env:Path</code>.</div>
     </div>
   </section>
 
@@ -273,6 +297,16 @@
         &lt;cesta z chyby&gt;</code>) a spusť znovu; pro <b>přidání dalších epizod</b> do stejného
         datasetu použij variantu s <code class="inline">--resume=true</code> níže — ta samá logika
         platí pro nahrávání jednotlivých kroků i pro plnou úlohu.</div>
+      <div class="note">Vestavěný <code class="inline">LeRobotDataset.resume()</code> vyžaduje
+        u <code class="inline">--resume=true</code> vždy explicitní <code class="inline">--dataset.root</code>
+        (jinak <code class="inline">ValueError: resume() requires an explicit 'root' directory</code>) —
+        stránka ho do příkazu „Dodatečné epizody" doplňuje sama.</div>
+      <div class="note">Nepovedená epizoda se dá smazat i po nahrání, bez ručního zásahu do
+        parquet/video souborů — vestavěný nástroj LeRobotu epizody přeindexuje a
+        <b>automaticky zálohuje originál</b> (do <code class="inline">&lt;repo&gt;_old</code>):
+        <div class="cmd-box"><pre>python -m lerobot.scripts.lerobot_edit_dataset --repo_id local/&lt;task&gt; --operation.type delete_episodes --operation.episode_indices "[1, 9]"</pre></div>
+        Po smazání se čísla epizod v sidecaru <code class="inline">.marks.json</code> posunou — značky
+        zbylých epizod je nutné přemapovat na nové indexy ručně.</div>
     </div>
   </section>
 
@@ -313,6 +347,21 @@
       <div id="cmds-train-baseline"></div>
       <h3>B) Modely jednotlivých kroků</h3>
       <div id="cmds-train-steps"></div>
+      <div class="note"><b>GPU:</b> <code class="inline">pip install lerobot[training]</code> dá na
+        Windows často CPU-only PyTorch (<code class="inline">torch==X.Y.Z+cpu</code>) i na stroji
+        s NVIDIA kartou — <code class="inline">--policy.device=cuda</code> pak tiše spadne zpátky na
+        <code class="inline">cpu</code>. Ověř <code class="inline">python -c "import torch;
+        print(torch.cuda.is_available())"</code>; když <code class="inline">False</code>, dej přes
+        <code class="inline">pip install --force-reinstall --no-deps torch==&lt;verze&gt;
+        torchvision==&lt;verze&gt; --index-url https://download.pytorch.org/whl/cu128</code> (stejné
+        verze, jaké už lerobot nainstaloval — jen s CUDA sestavením).</div>
+      <div class="note"><b>Kolik kroků:</b> u pár epizod (řádově desítky) rychle přetrénuješ malé
+        krokové datasety — při <code class="inline">batch_size=8</code> je 20 000 kroků na datasetu
+        s pár stovkami snímků stovky průchodů (epoch) přes tutéž hrstku demonstrací. Bez validačního
+        splitu (ten by narušil „stejná data pro obě větve") se to nejlíp ověří empiricky: kratší
+        <code class="inline">--save_freq</code> a pár checkpointů vyzkoušet přes
+        <code class="inline">lerobot-rollout</code> — rozhoduje reálný výkon na robotu, ne jen
+        klesající trénovací loss.</div>
     </div>
   </section>
 

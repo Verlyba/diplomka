@@ -23,6 +23,12 @@ const DEFAULTS = {
   camera_height: 480,
   camera_fps: 30,
 
+  camera2_name: '',
+  camera2_index: '1',
+  camera2_width: 640,
+  camera2_height: 480,
+  camera2_fps: 30,
+
   fps: 30,
   data_strategy: 'split',
   task_slug: 'pick_and_place',
@@ -94,11 +100,22 @@ const derive = {
   stepRepo: (c, slug) => `local/${c.task_slug}_${slug}`,
   /** Výstupní adresář tréninku baseline modelu. */
   baselineOut: (c) => `${c.output_root}/${c.task_slug}_${c.policy_type}`,
+  /** Kde na disku doopravdy leží dataset — LeRobotDataset.resume() to
+   *  potřebuje explicitně, jinak by mu psaní do sdílené cache mohlo
+   *  poškodit revizní snapshoty ostatních datasetů. */
+  datasetRoot: (c) => `$HOME/.cache/huggingface/lerobot/${derive.baselineRepo(c)}`,
   /** Výstupní adresář tréninku modelu jednoho kroku. */
   stepOut: (c, slug) => `${c.output_root}/${c.task_slug}_${slug}_${c.policy_type}`,
-  /** Draccus zápis kamer pro lerobot CLI. */
-  camerasArg: (c) => (c.camera_name
-    ? `{ ${c.camera_name}: {type: opencv, index_or_path: ${c.camera_index}, width: ${c.camera_width}, height: ${c.camera_height}, fps: ${c.camera_fps}}}`
-    : ''),
+  /** Draccus zápis kamer pro lerobot CLI — jedna nebo dvě, podle vyplnění. */
+  camerasArg: (c) => {
+    const one = (name, index, width, height, fps) => (name
+      ? `${name}: {type: opencv, index_or_path: ${index}, width: ${width}, height: ${height}, fps: ${fps}}`
+      : '');
+    const entries = [
+      one(c.camera_name, c.camera_index, c.camera_width, c.camera_height, c.camera_fps),
+      one(c.camera2_name, c.camera2_index, c.camera2_width, c.camera2_height, c.camera2_fps),
+    ].filter(Boolean);
+    return entries.length ? `{ ${entries.join(', ')}}` : '';
+  },
   steps: (c) => (c.steps || []).filter((s) => s.slug && s.slug.trim()),
 };

@@ -235,21 +235,29 @@ class Daemon:
 # ── Config helpers shared with the setup page ───────────────────────────────
 
 def cameras_json(cfg: dict) -> str:
-    """Camera map for the daemon ('' when no camera is configured)."""
-    name = (cfg.get("camera_name") or "").strip()
-    source = str(cfg.get("camera_index", "")).strip()
-    if not name or source == "":
-        return ""
-    try:
-        source_val: Any = int(source)
-    except ValueError:
-        source_val = source
-    return json.dumps({name: {
-        "index_or_path": source_val,
-        "width": int(cfg.get("camera_width", 640)),
-        "height": int(cfg.get("camera_height", 480)),
-        "fps": int(cfg.get("camera_fps", 30)),
-    }})
+    """Camera map for the daemon ('' when no camera is configured).
+
+    Supports up to two cameras (camera_* and camera2_*) — same fields the
+    setup page's derive.camerasArg() builds, so both stay in sync.
+    """
+    def entry(prefix: str) -> dict:
+        name = (cfg.get(f"{prefix}_name") or "").strip()
+        source = str(cfg.get(f"{prefix}_index", "")).strip()
+        if not name or source == "":
+            return {}
+        try:
+            source_val: Any = int(source)
+        except ValueError:
+            source_val = source
+        return {name: {
+            "index_or_path": source_val,
+            "width": int(cfg.get(f"{prefix}_width", 640)),
+            "height": int(cfg.get(f"{prefix}_height", 480)),
+            "fps": int(cfg.get(f"{prefix}_fps", 30)),
+        }}
+
+    cams = {**entry("camera"), **entry("camera2")}
+    return json.dumps(cams) if cams else ""
 
 
 def baseline_output_dir(cfg: dict) -> str:

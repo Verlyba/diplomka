@@ -5,7 +5,7 @@ Minimální aplikace k diplomové práci. Dvě stránky, jeden malý Python serv
 běží ve vlastním prostředí a spouští se jako podproces).
 
 * **Setup** (`web/index.html`) — jen generátor příkazů. Vyplníš porty, ID ramen,
-  kameru, kroky úlohy a hyperparametry; stránka z toho poskládá přesné příkazy
+  kameru (až dvě — druhá je volitelná), kroky úlohy a hyperparametry; stránka z toho poskládá přesné příkazy
   pro kalibraci, teleoperaci, nahrávání, rozdělení datasetu, trénink obou větví
   porovnání a spuštění baseline modelu. Nic sama nespouští — příkazy kopíruješ
   do terminálu.
@@ -25,6 +25,41 @@ python -m venv .venv-lerobot
 Samotné `pip install lerobot` nestačí — bez extra `dataset` spadne nahrávání na
 chybějícím balíku `datasets`, bez `training` spadne trénink na `accelerate`,
 bez `feetech` nejdou ovládat motory SO-100/SO-101. Ověřeno na LeRobotu 0.6.1.
+
+### FFmpeg (Windows)
+
+Nahrávání i čtení datasetu (`split_dataset.py`, `merge_datasets.py`, trénink) potřebuje
+FFmpeg ve variantě **„full-shared"** — a **verze 4–8**, ne novější. torchcodec (dekóduje
+video při čtení) novější verze nezná a spadne na `Could not load libtorchcodec`.
+
+```powershell
+winget install BtbN.FFmpeg.GPL.Shared.7.1
+```
+
+Nová PATH položka se ve Windows neprovaří do už běžících procesů hned — než se
+odhlásíš/restartuješ, funguje spolehlivěji hook v conda prostředí, co PATH nastaví
+při každé aktivaci:
+
+```powershell
+# <env>/etc/conda/activate.d/ffmpeg_path.ps1
+$env:Path = 'C:\cesta\k\ffmpeg\bin;' + $env:Path
+```
+
+### GPU (CUDA)
+
+`pip install lerobot[training]` na Windows často stáhne CPU-only PyTorch i na stroji
+s NVIDIA kartou — `--policy.device=cuda` pak tiše spadne na `cpu`. Ověř:
+
+```powershell
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+Když `False`, přeinstaluj `torch`/`torchvision` (stejné verze, jaké lerobot už
+nainstaloval) s CUDA sestavením z indexu PyTorche:
+
+```powershell
+pip install --force-reinstall --no-deps torch==<verze> torchvision==<verze> --index-url https://download.pytorch.org/whl/cu128
+```
 
 ## Spuštění
 
@@ -73,6 +108,41 @@ datasetu, **orchestrace** jsou malé modely trénované na dílčích datasetech
 inferenčním daemonem na stejné frekvenci — baseline jen s vypnutými
 ukončovacími protokoly a jedním modelem na celou úlohu. Rozdíl ve výsledcích
 je rozdílem schémat, ne dat nebo běhového prostředí.
+
+## Provozní poznámky k nahrávání
+
+* **`--resume=true` vyžaduje `--dataset.root`.** `LeRobotDataset.resume()` má
+  bezpečnostní pojistku proti zápisu do sdílené Hub cache — bez explicitního
+  `--dataset.root` spadne na `ValueError: resume() requires an explicit 'root'
+  directory`. Stránka Setup ho do příkazu „Dodatečné epizody" doplňuje sama
+  (`derive.datasetRoot()` v `web/config.js`).
+* **Sidecar `<dataset>.marks.json` se při `--resume` slučuje s existujícím
+  obsahem** (oprava v `record_with_marks.py`) — do verze v této opravě ho každé
+  spuštění přepsalo jen značkami aktuální epizody, takže po pár `--resume` běhy
+  historie starších epizod zmizela. Pokud se to stane (starý export appky), dá
+  se to obnovit jen ručně z terminálového výstupu (`[MARKS] epizoda N: hranice
+  #k v čase ... s`), po smazání epizod dej pozor přemapovat čísla na nové
+  indexy.
+* **Smazání nepovedené epizody** bez ručního zásahu do parquet/video souborů:
+
+  ```powershell
+  python -m lerobot.scripts.lerobot_edit_dataset --repo_id local/<task> --operation.type delete_episodes --operation.episode_indices "[1, 9]"
+  ```
+
+  Přeindexuje zbylé epizody a originál automaticky zálohuje do `<repo>_old`.
+  Čte jen ze zdrojového datasetu, nikdy ho nepřepisuje — `local/pick_and_place`
+  pro monolitický baseline zůstává po zavolání na krokových sub-datasetech
+  nedotčený.
+
+## Trénink na malých datasetech
+
+Při pár desítkách (nebo i jednotkách) epizod odpovídá `--steps` s `batch_size=8`
+řádově vyšším počtem epoch na malých krokových datasetech než na plném
+baseline datasetu — datasety typicky nejsou stejně velké (rozdělením podle
+značek vzniknou kroky různé délky). Bez validačního splitu (ten by narušil
+„stejná data pro obě větve") se optimální počet kroků nejlíp ověří empiricky:
+kratší `--save_freq`, pak pár checkpointů vyzkoušet přes `lerobot-rollout` —
+rozhoduje reálný výkon na robotu, ne jen klesající trénovací loss.
 
 ## Bez hardwaru
 

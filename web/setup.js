@@ -182,8 +182,9 @@ function render() {
   fill('cmds-record', [
     [`Nahrání ${c.episodes} demonstrací`,
       `dataset ${derive.baselineRepo(c)} + značky hranic kroků (mezerník)`, record.join(' ')],
-    ['Dodatečné epizody do stejného datasetu', 'stejný příkaz s --resume; num_episodes = kolik PŘIBUDE',
-      `${record.join(' ')} --resume=true`],
+    ['Dodatečné epizody do stejného datasetu',
+      'stejný příkaz s --resume; num_episodes = kolik PŘIBUDE; --dataset.root je u resume povinný',
+      `${record.join(' ')} --resume=true ${arg('dataset.root', derive.datasetRoot(c))}`],
     ['Nahrávání bez značek', 'čistý lerobot-record, když značky dělat nechceš',
       record.join(' ').replace(`${py} record_with_marks.py`, `${py} -m lerobot.scripts.lerobot_record`)],
   ]);
@@ -258,11 +259,7 @@ function render() {
     arg('policy.path', derive.baselineOut(c)),
     arg('device', c.device), arg('fps', c.fps),
     '--no-triggers', arg('max-seconds', 60)];
-  if (c.camera_name) {
-    baseline.push(arg('camera.name', c.camera_name), arg('camera.index', c.camera_index),
-      arg('camera.width', c.camera_width), arg('camera.height', c.camera_height),
-      arg('camera.fps', c.camera_fps));
-  }
+  if (cameras) baseline.push(arg('robot.cameras', cameras));
   // Oficiální cesta LeRobotu — stejný model, jiný běhový stack. Hodí se jako
   // kontrola, že checkpoint sám o sobě funguje.
   const rollout = [`${py} -m lerobot.scripts.lerobot_rollout`,

@@ -55,6 +55,11 @@ DEFAULT_CONFIG: dict = {
     "camera_width": 640,
     "camera_height": 480,
     "camera_fps": 30,
+    "camera2_name": "",
+    "camera2_index": "1",
+    "camera2_width": 640,
+    "camera2_height": 480,
+    "camera2_fps": 30,
     # task
     "fps": 30,
     "data_strategy": "split",

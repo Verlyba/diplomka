@@ -243,6 +243,14 @@ def main() -> int:
                 if _STATE["path"] is None:
                     root = Path(str(getattr(dataset, "root", "") or ""))
                     _STATE["path"] = str(root.parent / f"{root.name}.marks.json")
+                    # --resume pokračuje v existujícím datasetu — bez načtení
+                    # starého sidecaru by ho první _persist() přepsal a značky
+                    # dřívějších epizod by zmizely.
+                    try:
+                        existing = json.loads(Path(_STATE["path"]).read_text(encoding="utf-8"))
+                        _STATE["marks"] = dict(existing.get("episodes", {}))
+                    except (OSError, ValueError):
+                        pass
                 path = _STATE["path"]
             _say(f"epizoda {episode} — nahrávám (fps {_STATE['fps']:.0f}, značky do {path})")
 
