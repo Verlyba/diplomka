@@ -1,0 +1,21 @@
+# Lokální prostředí a instalace LeRobota — obnoví se z README (kroku 1 v Setupu)
+.venv*/
+venv/
+__pycache__/
+*.pyc
+
+# Uživatelská konfigurace (porty, ID ramen, cesty) — generuje se na stránce Setup
+config.json
+
+# Záznamy běhů orchestrace
+runs/*.json
+
+# LeRobot datasety a checkpointy, kdyby vznikly uvnitř projektu
+outputs/
+local/
+
+# Editor/OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

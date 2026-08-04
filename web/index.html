@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup — porovnání ACT vs. orchestrační schéma</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <h1><span>◆</span> Diplomka — LeRobot: baseline vs. orchestrace</h1>
+  <nav>
+    <a href="index.html" class="active">Setup</a>
+    <a href="orchestrace.html">Orchestrační schéma</a>
+  </nav>
+</header>
+
+<main>
+
+  <section class="block">
+    <h2><b>0</b> Konfigurace</h2>
+    <div class="block-body">
+      <p>Vyplň jednou — všechny příkazy níže se samy přepíšou. Konfigurace se ukládá do
+        prohlížeče a zároveň do <code class="inline">config.json</code> na serveru, odkud ji
+        čte orchestrátor na druhé stránce.</p>
+
+      <fieldset>
+        <legend>Prostředí</legend>
+        <div class="grid">
+          <label class="field">Python s LeRobotem
+            <input data-key="python" type="text">
+            <span class="hint">např. <code class="inline">python</code> nebo cesta do venv</span>
+          </label>
+          <label class="field">Zařízení pro trénink i inferenci
+            <select data-key="device">
+              <option value="cuda">cuda</option>
+              <option value="cpu">cpu</option>
+              <option value="mps">mps</option>
+            </select>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Ramena</legend>
+        <div class="grid">
+          <label class="field">Typ follower ramene
+            <input data-key="robot_type" type="text">
+          </label>
+          <label class="field">Port follower ramene
+            <input data-key="robot_port" type="text">
+            <span class="hint">Windows COM3 · Linux /dev/ttyACM0</span>
+          </label>
+          <label class="field">ID follower ramene
+            <input data-key="robot_id" type="text">
+            <span class="hint">klíč kalibračního souboru</span>
+          </label>
+          <label class="field">Typ leader ramene
+            <input data-key="teleop_type" type="text">
+          </label>
+          <label class="field">Port leader ramene
+            <input data-key="teleop_port" type="text">
+          </label>
+          <label class="field">ID leader ramene
+            <input data-key="teleop_id" type="text">
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Kamera</legend>
+        <div class="grid">
+          <label class="field">Název kamery
+            <input data-key="camera_name" type="text">
+            <span class="hint">prázdné = bez kamery</span>
+          </label>
+          <label class="field">Index / cesta
+            <input data-key="camera_index" type="text">
+          </label>
+          <label class="field">Šířka <input data-key="camera_width" type="number"></label>
+          <label class="field">Výška <input data-key="camera_height" type="number"></label>
+          <label class="field">FPS kamery <input data-key="camera_fps" type="number"></label>
+          <label class="field">FPS řídicí smyčky <input data-key="fps" type="number"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Úloha a její kroky</legend>
+        <div class="grid">
+          <label class="field">Slug úlohy
+            <input data-key="task_slug" type="text">
+            <span class="hint">bez mezer — jde do názvu datasetu</span>
+          </label>
+          <label class="field">Popis úlohy (anotace datasetu)
+            <input data-key="task_description" type="text">
+          </label>
+        </div>
+        <label class="field" style="margin-top:14px">Popis scény pro LLM a VLM
+          <textarea data-key="scene_description"></textarea>
+        </label>
+        <h3>Kroky orchestrace</h3>
+        <p style="color:var(--muted);font-size:13px;margin-top:0">
+          Pořadí = pořadí fází v jedné demonstraci. Popis je zároveň to, co má po kroku
+          vidět VLM inspektor. Zaškrtnutý <b>úchop</b> znamená, že krok končí sevřením objektu
+          (protokol B — proud gripperu), ne dosednutím kloubů.
+        </p>
+        <div id="steps-editor"></div>
+        <button id="add-step" type="button">+ Přidat krok</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>Nahrávání a trénink</legend>
+        <div class="grid">
+          <label class="field">Počet epizod <input data-key="episodes" type="number"></label>
+          <label class="field">Délka epizody (s) <input data-key="episode_time_s" type="number"></label>
+          <label class="field">Čas na reset scény (s) <input data-key="reset_time_s" type="number"></label>
+          <label class="field">Architektura policy
+            <select data-key="policy_type">
+              <option value="act">act</option>
+              <option value="diffusion">diffusion</option>
+              <option value="vqbet">vqbet</option>
+              <option value="smolvla">smolvla</option>
+            </select>
+          </label>
+          <label class="field">Kroků tréninku <input data-key="train_steps" type="number"></label>
+          <label class="field">Batch size <input data-key="batch_size" type="number"></label>
+          <label class="field">save_freq <input data-key="save_freq" type="number"></label>
+          <label class="field">Kořen výstupů tréninku <input data-key="output_root" type="text"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>AI modely v LM Studiu (jen pro orchestraci)</legend>
+        <div class="grid">
+          <label class="field">URL LM Studia <input data-key="lm_url" type="text"></label>
+          <label class="field">Model plánovače (LLM) <input data-key="llm_model" type="text"></label>
+          <label class="field">Model inspektora (VLM) <input data-key="vlm_model" type="text"></label>
+          <label class="field">Timeout kroku (s) <input data-key="latch_timeout_s" type="number"></label>
+        </div>
+      </fieldset>
+
+      <div class="row">
+        <button id="save" class="primary" type="button">Uložit konfiguraci</button>
+        <button id="reset" type="button">Vrátit výchozí</button>
+        <span id="save-status" style="color:var(--muted);font-size:13px"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>1</b> Instalace LeRobota</h2>
+    <div class="block-body">
+      <p>Do vlastního virtuálního prostředí. Samotné <code class="inline">pip install lerobot</code>
+        <b>nestačí</b> — bez extra <code class="inline">dataset</code> spadne nahrávání na chybějícím
+        balíku <code class="inline">datasets</code>, bez <code class="inline">training</code> spadne
+        trénink na <code class="inline">accelerate</code> a bez <code class="inline">feetech</code>
+        nejdou ovládat motory SO-100/SO-101. (Ověřeno na LeRobotu 0.6.1.)</p>
+      <div id="cmds-install"></div>
+      <div class="note">Pro nahrávání s kamerou je na Windows potřeba ještě <b>FFmpeg</b> ve variantě
+        „full-shared" (jinak si LeRobot stěžuje, že nemůže načíst torchcodec, a videa nezakóduje).
+        Volitelně <code class="inline">pip install pynput</code> — klávesy pak fungují i když terminál
+        není v popředí.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>2</b> Zjištění portů a kamer</h2>
+    <div class="block-body">
+      <p>Skripty si samy řeknou o odpojení a připojení zařízení — odpovídáš přímo v terminálu.
+        Zjištěné hodnoty pak vyplň nahoře do konfigurace.</p>
+      <div id="cmds-detect"></div>
+      <div class="note">Příkazy se spouštějí přes <code class="inline">-m</code>, aby bylo jisté,
+        ve kterém Pythonu poběží. LeRobot k nim instaluje i zkratky
+        (<code class="inline">lerobot-find-port</code>, <code class="inline">lerobot-record</code>,
+        <code class="inline">lerobot-train</code> …) — dělají totéž, pokud máš aktivované správné prostředí.</div>
+      <div class="note warn">Mají-li leader a follower stejný USB–sériový čip (např. oba CH340),
+        <code class="inline">lerobot-find-port</code> je nerozliší podle názvu a je snadné je
+        prohodit. Bezpečnější postup: odpojuj kabely jednotlivě a sleduj, co zmizí
+        (Linux: <code class="inline">dmesg -w</code> nebo trvalé odkazy v
+        <code class="inline">/dev/serial/by-id/</code>, které se po odpojení a znovupřipojení
+        nemění). Prohozené <code class="inline">--robot.port</code> / <code class="inline">--teleop.port</code>
+        se navenek chová jako náhodné vysazení — o dost hůř se to hledá zpětně než při zjišťování portu.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>3</b> Kalibrace ramen</h2>
+    <div class="block-body">
+      <p>Bez kalibrace se ramena neshodnou na nulové poloze. Kalibruje se každé rameno zvlášť
+        a hodnoty se ukládají pod <code class="inline">--*.id</code>, který musí být ve všech
+        dalších příkazech stejný.</p>
+      <div id="cmds-calib"></div>
+      <div class="note">Kalibrační soubory:
+        <code class="inline">~/.cache/huggingface/lerobot/calibration/robots/&lt;typ&gt;/&lt;id&gt;.json</code>,
+        pro leader ramena stejná cesta s <code class="inline">teleoperators/</code>.
+        Když chceš kalibrovat od nuly, smaž odpovídající soubor.</div>
+      <div class="note warn">Chyba typu <code class="inline">ValueError: Magnitude ... exceeds 2047</code>
+        znamená, že kloub je mechanicky pootočený přes referenční bod 0/4095 (typicky
+        <code class="inline">wrist_roll</code>) — kalibrace na tom spadne, protože rozsah pohybu
+        vychází nesmyslně velký. Rameno je potřeba fyzicky srovnat do neutrální polohy (osa zápěstí
+        rovná se základnou) ještě před kalibrací, smazat starý kalibrační soubor výše a kalibrovat znovu.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>4</b> Zkouška teleoperace</h2>
+    <div class="block-body">
+      <p>Kontrola, že se ramena hýbou v páru a kamera dává obraz. Až tohle funguje, má smysl nahrávat.</p>
+      <div id="cmds-teleop"></div>
+      <div class="note warn">Občasné <code class="inline">Failed to sync read 'Present_Position'...
+        Incorrect status packet!</code> při souběžném pohybu víc klouby bývá spíš napájení a
+        frekvence sběrnice než chyba v příkazu: zkus slabší zdroj vyměnit za silnější a drž se
+        30 FPS (výchozí hodnota v konfiguraci) — 60 FPS na stejné sběrnici výpadky zhoršuje.
+        Přetrvává-li to i tak, jde o limit ovladače motorů dané desky, ne o něco, co tahle
+        stránka umí opravit z příkazové řádky.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>5</b> Nahrání demonstrací</h2>
+    <div class="block-body">
+      <p>Ať zvolíš kteroukoli strategii, platí totéž: <b>baseline i orchestrace se trénují ze
+        stejných snímků</b>. Liší se jen tím, jestli se celek dělí na kroky, nebo kroky skládají
+        do celku.</p>
+      <fieldset>
+        <legend>Strategie sběru dat</legend>
+        <label class="checkline" style="margin-bottom:8px">
+          <input type="radio" name="strategy" value="split" data-strategy>
+          <span><b>Jedna nahrávka celé úlohy → rozdělení na kroky</b> (doporučeno) — při teleoperaci
+            označuješ mezerníkem přechody mezi fázemi.</span>
+        </label>
+        <label class="checkline">
+          <input type="radio" name="strategy" value="merge" data-strategy>
+          <span><b>Dílčí nahrávky kroků → sloučení do celé úlohy</b> — nic se nemačká, ale každý krok
+            se nahrává zvlášť.</span>
+        </label>
+      </fieldset>
+      <div id="strategy-note" class="note"></div>
+
+      <div data-only="split">
+        <p>Aby šlo nahrávku rozřezat, musíš při teleoperaci označit, kde jedna fáze přechází ve druhou:
+          <b>v okamžiku přechodu zmáčkni mezerník</b>. Skript <code class="inline">record_with_marks.py</code>
+          pustí normální <code class="inline">lerobot-record</code> a jen k němu přidá poslech té klávesy —
+          do nahrávání samotného nezasahuje.</p>
+        <div id="cmds-record"></div>
+        <div class="note">Klávesy v průběhu nahrávání: <b>mezerník</b> (nebo <b>m</b>) označí hranici kroku ·
+          <b>u</b> vezme poslední značku zpět · <b>→</b> / <b>n</b> ukončí epizodu a uloží ji ·
+          <b>←</b> / <b>r</b> zahodí a opakuje epizodu (její značky se zahodí s ní) ·
+          <b>Esc</b> / <b>q</b> ukončí nahrávání.
+          Počet značek na epizodu = <span id="marks-needed"></span></div>
+        <div class="note">Značky se ukládají vedle datasetu do
+          <code class="inline">&lt;dataset&gt;.marks.json</code> jako sekundy od začátku epizody. Čas se
+          počítá ze <b>skutečně zapsaných snímků</b> (snímky ÷ fps), takže sedí na sloupec
+          <code class="inline">timestamp</code> v datasetu i když řídicí smyčka trochu zaostane.</div>
+      </div>
+
+      <div data-only="merge">
+        <p>Každý krok se nahraje jako samostatný dataset. Aby složená epizoda dávala smysl, nahrávej
+          <b>po epizodách</b> — krok 1, 2, 3 v jednom průchodu scénou, pak teprve další epizoda —
+          a mezi kroky scénu nesahej. Jinak by baseline dostal „epizody", které v realitě takhle
+          po sobě nikdy nešly.</p>
+        <div id="cmds-record-steps"></div>
+      </div>
+
+      <div class="note warn"><code class="inline">--dataset.no_stamp=true</code> v příkazu je důležitý:
+        bez něj LeRobot k názvu datasetu přilepí datum a čas nahrávání a dataset se pak jmenuje jinak,
+        než s čím počítají příkazy pro rozdělení a trénink. Dataset se ukládá do
+        <code class="inline">~/.cache/huggingface/lerobot/&lt;repo_id&gt;</code>.</div>
+      <div class="note warn">Druhé spuštění stejného příkazu na existující dataset skončí
+        <code class="inline">FileExistsError: ... File exists</code> — LeRobot cizí složku nepřepíše.
+        Pro <b>nové</b> nahrávání smaž starou složku ručně (<code class="inline">rm -rf
+        &lt;cesta z chyby&gt;</code>) a spusť znovu; pro <b>přidání dalších epizod</b> do stejného
+        datasetu použij variantu s <code class="inline">--resume=true</code> níže — ta samá logika
+        platí pro nahrávání jednotlivých kroků i pro plnou úlohu.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>6</b> <span data-only="split">Rozdělení nahrávky na kroky</span><span data-only="merge">Sloučení kroků do celé úlohy</span></h2>
+    <div class="block-body">
+      <div data-only="split">
+        <p>Rozřeže nahraný dataset na dílčí datasety podle značek z nahrávání.
+          Vytvoří <span id="split-count"></span></p>
+        <div id="cmds-split"></div>
+        <label class="field" style="max-width:420px;margin-top:14px">Pevné hranice v sekundách (jen pro druhý příkaz)
+          <input id="boundaries" type="text" placeholder="4.0,9.0">
+          <span class="hint">stejné pro všechny epizody; počet = počet kroků − 1</span>
+        </label>
+        <div class="note warn">Epizody, ve kterých značek není přesně
+          <span id="marks-needed-2"></span>, skript přeskočí a vypíše je — nahrávka s chybějícím
+          stiskem tedy tiše neposune hranice, jen se do dílčích datasetů nedostane.</div>
+      </div>
+
+      <div data-only="merge">
+        <p>Spojí epizodu <i>i</i> všech kroků za sebe a vytvoří <span id="merge-target"></span>
+          Zároveň uloží sidecar se švy, takže jde dataset kdykoli rozdělit zpátky
+          (<code class="inline">split_dataset.py</code>) — třeba pro kontrolu, že kroky sedí.</p>
+        <div id="cmds-merge"></div>
+        <div class="note warn">Kroky musí mít stejné featury i fps a spojí se jen tolik epizod,
+          kolik jich má nejkratší krok. Skript rozdíly vypíše, než začne.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>7</b> Trénink — obě větve porovnání</h2>
+    <div class="block-body">
+      <p><b>A) Baseline:</b> jeden model na celou úlohu z plného datasetu.
+         <b>B) Orchestrace:</b> jeden malý model na každý krok z dílčích datasetů.
+         Stejná architektura, stejné hyperparametry, stejná data — liší se jen dělení úlohy.</p>
+      <h3>A) Monolitický baseline</h3>
+      <div id="cmds-train-baseline"></div>
+      <h3>B) Modely jednotlivých kroků</h3>
+      <div id="cmds-train-steps"></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>8</b> Spuštění baseline modelu</h2>
+    <div class="block-body">
+      <p>Baseline se pouští stejným daemonem jako kroky orchestrace — jen s vypnutými
+        ukončovacími protokoly a jedním modelem na celou úlohu. Díky tomu se obě větve
+        porovnání liší opravdu jen tím, co se měří.</p>
+      <div id="cmds-baseline-run"></div>
+      <div class="note">Daemon čte příkazy ze standardního vstupu. Po hlášce
+        <code class="inline">[STATUS] DAEMON_READY</code> napiš
+        <code class="inline">SET_TASK:&lt;popis úlohy&gt;</code> a potvrď Enterem;
+        <code class="inline">STOP</code> zastaví, <code class="inline">QUIT</code> ukončí.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>9</b> Spuštění orchestrace</h2>
+    <div class="block-body">
+      <p>Server obsluhuje obě stránky a zároveň běh orchestrace. Musí běžet v Pythonu, který má
+        LeRobota (daemon si spouští sám podle konfigurace).</p>
+      <div id="cmds-serve"></div>
+      <p>Pak otevři <a href="orchestrace.html">stránku Orchestrační schéma</a>, zadej instrukci
+        a spusť běh. Záznamy běhů se ukládají do <code class="inline">runs/</code>.</p>
+    </div>
+  </section>
+
+</main>
+
+<script src="config.js"></script>
+<script src="setup.js"></script>
+</body>
+</html>

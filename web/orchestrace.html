@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orchestrační schéma</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <h1><span>◆</span> Diplomka — LeRobot: baseline vs. orchestrace</h1>
+  <nav>
+    <a href="index.html">Setup</a>
+    <a href="orchestrace.html" class="active">Orchestrační schéma</a>
+  </nav>
+</header>
+
+<main>
+
+  <section class="block">
+    <h2>Co schéma řeší</h2>
+    <div class="block-body">
+      <p>Jedna imitační policy (ACT, Diffusion) spolehlivě zvládne <b>jednu krátkou motorickou
+        dovednost</b> — uchopit kostku, přejet nad krabici. U dlouhé úlohy složené z více fází
+        ale chyby narůstají a model nemá jak poznat, že se odchýlil od očekávaného stavu.</p>
+      <p>Orchestrační schéma proto úlohu rozdělí mezi tři vrstvy. Každá dělá jen to, v čem je
+        nejlepší, a protože se stav scény po každém kroku ověřuje, systém se z chyby umí zotavit
+        přeplánováním místo toho, aby dojel celou trajektorii naslepo.</p>
+      <div class="roles">
+        <div class="role">
+          <div class="n">vrstva 1</div>
+          <h4>LLM plánovač („CEO")</h4>
+          <p>Dostane instrukci a katalog dovedností projektu. Vrátí čisté JSON pole ID kroků.
+            Běží v LM Studiu.</p>
+        </div>
+        <div class="role">
+          <div class="n">vrstva 2</div>
+          <h4>Per-step policy („svaly")</h4>
+          <p>Malé ACT modely — jeden na každý krok. Trénují se z dílčích datasetů vzniklých
+            rozdělením jedné nahrávky. Za běhu je drží trvalý daemon a přepínají se výměnou vah.</p>
+        </div>
+        <div class="role">
+          <div class="n">vrstva 3</div>
+          <h4>VLM inspektor</h4>
+          <p>Po každém kroku dostane snímek scény a otázku, jestli krok dopadl. Vrací verdikt
+            a značku chyby, která řídí přeplánování.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Schéma běhu</h2>
+    <div class="block-body">
+      <div class="flow">
+        <div class="node io">
+          <div class="t">Instrukce uživatele</div>
+          <div class="d">„ukliď kostku do krabice" — zadaná níže na této stránce</div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node">
+          <div class="t">1 · LLM plánovač — plán</div>
+          <div class="d">LM Studio vrátí JSON pole ID dovedností, např. ["pick_and_place"]</div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node">
+          <div class="t">2 · Resolver — validace a expanze</div>
+          <div class="d">Neznámá ID zahodí, cíl rozbalí na seřazené kroky: [grab_cube, move_to_box, release]</div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="loop">
+          <div class="label">smyčka přes kroky plánu</div>
+          <div class="node">
+            <div class="t">3 · Výměna modelu (SET_POLICY)</div>
+            <div class="d">Daemon vymění váhy policy — robot i kamera zůstávají připojené</div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">4 · Exekuce (SET_TASK) + zámek úlohy</div>
+            <div class="d">Policy řídí robota na 30 Hz; do konce kroku se nepustí žádný další příkaz</div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">5 · Ukončení kroku (protokol A / B)</div>
+            <div class="d">Dosednutí kloubů nebo proudová špička gripperu → TASK_DONE → zámek se odemkne</div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">6 · Snímek scény (SNAP)</div>
+            <div class="d">Kameru vlastní daemon, takže snímek pro inspektora vydává on</div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">7 · Verifikace VLM</div>
+            <div class="d">„Je kostka v gripperu?" → SUCCESS pokračuje, chybová značka spouští re-plán</div>
+          </div>
+          <div class="branch">
+            <div class="ok">✓ úspěch → další krok plánu</div>
+            <div class="fail">✗ neúspěch → nový plán s kontextem chyby (max 3×)</div>
+          </div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node io">
+          <div class="t">Záznam běhu</div>
+          <div class="d">plán, kroky, důvody ukončení, verdikty a časy → <code class="inline">runs/&lt;čas&gt;.json</code></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Detaily, na kterých to stojí</h2>
+    <div class="block-body">
+      <table class="plain">
+        <tr>
+          <th style="width:190px">Mechanismus</th>
+          <th>K čemu je</th>
+        </tr>
+        <tr>
+          <td>Protokol A</td>
+          <td>Ukončení kroku dosednutím: rozdíl cílové a skutečné polohy pod 0,005 rad na všech
+            kloubech po 5 snímků za sebou znamená, že pohybová fáze skončila.</td>
+        </tr>
+        <tr>
+          <td>Protokol B</td>
+          <td>Ukončení kroku kontaktem: proud serva gripperu přes 250 mA = objekt je sevřen.
+            Ukončí úchopové kroky dřív, než by policy „tlačila do prázdna".</td>
+        </tr>
+        <tr>
+          <td>Zámek úlohy</td>
+          <td>Dokud krok neskončí, orchestrátor nepustí žádný další příkaz. Timeout kroku je
+            pojistka proti zaseknutí — po jeho vypršení jde do daemonu STOP.</td>
+        </tr>
+        <tr>
+          <td>Hot-swap vah</td>
+          <td>Mezi kroky se mění jen model, ne proces: sériový port ani kamery nemění vlastníka,
+            takže se neztrácí čas restartem a nehrozí kolize na sběrnici.</td>
+        </tr>
+        <tr>
+          <td>Resolver plánu</td>
+          <td>Plán z LLM se validuje proti katalogu dovedností. Halucinovaná ID se zahodí a zaloguje;
+            ID celé úlohy se rozbalí na její kroky v pořadí ze setupu.</td>
+        </tr>
+        <tr>
+          <td>Re-plán</td>
+          <td>Po neúspěšné verifikaci dostane plánovač kontext selhání („krok X selhal kvůli Y")
+            a sestaví nový plán. Po třech neúspěších běh končí chybou.</td>
+        </tr>
+      </table>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Proč je porovnání férové</h2>
+    <div class="block-body">
+      <p>Obě větve experimentu vycházejí ze <b>stejných demonstrací</b>: úloha se nahraje jednou,
+        baseline se trénuje na celém datasetu a modely kroků na dílčích datasetech vyříznutých
+        z týchž epizod. Žádná strana nemá data navíc.</p>
+      <p>Stejná je i exekuce: baseline i kroky orchestrace jede tentýž
+        <code class="inline">inference_daemon.py</code> na stejné frekvenci. Baseline má jen
+        vypnuté ukončovací protokoly a jeden model na celou úlohu. Rozdíl ve výsledcích je tedy
+        rozdílem schémat, ne prostředí.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Běh</h2>
+    <div class="block-body">
+      <div id="cfg-summary" class="note">Načítám konfiguraci…</div>
+
+      <label class="field">Instrukce pro robota
+        <input id="instruction" type="text" placeholder="ukliď kostku do krabice">
+      </label>
+
+      <div class="row" style="margin:14px 0">
+        <button id="start" class="primary" type="button">Spustit orchestraci</button>
+        <button id="stop" class="danger" type="button" disabled>Zastavit</button>
+        <span class="status-pill" id="state">IDLE</span>
+        <label class="checkline"><input id="skip-planner" type="checkbox"> bez LLM (pevné pořadí kroků)</label>
+        <label class="checkline"><input id="skip-inspector" type="checkbox"> bez VLM (kroky se neověřují)</label>
+      </div>
+
+      <div class="run-grid">
+        <div>
+          <h3>Plán</h3>
+          <ul class="plan" id="plan"><li>zatím žádný</li></ul>
+          <h3>Log</h3>
+          <div id="log"></div>
+        </div>
+        <div>
+          <h3>Poslední snímek pro inspektora</h3>
+          <img id="snapshot" alt="snímek scény z daemonu">
+          <div id="no-snapshot" style="color:var(--muted);font-size:13px">zatím žádný snímek</div>
+          <div class="telemetry" id="telemetry"></div>
+          <h3>Výsledek</h3>
+          <div class="summary" id="summary" style="color:var(--muted)">běh zatím neproběhl</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="config.js"></script>
+<script src="run.js"></script>
+</body>
+</html>
