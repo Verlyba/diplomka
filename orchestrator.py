@@ -27,18 +27,23 @@ from typing import Any, Callable
 HERE = Path(__file__).resolve().parent
 
 PLANNER_SYSTEM_PROMPT = (
-    "You are a robotic arm task planner. Decompose the user's instruction into an "
-    "ordered plan built ONLY from the listed skill IDs. Respond with a pure JSON "
-    "array of strings and nothing else."
+    "You are an intelligent robotic arm task planner.\n"
+    "Your objective is to analyze the user's high-level goal (and any error feedback from a previous step) "
+    "and select an ordered sequence of atomic skill IDs to execute.\n\n"
+    "RULES:\n"
+    "1. Select skill IDs ONLY from the provided list of Available Atomic Skills.\n"
+    "2. Each skill has an ID, a description of what action it performs, and its expected outcome.\n"
+    "3. If a step previously failed (e.g. [object_missed] or [object_slipped]), generate a recovery plan starting with retrying that step or resuming the sequence.\n"
+    "4. Return ONLY a valid JSON array of skill ID strings (e.g. [\"skill_a\", \"skill_b\"]). No extra text, markdown wrappers, or explanations."
 )
 
 VERIFY_PROMPT = (
-    "The robot just finished the step '{step}'. Expected result: {expected}\n"
+    "The robot just finished executing step '{step}'. Expected outcome: {expected}\n"
     "Look at the image and answer with EXACTLY one of these tags:\n"
-    '- "SUCCESS" if the step finished correctly\n'
-    '- "[object_missed]" if the robot missed the object\n'
-    '- "[object_slipped]" if the object fell out of the gripper\n'
-    '- "[target_moved]" if the target container moved\n'
+    '- "SUCCESS" if the expected outcome is clearly achieved in the image\n'
+    '- "[object_missed]" if the robot missed or failed to reach the object\n'
+    '- "[object_slipped]" if the object slipped or fell out of the gripper\n'
+    '- "[target_moved]" if the target container or bowl moved unexpectedly\n'
     '- "[unknown_failure]" for any other failure\n'
     "Answer with the tag only, no other text."
 )
@@ -203,9 +208,12 @@ class Daemon:
         """SET_TASK + wait for TASK_DONE (the task latch). Returns the reason."""
         self._task_done.clear()
         self._done_reason = ""
-        # `|grasp` tells the daemon this step ends on contact (protocol B)
-        self._send(f"SET_TASK:{task}|grasp" if is_grasp else f"SET_TASK:{task}")
-        if not self._task_done.wait(timeout):
+        cmd = f"SET_TASK:{task}"
+        if is_grasp:
+            cmd += "|grasp"
+        cmd += f"|timeout={timeout:.1f}"
+        self._send(cmd)
+        if not self._task_done.wait(timeout + 3.0):
             self._send("STOP")
             return f"timeout po {timeout:.0f} s"
         return self._done_reason
@@ -306,14 +314,13 @@ class Orchestrator:
         cfg = self.cfg
         lines = [PLANNER_SYSTEM_PROMPT]
         if cfg.get("scene_description"):
-            lines.append("\nScene: " + cfg["scene_description"])
-        lines.append("\nAvailable skills:")
-        lines.append(f"- ID: '{cfg.get('task_slug')}' (high-level goal) — "
-                     f"{cfg.get('task_description', '')}")
-        for step in step_catalog(cfg):
-            lines.append(f"- ID: '{step['slug']}' (sub-step of '{cfg.get('task_slug')}') — "
-                         f"{step['description']}")
-        lines.append("\nUse ONLY these IDs.")
+            lines.append("\nEnvironment & Scene Description:\n" + cfg["scene_description"])
+        lines.append(f"\nOverall Task Goal: '{cfg.get('task_slug')}' — {cfg.get('task_description', '')}")
+        lines.append("\nAvailable Atomic Skills (use ONLY these skill IDs):")
+        for s in step_catalog(cfg):
+            grasp_type = " (Grasping action)" if s.get("grasp") else ""
+            lines.append(f"- Skill ID: '{s['slug']}' | Action/Outcome: {s['description']}{grasp_type}")
+        lines.append("\nRespond ONLY with a JSON array of skill IDs.")
         return "\n".join(lines)
 
     def _create_plan(self, instruction: str) -> list[str]:
@@ -361,19 +368,22 @@ class Orchestrator:
             prompt = f"Scene: {self.cfg['scene_description']}\n\n" + prompt
         reply = self.lm.chat_with_image(self.cfg.get("vlm_model", "local-vlm"),
                                         prompt, image_b64)
-        upper = reply.strip().upper()
-        if "SUCCESS" in upper:
-            return True, "SUCCESS"
+        raw_reply = reply.strip()
+        self.emit("log", level="INFO",
+                  message=f"VLM inspektor ({self.cfg.get('vlm_model', 'vlm')}) odpovídá: „{raw_reply}\"")
+        upper = raw_reply.upper()
         for tag in FAILURE_TAGS:
             if tag.upper() in upper:
                 return False, tag
+        if "SUCCESS" in upper:
+            return True, "SUCCESS"
         return False, "[unknown_failure]"
 
     # -- the loop ----------------------------------------------------------
     def run(self, instruction: str) -> dict:
         cfg = self.cfg
         max_replans = int(cfg.get("max_replans", 3))
-        latch_timeout = float(cfg.get("latch_timeout_s", 60))
+        step_timeout = float(cfg.get("step_timeout_s", 8.0))
         replans = 0
         started = time.time()
         self.results = []
@@ -408,9 +418,9 @@ class Orchestrator:
                               message=f"Hot-swap modelu na krok '{step}'.")
                     self.daemon.set_policy(policy_path)
 
-                # 2) execution under the task latch
+                # 2) execution under the task latch (bounded by step duration / 1 episode)
                 is_grasp = any(s["slug"] == step and s["grasp"] for s in step_catalog(cfg))
-                reason = self.daemon.run_task(step, latch_timeout, is_grasp)
+                reason = self.daemon.run_task(step, step_timeout, is_grasp)
                 self.emit("step", index=index, step=step, phase="executed", reason=reason)
 
                 # 3) the inspector
@@ -442,9 +452,16 @@ class Orchestrator:
                 self.emit("log", level="WARN",
                           message=f"Krok '{step}' selhal ({tag}) — re-plán {replans}/{max_replans}.")
                 self.emit("state", state="PLANNING")
-                context = (f"Step '{step}' failed with cause '{tag}'. Adapt the remaining plan "
-                           f"accordingly. Original instruction: '{instruction}'")
+                context = (f"The robot tried to execute '{instruction}', but step '{step}' failed ({tag}). "
+                           f"Generate a new recovery plan starting from '{step}' to finish the instruction '{instruction}'.")
                 plan = self._resolve_plan(self._create_plan(context))
+                if not plan:
+                    # Robust fallback: retry from the failed step onwards
+                    all_slugs = [s["slug"] for s in step_catalog(cfg)]
+                    if step in all_slugs:
+                        plan = all_slugs[all_slugs.index(step):]
+                        self.emit("log", level="INFO",
+                                  message=f"Záložní re-plán: opakuji od kroku '{step}' -> {plan}")
                 self.emit("plan", steps=plan, replan=replans)
                 index = 0
                 if not plan:

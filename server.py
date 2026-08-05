@@ -40,7 +40,7 @@ CONFIG_FILE = HERE / "config.json"
 
 DEFAULT_CONFIG: dict = {
     # environment
-    "python": "python",
+    "python": "C:/Users/green/miniconda3/envs/lerobot/python.exe",
     "device": "cuda",
     # arms
     "robot_type": "so101_follower",
@@ -87,6 +87,7 @@ DEFAULT_CONFIG: dict = {
     "vlm_model": "local-vlm",
     # orchestration
     "latch_timeout_s": 60,
+    "step_timeout_s": 8,
     "max_replans": 3,
 }
 

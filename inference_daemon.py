@@ -260,15 +260,43 @@ def connect_robot(robot_type: str, port: str, robot_id: str, cameras_json: str) 
 def cache_frame(obs: dict) -> None:
     global last_frame
     for value in obs.values():
-        if isinstance(value, np.ndarray) and value.ndim == 3 and value.shape[2] in (1, 3, 4):
-            with _frame_lock:
-                last_frame = value
-            return
+        arr = value
+        if hasattr(arr, "cpu") and hasattr(arr, "numpy"):
+            try:
+                arr = arr.cpu().numpy()
+            except Exception:
+                continue
+        if isinstance(arr, np.ndarray) and arr.ndim == 3:
+            if arr.shape[0] in (1, 3, 4) and arr.shape[2] not in (1, 3, 4):
+                arr = np.transpose(arr, (1, 2, 0))
+            if arr.shape[2] in (1, 3, 4):
+                if arr.dtype != np.uint8:
+                    if arr.max() <= 1.0:
+                        arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+                    else:
+                        arr = arr.clip(0, 255).astype(np.uint8)
+                with _frame_lock:
+                    last_frame = arr
+                return
 
 
 def snapshot_b64() -> str:
     with _frame_lock:
         frame = last_frame
+    if frame is None and robot is not None and getattr(robot, "cameras", None):
+        try:
+            for cam in robot.cameras.values():
+                cam_frame = cam.async_read() if hasattr(cam, "async_read") else cam.read()
+                if cam_frame is not None:
+                    if hasattr(cam_frame, "cpu") and hasattr(cam_frame, "numpy"):
+                        cam_frame = cam_frame.cpu().numpy()
+                    if isinstance(cam_frame, np.ndarray) and cam_frame.ndim == 3:
+                        if cam_frame.shape[0] in (1, 3, 4) and cam_frame.shape[2] not in (1, 3, 4):
+                            cam_frame = np.transpose(cam_frame, (1, 2, 0))
+                        frame = cam_frame
+                        break
+        except Exception as e:
+            log.warning("Fallback camera read failed: %s", e)
     if frame is None:
         return ""
     try:
@@ -340,12 +368,20 @@ def stdin_reader(max_seconds: float) -> None:
             continue
 
         if line.startswith("SET_TASK:"):
-            # "SET_TASK:<úkol>" nebo "SET_TASK:<úkol>|grasp" — druhý tvar říká,
-            # že krok končí sevřením objektu (protokol B).
-            task = line[len("SET_TASK:"):].strip()
-            is_grasp = task.endswith("|grasp")
-            if is_grasp:
-                task = task[:-len("|grasp")].strip()
+            raw = line[len("SET_TASK:"):].strip()
+            parts = raw.split("|")
+            task = parts[0].strip()
+            is_grasp = False
+            timeout_s = 0.0
+            for p in parts[1:]:
+                p = p.strip()
+                if p == "grasp":
+                    is_grasp = True
+                elif p.startswith("timeout="):
+                    try:
+                        timeout_s = float(p[len("timeout="):])
+                    except ValueError:
+                        pass
             if not task:
                 continue
             active_task = task
@@ -355,7 +391,8 @@ def stdin_reader(max_seconds: float) -> None:
                     policy.reset()
                 except Exception:
                     pass
-            task_deadline = time.time() + max_seconds if max_seconds > 0 else 0.0
+            eff_timeout = timeout_s if timeout_s > 0 else max_seconds
+            task_deadline = time.time() + eff_timeout if eff_timeout > 0 else 0.0
             state = "RUNNING"
             print(f"[STATUS] TASK_STARTED: {task}", flush=True)
 

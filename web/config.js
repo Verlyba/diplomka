@@ -7,7 +7,7 @@
 const STORAGE_KEY = 'diplomka.config';
 
 const DEFAULTS = {
-  python: 'python',
+  python: 'C:/Users/green/miniconda3/envs/lerobot/python.exe',
   device: 'cuda',
 
   robot_type: 'so101_follower',
@@ -55,6 +55,7 @@ const DEFAULTS = {
   vlm_model: 'local-vlm',
 
   latch_timeout_s: 60,
+  step_timeout_s: 8,
   max_replans: 3,
 };
 
