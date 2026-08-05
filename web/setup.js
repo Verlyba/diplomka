@@ -259,7 +259,20 @@ function render() {
     arg('policy.path', derive.baselineOut(c)),
     arg('device', c.device), arg('fps', c.fps),
     '--no-triggers', arg('max-seconds', 60)];
-  if (cameras) baseline.push(arg('robot.cameras', cameras));
+  // inference_daemon.py má vlastní argparse, ne draccus — --robot.cameras tam
+  // (na rozdíl od teleop/record/rollout) čeká striktní JSON, ne tenhle zápis
+  // bez uvozovek. Bezpečnější jsou jeho jednotlivé --camera./--camera2. flagy
+  // (bez závorek a uvozovek, nemusí se nic escapovat).
+  if (c.camera_name) {
+    baseline.push(arg('camera.name', c.camera_name), arg('camera.index', c.camera_index),
+      arg('camera.width', c.camera_width), arg('camera.height', c.camera_height),
+      arg('camera.fps', c.camera_fps));
+  }
+  if (c.camera2_name) {
+    baseline.push(arg('camera2.name', c.camera2_name), arg('camera2.index', c.camera2_index),
+      arg('camera2.width', c.camera2_width), arg('camera2.height', c.camera2_height),
+      arg('camera2.fps', c.camera2_fps));
+  }
   // Oficiální cesta LeRobotu — stejný model, jiný běhový stack. Hodí se jako
   // kontrola, že checkpoint sám o sobě funguje.
   const rollout = [`${py} -m lerobot.scripts.lerobot_rollout`,

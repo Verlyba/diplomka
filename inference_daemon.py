@@ -95,7 +95,24 @@ def _import_first(*candidates: tuple[str, str]):
 
 try:
     from lerobot.configs.policies import PreTrainedConfig
-    from lerobot.robots import RobotConfig  # noqa: F401 — registers subclasses
+    # lerobot/robots/__init__.py only exports RobotConfig itself — it does NOT
+    # import the concrete robot submodules, so @RobotConfig.register_subclass
+    # decorators (e.g. "so101_follower" in robots/so_follower) never run unless
+    # something imports those submodules explicitly. Without this, get_choice_class
+    # raises KeyError and connect_robot() silently falls back to SIMULATED mode.
+    from lerobot.robots import (  # noqa: F401 — registers subclasses
+        RobotConfig,
+        bi_openarm_follower,
+        bi_rebot_b601_follower,
+        bi_so_follower,
+        hope_jr,
+        koch_follower,
+        lekiwi,
+        omx_follower,
+        openarm_follower,
+        rebot_b601_follower,
+        so_follower,
+    )
     from lerobot.robots.utils import make_robot_from_config
 
     get_policy_class = _import_first(
@@ -379,12 +396,18 @@ def main() -> None:
     ap.add_argument("--robot.port", dest="robot_port", default="")
     ap.add_argument("--robot.cameras", dest="robot_cameras", default="",
                     help='JSON map {name: {index_or_path, width, height, fps}}')
-    # Shell-friendly alternative to --robot.cameras for hand-typed runs
+    # Shell-friendly alternative to --robot.cameras for hand-typed runs — no
+    # braces/quotes to escape, so it's safe to paste into any shell as-is.
     ap.add_argument("--camera.name", dest="camera_name", default="")
     ap.add_argument("--camera.index", dest="camera_index", default="0")
     ap.add_argument("--camera.width", dest="camera_width", type=int, default=640)
     ap.add_argument("--camera.height", dest="camera_height", type=int, default=480)
     ap.add_argument("--camera.fps", dest="camera_fps", type=int, default=30)
+    ap.add_argument("--camera2.name", dest="camera2_name", default="")
+    ap.add_argument("--camera2.index", dest="camera2_index", default="1")
+    ap.add_argument("--camera2.width", dest="camera2_width", type=int, default=640)
+    ap.add_argument("--camera2.height", dest="camera2_height", type=int, default=480)
+    ap.add_argument("--camera2.fps", dest="camera2_fps", type=int, default=30)
     ap.add_argument("--policy.path", dest="policy_path", required=True)
     ap.add_argument("--device", dest="device", default="")
     ap.add_argument("--fps", dest="fps", type=int, default=30)
@@ -397,15 +420,21 @@ def main() -> None:
 
     use_triggers = not args.no_triggers
 
+    def _cam_entry(name: str, index: str, width: int, height: int, fps: int) -> dict:
+        try:
+            source: object = int(index)
+        except ValueError:
+            source = index
+        return {name: {"index_or_path": source, "width": width, "height": height, "fps": fps}}
+
     cameras = args.robot_cameras
     if not cameras and args.camera_name:
-        try:
-            source: object = int(args.camera_index)
-        except ValueError:
-            source = args.camera_index
-        cameras = json.dumps({args.camera_name: {
-            "index_or_path": source, "width": args.camera_width,
-            "height": args.camera_height, "fps": args.camera_fps}})
+        cams: dict = _cam_entry(args.camera_name, args.camera_index,
+                                 args.camera_width, args.camera_height, args.camera_fps)
+        if args.camera2_name:
+            cams.update(_cam_entry(args.camera2_name, args.camera2_index,
+                                    args.camera2_width, args.camera2_height, args.camera2_fps))
+        cameras = json.dumps(cams)
 
     # 1. Device
     if args.device:
