@@ -116,6 +116,45 @@ pozice odesílá znovu každý tik po celou dobu čekání na další `SET_TASK`
 jen jednou. `predict_and_act()` teď vrací i poslední odeslanou akci pro
 tento účel.
 
+## 2026-08-08 — proč tři modelové role, a proč re-plán musí vidět snímek
+
+Vznikla otázka, jestli tři "modely" (LLM plánovač / VLM inspektor / krokové
+ACT politiky) nejsou zbytečné — nešlo by to na dva?
+
+**Rozhodnutí: necháváme tři role.** Krokové ACT politiky jsou samostatná
+kategorie (řízení motorů, ne uvažování), takže reálná otázka byla LLM
+plánovač vs. VLM inspektor. Důvody proti sloučení do jednoho vision modelu:
+
+- **Cena/frekvence.** VLM inspektor se volá po **každém** kroku (časté,
+  levné, úzký úkol — jedno slovo z pevné množiny tagů). Plánovač se volá jen
+  na začátku běhu a při selhání (vzácné). Sloučení by znamenalo, že i ten
+  časný happy-path check nese těžší kontext (celý katalog dovedností +
+  instrukce k plánování) — zbytečná latence na cestě, která se používá
+  nejčastěji.
+- **Specializace modelu.** Appka už teď běžně používá dva různé modely
+  v LM Studiu (`google/gemma-4-e4b` jako plánovač, `qwen2.5-vl-7b-instruct`
+  jako inspektor) — malý vision model dobrý na úzkou vizuální klasifikaci
+  nemusí být stejně dobrý na spolehlivé generování JSON polí přes otevřený
+  katalog dovedností, a naopak. Rozdělení rolí umožňuje vybrat pro každou
+  vhodný model nezávisle.
+
+**Ale skutečná díra byla jinde:** re-plán CEO dostával jen **text** — jméno
+selhaného kroku a tag (`[target_moved]` apod.), nikdy ne fotku, kterou VLM
+zrovna vyhodnocovalo. Tag je jen nejbližší kategorie z pevné čtveřice
+možností — pokud se scéna změnila způsobem, co se do žádného tagu nevejde
+(např. v záběru přibyl další objekt), CEO to nemá šanci poznat, protože fotku
+nikdy neviděl. Bez obrázku je re-plán ve skutečnosti jen "uhodni opravu
+z jednoho slova".
+
+**Oprava:** `_create_plan()` teď bere nepovinný `image_b64` a při re-plánu
+(ne při úvodním plánu — na začátku běhu žádný snímek ještě neexistuje) se
+posílá **stejná fotka**, kterou právě vyhodnotil VLM inspektor. Prompt
+plánovače byl doplněn o instrukci: věř fotce víc než textu tagu. Pokud
+nakonfigurovaný model plánovače neumí obrázky (LM Studio na to typicky
+odpoví HTTP chybou), kód to odchytí a zkusí re-plán znovu jen s textem —
+model plánovače tedy musí být vision-capable, aby z týhle opravy byl plný
+užitek, jinak appka jen tiše spadne zpátky na starší (slepé) chování.
+
 ## Otevřené otázky / co ověřit dál
 
 - Spustit pár testovacích běhů s novými `timeout_s` a zkontrolovat, jestli

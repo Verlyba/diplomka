@@ -157,6 +157,10 @@
           <label class="field">Model inspektora (VLM) <input data-key="vlm_model" type="text"></label>
           <label class="field">Timeout kroku (s) <input data-key="latch_timeout_s" type="number"></label>
         </div>
+        <div class="note">Model plánovače dostává při re-plánu po selhání kroku i snímek scény
+          (stejný, co právě posoudil inspektor) — musí tedy <b>umět obraz</b>, jinak appka tiše
+          spadne zpátky na re-plán jen podle textového tagu selhání (méně spolehlivé, protože
+          tag popisuje jen nejbližší ze čtyř kategorií, ne skutečný stav stolu).</div>
       </fieldset>
 
       <div class="row">

@@ -37,7 +37,11 @@ PLANNER_SYSTEM_PROMPT = (
     "starting AT the failed step, not earlier. Do not repeat steps that already succeeded unless the failure "
     "reason implies they must be redone (e.g. the grasped object was dropped, or the target moved so an "
     "earlier positioning step is no longer valid).\n"
-    "4. Return ONLY a valid JSON array of skill ID strings (e.g. [\"skill_a\", \"skill_b\"]). No extra text, markdown wrappers, or explanations."
+    "4. When a photo of the current scene is attached, it shows the ACTUAL current state of the workspace — "
+    "trust it over the failure tag text. The tag names only the closest category of what the inspector saw; "
+    "the photo may show a different or additional problem (e.g. a second object now in the way, the gripper "
+    "empty when the tag says [target_moved]). Base the recovery plan on what the photo actually shows.\n"
+    "5. Return ONLY a valid JSON array of skill ID strings (e.g. [\"skill_a\", \"skill_b\"]). No extra text, markdown wrappers, or explanations."
 )
 
 VERIFY_PROMPT = (
@@ -333,19 +337,50 @@ class Orchestrator:
         lines.append("\nRespond ONLY with a JSON array of skill IDs.")
         return "\n".join(lines)
 
-    def _create_plan(self, instruction: str) -> list[str]:
+    def _create_plan(self, instruction: str, image_b64: str | None = None) -> list[str]:
+        """Ask the CEO for a plan. On re-plan calls image_b64 is the same
+        snapshot the inspector just judged — the CEO reasons from the failure
+        *tag* either way, but the tag alone can't describe anything outside
+        its small fixed vocabulary (a second object in the way, the wrong
+        thing moved, ...). Without the photo, re-planning is really just
+        "guess a fix from one word"; with it, the CEO can react to whatever
+        actually changed on the table, not just the closest matching tag.
+        """
         if self.cfg.get("skip_planner"):
             plan = [s["slug"] for s in step_catalog(self.cfg)]
             self.emit("log", level="WARN",
                       message="Plánovač přeskočen — použito pevné pořadí kroků.")
             return plan
 
-        self.emit("log", level="INFO", message=f"CEO plánuje: „{instruction}\"")
-        reply = self.lm.chat(
-            self.cfg.get("llm_model", "local-llm"),
-            [{"role": "system", "content": self._build_planner_prompt()},
-             {"role": "user", "content": instruction}],
-        )
+        self.emit("log", level="INFO",
+                  message=f"CEO plánuje: „{instruction}\"" + (" (se snímkem scény)" if image_b64 else ""))
+        system = self._build_planner_prompt()
+        model = self.cfg.get("llm_model", "local-llm")
+
+        def ask(with_image: bool) -> str:
+            user_content: Any = instruction
+            if with_image and image_b64:
+                user_content = [
+                    {"type": "text", "text": instruction},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                ]
+            return self.lm.chat(model, [{"role": "system", "content": system},
+                                        {"role": "user", "content": user_content}])
+
+        try:
+            reply = ask(with_image=True)
+        except Exception as e:
+            if not image_b64:
+                raise
+            # The configured planner model may not accept image input at all
+            # (LM Studio then usually answers with an HTTP error rather than
+            # silently ignoring the image) — fall back to text-only so a
+            # non-vision planner model doesn't hard-fail the whole re-plan.
+            self.emit("log", level="WARN",
+                      message=f"Plánovač se snímkem selhal ({e}) — zkouším bez snímku "
+                              "(model plánovače asi neumí obraz).")
+            reply = ask(with_image=False)
+
         plan = parse_json_array(reply)
         if plan is None:
             raise RuntimeError(f"CEO nevrátil platné JSON pole: {reply[:200]}")
@@ -494,7 +529,9 @@ class Orchestrator:
                 self.emit("state", state="PLANNING")
                 context = (f"The robot tried to execute '{instruction}', but step '{step}' failed ({tag}). "
                            f"Generate a new recovery plan starting from '{step}' to finish the instruction '{instruction}'.")
-                plan = self._resolve_plan(self._create_plan(context))
+                # Same snapshot the inspector just judged — the CEO should see
+                # what actually changed on the table, not just the tag word.
+                plan = self._resolve_plan(self._create_plan(context, image_b64=image or None))
                 if not plan:
                     # Robust fallback: retry from the failed step onwards
                     all_slugs = [s["slug"] for s in step_catalog(cfg)]
