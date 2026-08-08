@@ -33,7 +33,10 @@ PLANNER_SYSTEM_PROMPT = (
     "RULES:\n"
     "1. Select skill IDs ONLY from the provided list of Available Atomic Skills.\n"
     "2. Each skill has an ID, a description of what action it performs, and its expected outcome.\n"
-    "3. If a step previously failed (e.g. [object_missed] or [object_slipped]), generate a recovery plan starting with retrying that step or resuming the sequence.\n"
+    "3. If a step previously failed (e.g. [object_missed] or [object_slipped]), generate a recovery plan "
+    "starting AT the failed step, not earlier. Do not repeat steps that already succeeded unless the failure "
+    "reason implies they must be redone (e.g. the grasped object was dropped, or the target moved so an "
+    "earlier positioning step is no longer valid).\n"
     "4. Return ONLY a valid JSON array of skill ID strings (e.g. [\"skill_a\", \"skill_b\"]). No extra text, markdown wrappers, or explanations."
 )
 
@@ -284,9 +287,16 @@ def step_catalog(cfg: dict) -> list[dict]:
     for step in cfg.get("steps", []):
         slug = (step.get("slug") or "").strip()
         if slug:
-            out.append({"slug": slug,
-                        "description": (step.get("description") or "").strip(),
-                        "grasp": bool(step.get("grasp"))})
+            entry = {"slug": slug,
+                     "description": (step.get("description") or "").strip(),
+                     "grasp": bool(step.get("grasp"))}
+            timeout_s = step.get("timeout_s")
+            if timeout_s not in (None, ""):
+                try:
+                    entry["timeout_s"] = float(timeout_s)
+                except (TypeError, ValueError):
+                    pass
+            out.append(entry)
     return out
 
 
@@ -383,7 +393,7 @@ class Orchestrator:
     def run(self, instruction: str) -> dict:
         cfg = self.cfg
         max_replans = int(cfg.get("max_replans", 3))
-        step_timeout = float(cfg.get("step_timeout_s", 8.0))
+        default_step_timeout = float(cfg.get("step_timeout_s", 8.0))
         replans = 0
         started = time.time()
         self.results = []
@@ -404,23 +414,44 @@ class Orchestrator:
                     return self._finish(False, started)
 
                 step = plan[index]
+                step_cfg = next((s for s in step_catalog(cfg) if s["slug"] == step), {})
                 policy_path = step_output_dir(cfg, step)
+                is_grasp = bool(step_cfg.get("grasp"))
+                # Per-step timeout (config.steps[].timeout_s) falls back to the
+                # global default. A flat timeout shorter than a step's real
+                # demonstrated duration silently truncates it every single
+                # time — always ending via "časový limit", never via protocol
+                # A/B — which reads like a policy failure but is really just
+                # the clock cutting the motion off before it finishes.
+                step_timeout = float(step_cfg.get("timeout_s") or default_step_timeout)
                 self.emit("state", state="EXECUTING")
                 self.emit("step", index=index, total=len(plan), step=step, phase="start",
                           policy=policy_path)
 
-                # 1) the muscles: one daemon, weights swapped per step
-                if self.daemon is None:
-                    self.daemon = Daemon(cfg, self.emit)
-                    self.daemon.start(policy_path)
-                else:
-                    self.emit("log", level="INFO",
-                              message=f"Hot-swap modelu na krok '{step}'.")
-                    self.daemon.set_policy(policy_path)
-
-                # 2) execution under the task latch (bounded by step duration / 1 episode)
-                is_grasp = any(s["slug"] == step and s["grasp"] for s in step_catalog(cfg))
-                reason = self.daemon.run_task(step, step_timeout, is_grasp)
+                # 1)+2) the muscles: one daemon, weights swapped per step, task
+                # latch bounded by step_timeout. One retry with a fresh daemon
+                # process if the existing one died mid-run (e.g. a wedged
+                # serial port) — a single hardware hiccup shouldn't zero out
+                # an otherwise fine trial.
+                reason = None
+                for attempt in (1, 2):
+                    try:
+                        if self.daemon is None:
+                            self.daemon = Daemon(cfg, self.emit)
+                            self.daemon.start(policy_path)
+                        else:
+                            self.emit("log", level="INFO",
+                                      message=f"Hot-swap modelu na krok '{step}'.")
+                            self.daemon.set_policy(policy_path)
+                        reason = self.daemon.run_task(step, step_timeout, is_grasp)
+                        break
+                    except RuntimeError as e:
+                        if attempt == 2:
+                            raise
+                        self.emit("log", level="ERROR",
+                                  message=f"Daemon selhal ({e}) — restartuji a zkouším "
+                                          f"krok '{step}' znovu.")
+                        self.daemon = None
                 self.emit("step", index=index, step=step, phase="executed", reason=reason)
 
                 # 3) the inspector
@@ -428,12 +459,21 @@ class Orchestrator:
                 image = self.daemon.snapshot()
                 if image:
                     self.emit("snapshot", image=image, step=step)
-                if image and not cfg.get("skip_inspector"):
-                    success, tag = self._verify(step, image)
-                else:
+                if cfg.get("skip_inspector"):
                     success, tag = True, "SKIPPED"
                     self.emit("log", level="WARN",
-                              message="Bez snímku/inspektora — krok považován za úspěšný.")
+                              message="Inspektor vypnutý (skip_inspector) — krok "
+                                      "považován za úspěšný bez ověření.")
+                elif image:
+                    success, tag = self._verify(step, image)
+                else:
+                    # Missing camera frame is a genuine failure, not a free
+                    # pass — treating it as success (the old behaviour) let
+                    # any camera/VLM hiccup silently count as task completion.
+                    success, tag = False, "[no_image]"
+                    self.emit("log", level="ERROR",
+                              message="Snímek z kamery se nepodařilo získat — krok "
+                                      "označen jako neúspěšný.")
 
                 self.results.append({"step": step, "success": success, "tag": tag,
                                      "reason": reason})
@@ -467,7 +507,15 @@ class Orchestrator:
                 if not plan:
                     raise RuntimeError("Re-plán vrátil prázdný plán.")
 
-            return self._finish(all(r["success"] for r in self.results), started)
+            # Reaching here means the *current* plan was walked to completion
+            # by successful increments only (the while-loop's only way out
+            # besides raising) — so the run succeeded. self.results still
+            # holds every attempt, including ones from discarded pre-replan
+            # plans; ANDing over all of them (the old behaviour) punished a
+            # run for a failure that re-planning had already fixed, which is
+            # exactly the resilience this scheme is supposed to get credit
+            # for. Per-attempt detail for diagnostics stays in self.results.
+            return self._finish(True, started)
 
         except Exception as e:
             self.emit("state", state="ERROR")

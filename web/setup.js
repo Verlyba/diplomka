@@ -38,6 +38,9 @@ function renderSteps() {
       <label class="checkline" title="Krok končí sevřením objektu (protokol B), ne dosednutím kloubů">
         <input class="grasp" type="checkbox" ${step.grasp ? 'checked' : ''}> úchop
       </label>
+      <input class="timeout" type="number" min="1" step="0.5" placeholder="výchozí"
+        title="Časový limit tohoto kroku (s) — prázdné = použije se globální „Timeout kroku""
+        value="${step.timeout_s != null ? step.timeout_s : ''}">
       <button type="button" title="Odebrat krok">✕</button>`;
     row.querySelector('.slug').addEventListener('input', (e) => {
       cfg.steps[i].slug = e.target.value.trim(); render();
@@ -47,6 +50,11 @@ function renderSteps() {
     });
     row.querySelector('.grasp').addEventListener('change', (e) => {
       cfg.steps[i].grasp = e.target.checked;
+    });
+    row.querySelector('.timeout').addEventListener('input', (e) => {
+      const v = e.target.value.trim();
+      if (v === '') delete cfg.steps[i].timeout_s;
+      else cfg.steps[i].timeout_s = Number(v);
     });
     row.querySelector('button').addEventListener('click', () => {
       cfg.steps.splice(i, 1); renderSteps(); render();
