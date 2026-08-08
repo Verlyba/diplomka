@@ -327,6 +327,15 @@
         <div class="note warn">Epizody, ve kterých značek není přesně
           <span id="marks-needed-2"></span>, skript přeskočí a vypíše je — nahrávka s chybějícím
           stiskem tedy tiše neposune hranice, jen se do dílčích datasetů nedostane.</div>
+
+        <h3 style="margin-top:20px">Časové limity kroků pro orchestraci</h3>
+        <p style="color:var(--muted);font-size:13px;margin-top:0">
+          Ze stejných značek spočítá skutečné trvání každého kroku napříč nahranými epizodami
+          a zapíše doporučený <code class="inline">timeout_s</code> (nejdelší pozorované trvání ×
+          bezpečnostní rezerva) přímo do <code class="inline">config.json</code>. Bez toho má
+          každý krok při orchestraci stejný plochý limit — a ten kratší kroky zbytečně natahuje,
+          delší naopak systematicky uřezává, než stihnou doběhnout.</p>
+        <div id="cmds-timeouts"></div>
       </div>
 
       <div data-only="merge">

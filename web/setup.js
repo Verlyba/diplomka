@@ -242,6 +242,14 @@ function render() {
       splitFixed.join(' ')],
   ]);
 
+  const timeouts = [`${py} compute_step_timeouts.py`,
+    arg('repo-id', derive.baselineRepo(c)),
+    arg('steps', steps.map((s) => s.slug).join(',')), '--apply'];
+  fill('cmds-timeouts', [
+    ['Časové limity kroků ze skutečných dat', 'spočítá z marks.json a zapíše timeout_s do config.json',
+      timeouts.join(' ')],
+  ]);
+
   // 6) trénink
   const trainFlags = (repo, job, out) => [`${py} -m lerobot.scripts.lerobot_train`,
     arg('policy.type', c.policy_type), arg('dataset.repo_id', repo),

@@ -32,6 +32,12 @@ Step termination (why a step ends without anybody telling it to):
                  consecutive frames (the motion is finished).
     Protocol B — gripper servo current above 250 mA (contact with an object),
                  used for grasping steps so the policy does not keep squeezing.
+Once a step ends (either protocol, a timeout, or an explicit STOP) the arm's
+current position is captured and re-issued every tick until the next SET_TASK
+(see freeze_robot()) — otherwise whatever the orchestrator's LLM/VLM round
+trip between steps takes, the arm just sits on the last policy-predicted
+target, which may be mid-motion (e.g. a gripper that hadn't finished closing
+when a timeout fired) rather than a stable hold.
 
 Without LeRobot / torch / hardware the daemon falls back to a simulated arm so
 the whole pipeline stays testable on a laptop.
@@ -174,6 +180,7 @@ current_policy_path = ""
 simulated = True
 use_triggers = True
 task_deadline = 0.0
+hold_action: dict | None = None  # last commanded position, re-sent while WAITING to hold torque
 
 _frame_lock = threading.Lock()
 last_frame: np.ndarray | None = None
@@ -312,13 +319,15 @@ def snapshot_b64() -> str:
 
 # ── One inference step on real hardware ─────────────────────────────────────
 
-def predict_and_act(task: str) -> tuple[np.ndarray, np.ndarray, float]:
-    """observation -> action -> robot. Returns (joints, target, gripper_load).
+def predict_and_act(task: str) -> tuple[np.ndarray, np.ndarray, float, dict]:
+    """observation -> action -> robot. Returns (joints, target, gripper_load, action).
 
     The order of the calls mirrors LeRobot's own rollout loop
     (build_inference_frame -> preprocessor -> select_action -> postprocessor ->
     make_robot_action -> send_action); on versions that do not ship those two
-    helpers the same steps are done by hand.
+    helpers the same steps are done by hand. ``action`` is returned too so the
+    caller can re-issue the exact same command to hold position once the step
+    ends (see ``freeze_robot``).
     """
     obs = robot.get_observation()
     cache_frame(obs)
@@ -355,7 +364,32 @@ def predict_and_act(task: str) -> tuple[np.ndarray, np.ndarray, float]:
         target = np.array([action[k] for k in action_keys], dtype=np.float32)
     except KeyError:  # action names differ from the robot's own feature names
         target = np.array(list(action.values()), dtype=np.float32)
-    return joints, target, load
+    return joints, target, load, action
+
+
+def freeze_robot() -> None:
+    """Hold the arm exactly where it physically is right now.
+
+    Called the moment a step ends (protocol A/B or timeout) and on an
+    explicit STOP. Without this, "ending" a step just means the daemon stops
+    *sending new* actions — but during the potentially long wait for the
+    LLM/VLM round trip that follows, the last command sent might be whatever
+    the policy predicted the instant the deadline hit, i.e. mid-motion, not a
+    stable grip. Re-issuing the arm's own current position as the target
+    every tick while WAITING (see the main loop) keeps it locked there
+    instead of drifting or, worse, continuing to open a gripper that was
+    mid-close when the clock ran out.
+    """
+    global hold_action
+    if simulated or robot is None:
+        return
+    try:
+        obs = robot.get_observation()
+        hold_action = {k: v for k, v in obs.items() if k in action_keys and isinstance(v, (int, float))}
+        if hold_action:
+            robot.send_action(hold_action)
+    except Exception as e:
+        log.warning("Freeze/hold failed: %s", e)
 
 
 # ── stdin command loop ──────────────────────────────────────────────────────
@@ -415,6 +449,7 @@ def stdin_reader(max_seconds: float) -> None:
 
         elif line == "STOP":
             state, active_task = "WAITING", ""
+            freeze_robot()
             print("[STATUS] TASK_STOPPED", flush=True)
 
         elif line == "QUIT":
@@ -531,13 +566,19 @@ def main() -> None:
                         dtype=np.float32)
                     if current.size:
                         joints = current
+                    # Re-affirm the hold every tick — this is what actually
+                    # keeps the arm (and a held object) in place for however
+                    # long the LLM/VLM round trip between steps takes, not
+                    # just at the instant the step ended.
+                    if hold_action:
+                        robot.send_action(hold_action)
                 except Exception:
                     pass
 
         elif state == "RUNNING":
             if not simulated and robot is not None and policy is not None:
                 try:
-                    current, predicted, load = predict_and_act(active_task)
+                    current, predicted, load, _ = predict_and_act(active_task)
                     if current.size:
                         joints = current
                     target = predicted
@@ -569,6 +610,7 @@ def main() -> None:
                 reason = "Časový limit kroku"
 
             if reason:
+                freeze_robot()
                 print(f"[STATUS] TASK_DONE: {active_task} | {reason}", flush=True)
                 state, active_task, active_is_grasp, settled = "WAITING", "", False, 0
 
