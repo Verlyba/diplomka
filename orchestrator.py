@@ -694,7 +694,6 @@ class Orchestrator:
     def run(self, instruction: str) -> dict:
         cfg = self.cfg
         max_replans = int(cfg.get("max_replans", 3))
-        default_step_timeout = float(cfg.get("step_timeout_s", 8.0))
         replans = 0
         started = time.time()
         self.results = []
@@ -746,13 +745,11 @@ class Orchestrator:
                 step_cfg = next((s for s in step_catalog(cfg) if s["slug"] == step), {})
                 policy_path = step_output_dir(cfg, step)
                 is_grasp = bool(step_cfg.get("grasp"))
-                # Per-step timeout (config.steps[].timeout_s) falls back to the
-                # global default. A flat timeout shorter than a step's real
-                # demonstrated duration silently truncates it every single
-                # time — always ending via "časový limit", never via protocol
-                # A/B — which reads like a policy failure but is really just
-                # the clock cutting the motion off before it finishes.
-                step_timeout = float(step_cfg.get("timeout_s") or default_step_timeout)
+                # Per-step timeout written by compute_step_timeouts.py;
+                # falls back to episode_time_s when the script hasn't run.
+                step_timeout = float(
+                    step_cfg.get("timeout_s")
+                    or cfg.get("episode_time_s", 20))
                 self.emit("state", state="EXECUTING")
                 self.emit("step", index=index, total=len(plan), step=step, phase="start",
                           policy=policy_path)

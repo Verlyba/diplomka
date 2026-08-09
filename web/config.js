@@ -54,8 +54,6 @@ const DEFAULTS = {
   llm_model: 'local-llm',
   vlm_model: 'local-vlm',
 
-  latch_timeout_s: 60,
-  step_timeout_s: 8,
   max_replans: 3,
 
   // Plánovač: posílat mu snímky scény a nechat ho nejdřív popsat, co vidí.

@@ -87,8 +87,6 @@ DEFAULT_CONFIG: dict = {
     "llm_model": "local-llm",
     "vlm_model": "local-vlm",
     # orchestration
-    "latch_timeout_s": 60,
-    "step_timeout_s": 8,
     "max_replans": 3,
     # planner behaviour
     "planner_vision": True,

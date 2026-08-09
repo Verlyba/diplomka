@@ -92,9 +92,6 @@ inspektora, pokud níže nevyplníš cílový stav."
       <label class="checkline" title="→ LLM plánovač (popis dovednosti) a daemon (protokol B — proud gripperu)">
         <input class="grasp" type="checkbox" ${step.grasp ? 'checked' : ''}> úchop
       </label>
-      <input class="timeout" type="number" min="1" step="0.5" placeholder="výchozí"
-        title="→ daemon. Časový limit tohoto kroku (s) — prázdné = použije se globální „Timeout kroku""
-        value="${step.timeout_s != null ? step.timeout_s : ''}">
       <span class="model-badge" data-badge-for="${escapeAttr(step.slug || '')}" title="Stav se zjišťuje…">…</span>
       <button type="button" title="Odebrat krok">✕</button>
       <div class="idx"></div>
@@ -115,11 +112,6 @@ natrénovaný (křížek) — appka porovnává, kolik kroků checkpoint skuteč
     });
     row.querySelector('.grasp').addEventListener('change', (e) => {
       cfg.steps[i].grasp = e.target.checked;
-    });
-    row.querySelector('.timeout').addEventListener('input', (e) => {
-      const v = e.target.value.trim();
-      if (v === '') delete cfg.steps[i].timeout_s;
-      else cfg.steps[i].timeout_s = Number(v);
     });
     row.querySelector('.hint').addEventListener('input', (e) => {
       const v = e.target.value.trim();
