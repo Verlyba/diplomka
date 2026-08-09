@@ -225,8 +225,11 @@
           <label class="checkline" title="Krok skončí, když proud gripperu překročí limit">
             <input data-key="protocol_b_enabled" type="checkbox"> Protokol B — proud gripperu
           </label>
-          <label class="field">Limit proudu (mA)
+          <label class="field">Limit proudu — ukončení kroku (mA)
             <input data-key="protocol_b_limit_ma" type="number" step="10" min="0">
+          </label>
+          <label class="field">Práh „něco drží" (mA)
+            <input data-key="holding_limit_ma" type="number" step="5" min="0">
           </label>
           <label class="checkline" title="Hodnotu proudu dostane plánovač jako informaci, jestli robot něco drží">
             <input data-key="gripper_state_in_context" type="checkbox"> Hlásit stav gripperu plánovači
@@ -242,6 +245,11 @@
           výrazně spolehlivější údaj než odhad z fotky shora, kde je malý předmět v čelistech sotva
           vidět — plánovač pak neopakuje úchop nad předmětem, který už drží. Netýká-li se to tvé
           úlohy, vypni.</div>
+        <div class="note">Ty dva prahy nejsou totéž a mají být <b>různé</b>. <b>Limit proudu —
+          ukončení kroku</b> je hodnota, při které se sevření pokládá za dokončené a krok se ukončí;
+          musí odpovídat skutečnému sevření předmětu. <b>Práh „něco drží"</b> je nižší a slouží jen
+          k odečtení stavu (drží / nedrží) pro plánovač — držení už sevřeného předmětu vyžaduje
+          mnohem menší proud než okamžik sevření. Nečinný otevřený gripper odebírá jednotky mA.</div>
         <div class="note warn">Baseline (monolitický model) běží vždy s <b>vypnutými oběma
           protokoly</b> — končí jen časovým limitem. Tohle nastavení se ho proto netýká, platí jen
           pro orchestraci.</div>

@@ -3,15 +3,18 @@
 Derive per-step inference timeouts from the actual recorded demonstrations,
 instead of guessing one flat number for every step.
 
-Why this exists: inference_daemon.py cuts a step off after step_timeout_s
-regardless of how long that phase actually took during teleoperation. A flat
-number picked to fit the shortest step (e.g. pick_cube) will routinely
-truncate a longer one (e.g. release) before it finishes — the step then ends
-via "časový limit" instead of protocol A/B, and gripper/positioning steps that
-get cut off mid-motion are the most common source of [object_missed] /
-[object_slipped] failures. This script reads the same <dataset>.marks.json
-sidecar split_dataset.py uses and reports, per step, the real distribution of
-durations across every recorded episode.
+Why this exists: a step gets cut off once its time limit runs out, regardless
+of how long that phase actually took during teleoperation. A single flat number
+picked to fit the shortest step (e.g. pick_cube) will routinely truncate a
+longer one (e.g. release) before it finishes — the step then ends via "časový
+limit" instead of protocol A/B, and steps cut off mid-motion are the most
+common source of [object_missed] / [object_slipped] failures. This script reads
+the same <dataset>.marks.json sidecar split_dataset.py uses and reports, per
+step, the real distribution of durations across every recorded episode.
+
+The values it writes (config.json → steps[].timeout_s) are the ONLY per-step
+limits the orchestrator uses; when a step has none, it falls back to
+episode_time_s. There is no global step-timeout setting any more.
 
 Run inside the LeRobot environment (needs the dataset to read exact per-episode
 lengths):

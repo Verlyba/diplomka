@@ -183,18 +183,27 @@
 
       <div class="run-grid">
         <div>
-          <h3>Plán</h3>
-          <ul class="plan" id="plan"><li>zatím žádný</li></ul>
           <h3>Log</h3>
           <div id="log"></div>
         </div>
         <div>
-          <h3>Poslední snímek pro inspektora</h3>
-          <img id="snapshot" alt="snímek scény z daemonu">
+          <h3>Poslední snímky pro inspektora</h3>
+          <div id="snapshot-grid" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+            <img id="snapshot" alt="snímek scény z daemonu" style="display:none">
+          </div>
           <div id="no-snapshot" style="color:var(--muted);font-size:13px">zatím žádný snímek</div>
           <div class="telemetry" id="telemetry"></div>
-          <h3>Výsledek</h3>
-          <div class="summary" id="summary" style="color:var(--muted)">běh zatím neproběhl</div>
+
+          <div class="result-split" style="display:grid;grid-template-columns:220px 1fr;gap:16px;margin-top:20px">
+            <div>
+              <h3>Aktuální plán</h3>
+              <ul class="plan vertical-plan" id="plan"><li>zatím žádný</li></ul>
+            </div>
+            <div>
+              <h3>Průběh a výsledek</h3>
+              <div class="summary" id="summary" style="color:var(--muted)">běh zatím neproběhl</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

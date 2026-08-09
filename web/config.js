@@ -23,7 +23,7 @@ const DEFAULTS = {
   camera_height: 480,
   camera_fps: 30,
 
-  camera2_name: '',
+  camera2_name: 'wrist',
   camera2_index: '1',
   camera2_width: 640,
   camera2_height: 480,
@@ -54,7 +54,7 @@ const DEFAULTS = {
   llm_model: 'local-llm',
   vlm_model: 'local-vlm',
 
-  max_replans: 3,
+  max_replans: 5,
 
   // Plánovač: posílat mu snímky scény a nechat ho nejdřív popsat, co vidí.
   planner_vision: true,
@@ -67,7 +67,8 @@ const DEFAULTS = {
   protocol_a_threshold_rad: 0.005,
   protocol_a_patience: 5,
   protocol_b_enabled: true,
-  protocol_b_limit_ma: 250,
+  protocol_b_limit_ma: 100,
+  holding_limit_ma: 20,
   gripper_state_in_context: true,
 };
 

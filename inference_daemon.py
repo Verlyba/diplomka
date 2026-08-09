@@ -54,6 +54,7 @@ import threading
 import time
 from copy import copy
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
 
@@ -166,9 +167,11 @@ PROTOCOL_A_PATIENCE = 5        # consecutive frames
 PROTOCOL_B_LOAD_LIMIT = 250.0  # mA
 use_protocol_a = True
 use_protocol_b = True
-# Záložní heuristika: pokud orchestrátor krok neoznačí příznakem |grasp,
-# pozná se úchopový krok podle názvu.
-GRASP_WORDS = ("uchop", "grab", "grasp", "pick", "close", "sevri", "chyt")
+# Pozn.: dřív tu byla záložní heuristika GRASP_WORDS, která úchopový krok
+# poznala podle názvu, když ho orchestrátor neoznačil příznakem |grasp.
+# Odstraněna záměrně — hádat protokol ukončení z názvu kroku je u univerzálního
+# robota s libovolně pojmenovanými kroky spíš past než pomoc; jediným zdrojem
+# pravdy je teď zaškrtnutý „úchop" v konfiguraci, který dorazí jako |grasp.
 
 # ── Mutable daemon state ────────────────────────────────────────────────────
 state = "WAITING"
@@ -189,7 +192,7 @@ task_deadline = 0.0
 hold_action: dict | None = None  # last commanded position, re-sent while WAITING to hold torque
 
 _frame_lock = threading.Lock()
-last_frame: np.ndarray | None = None
+last_frames: dict[str, np.ndarray] = {}
 
 
 # ── Policy / robot bootstrap ────────────────────────────────────────────────
@@ -258,6 +261,15 @@ def connect_robot(robot_type: str, port: str, robot_id: str, cameras_json: str) 
 
     robot = make_robot_from_config(robot_cfg)
     robot.connect()
+    try:
+        bus = getattr(robot, "bus", None)
+        if bus is not None:
+            c_val = bus.read("Present_Current", "gripper") if hasattr(bus, "read") else None
+            l_val = bus.read("Present_Load", "gripper") if hasattr(bus, "read") else None
+            log.info("Feetech motor bus test read — Present_Current: %s, Present_Load: %s", c_val, l_val)
+    except Exception as e:
+        log.warning("Feetech motor bus test read failed: %s", e)
+
     # Same feature dict the official rollout loop builds: observation features
     # pick the right keys out of the raw observation, action features name the
     # columns of the policy's output.
@@ -271,8 +283,9 @@ def connect_robot(robot_type: str, port: str, robot_id: str, cameras_json: str) 
 # ── Camera snapshot (the daemon owns the camera, so the VLM asks it) ────────
 
 def cache_frame(obs: dict) -> None:
-    global last_frame
-    for value in obs.values():
+    global last_frames
+    new_frames = {}
+    for key, value in obs.items():
         arr = value
         if hasattr(arr, "cpu") and hasattr(arr, "numpy"):
             try:
@@ -288,17 +301,21 @@ def cache_frame(obs: dict) -> None:
                         arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
                     else:
                         arr = arr.clip(0, 255).astype(np.uint8)
-                with _frame_lock:
-                    last_frame = arr
-                return
+                cam_name = key.split(".")[-1]
+                new_frames[cam_name] = arr
+    if new_frames:
+        with _frame_lock:
+            last_frames.update(new_frames)
 
 
 def snapshot_b64() -> str:
+    """Return JSON string mapping camera names to base64 JPEGs for all active cameras."""
     with _frame_lock:
-        frame = last_frame
-    if frame is None and robot is not None and getattr(robot, "cameras", None):
+        frames = dict(last_frames)
+
+    if not frames and robot is not None and getattr(robot, "cameras", None):
         try:
-            for cam in robot.cameras.values():
+            for name, cam in robot.cameras.items():
                 cam_frame = cam.async_read() if hasattr(cam, "async_read") else cam.read()
                 if cam_frame is not None:
                     if hasattr(cam_frame, "cpu") and hasattr(cam_frame, "numpy"):
@@ -306,42 +323,139 @@ def snapshot_b64() -> str:
                     if isinstance(cam_frame, np.ndarray) and cam_frame.ndim == 3:
                         if cam_frame.shape[0] in (1, 3, 4) and cam_frame.shape[2] not in (1, 3, 4):
                             cam_frame = np.transpose(cam_frame, (1, 2, 0))
-                        frame = cam_frame
-                        break
+                        frames[name] = cam_frame
         except Exception as e:
-            log.warning("Fallback camera read failed: %s", e)
-    if frame is None:
+            log.warning("Direct camera read failed: %s", e)
+
+    if not frames:
         return ""
-    try:
-        import base64
-        import cv2
-        bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) if frame.shape[2] == 3 else frame
-        ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        return base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
-    except Exception as e:
-        log.warning("Snapshot encoding failed: %s", e)
+
+    import cv2
+    import base64
+    b64_dict = {}
+    for name, frame in frames.items():
+        try:
+            if frame is None or frame.size == 0 or frame.ndim != 3 or frame.shape[0] < 10 or frame.shape[1] < 10:
+                continue
+            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) if frame.ndim == 3 and frame.shape[2] == 3 else frame
+            ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if ok and len(buf) > 1000:
+                b64_dict[name] = base64.b64encode(buf.tobytes()).decode("ascii")
+        except Exception as e:
+            log.warning("Failed encoding frame '%s': %s", name, e)
+
+    if not b64_dict:
         return ""
+
+    return json.dumps(b64_dict)
+
+
+_logged_obs_keys = False
+_load_register: str | None = None   # registr, ze kterého se proud daří číst
+_load_register_dead = False         # žádný kandidát nefunguje — přestat zkoušet
+
+
+def extract_gripper_load(obs: dict) -> float:
+    """Extract gripper servo current/load in mA directly from Feetech motor bus or observation dict."""
+    global _logged_obs_keys
+    if not _logged_obs_keys and obs:
+        non_img_keys = [k for k in obs.keys() if not k.startswith("observation.images")]
+        log.info("Robot observation keys: %s", non_img_keys)
+        _logged_obs_keys = True
+
+    # 1. Read directly from the motor bus. get_observation() of the SO-101
+    #    follower returns only "<motor>.pos" values and camera frames — no
+    #    current anywhere — so the bus read below is the ONLY path that can
+    #    actually produce a reading; branch 2 is just a safety net for other
+    #    robot classes.
+    #
+    #    This runs on every control tick, so it must not cost more than one
+    #    serial round-trip: the working register is resolved once and then
+    #    reused. A register that returns a value (even 0.0 — an idle gripper
+    #    genuinely draws almost nothing) counts as working; only an exception
+    #    disqualifies it. Once every candidate has failed, stop probing so a
+    #    robot without this register doesn't burn bus bandwidth every frame.
+    global _load_register, _load_register_dead
+    if robot is not None and not simulated and not _load_register_dead:
+        bus = getattr(robot, "bus", getattr(getattr(robot, "follower_arm", None), "bus", None))
+        if bus is not None and hasattr(bus, "read"):
+            candidates = [_load_register] if _load_register else ["Present_Current", "Present_Load"]
+            for reg in candidates:
+                try:
+                    val = bus.read(reg, "gripper")
+                except Exception as e:
+                    if _load_register:      # dosud fungující registr začal selhávat
+                        log.warning("Čtení registru %s selhalo (%s) — zkusím znovu příště.", reg, e)
+                        _load_register = None
+                    continue
+                if val is None:
+                    continue
+                if _load_register != reg:
+                    _load_register = reg
+                    log.info("Proud gripperu se čte z registru '%s' (surová hodnota "
+                             "registru, ne miliampéry — prahy nastav podle měření).", reg)
+                return abs(float(val.item() if hasattr(val, "item") else val))
+            if not _load_register:
+                _load_register_dead = True
+                log.warning("Žádný z registrů proudu gripperu (Present_Current, Present_Load) "
+                            "nejde přečíst — protokol B a stav gripperu pro plánovač "
+                            "nebudou fungovat. Další pokusy vypnuty.")
+
+    # 2. Fallback to parsing observation dictionary
+    def _to_float(val: Any) -> float | None:
+        if val is None:
+            return None
+        if hasattr(val, "item"):
+            val = val.item()
+        try:
+            return abs(float(val))
+        except (TypeError, ValueError):
+            return None
+
+    if obs:
+        for key in (
+            "gripper.current", "gripper_current", "observation.gripper_current",
+            "gripper.load", "gripper_load", "observation.gripper.load",
+            "gripper.present_current", "gripper_present_current",
+        ):
+            if key in obs:
+                val = _to_float(obs[key])
+                if val is not None and val > 0:
+                    return val
+
+        for key in ("present_current", "current", "observation.current", "observation.present_current"):
+            if key in obs and obs[key] is not None:
+                arr = obs[key]
+                try:
+                    if hasattr(arr, "tolist"):
+                        arr = arr.tolist()
+                    if isinstance(arr, (list, tuple)) and len(arr) >= 6:
+                        val = _to_float(arr[-1])
+                        if val is not None and val > 0:
+                            return val
+                except Exception:
+                    pass
+
+        for k, v in obs.items():
+            if "gripper" in k.lower() and any(x in k.lower() for x in ("current", "load", "ma")):
+                val = _to_float(v)
+                if val is not None and val > 0:
+                    return val
+
+    return 0.0
 
 
 # ── One inference step on real hardware ─────────────────────────────────────
 
 def predict_and_act(task: str) -> tuple[np.ndarray, np.ndarray, float, dict]:
-    """observation -> action -> robot. Returns (joints, target, gripper_load, action).
-
-    The order of the calls mirrors LeRobot's own rollout loop
-    (build_inference_frame -> preprocessor -> select_action -> postprocessor ->
-    make_robot_action -> send_action); on versions that do not ship those two
-    helpers the same steps are done by hand. ``action`` is returned too so the
-    caller can re-issue the exact same command to hold position once the step
-    ends (see ``freeze_robot``).
-    """
+    """observation -> action -> robot. Returns (joints, target, gripper_load, action)."""
     obs = robot.get_observation()
     cache_frame(obs)
 
     joints = np.array(
         [float(v) for k, v in obs.items() if isinstance(v, (int, float)) and k.endswith(".pos")],
         dtype=np.float32)
-    load = float(obs.get("gripper.current", obs.get("observation.gripper_current", 0.0)) or 0.0)
+    load = extract_gripper_load(obs)
 
     with torch.inference_mode():
         if build_inference_frame is not None:
@@ -424,8 +538,12 @@ def stdin_reader(max_seconds: float) -> None:
                         pass
             if not task:
                 continue
+            # Bez tohohle přiřazení zůstane active_task prázdný řetězec: policy
+            # se pak podmiňuje na "" místo na jméno kroku (u jazykově
+            # podmíněných politik typu SmolVLA zásadní) a [STATUS] TASK_DONE
+            # hlásí krok bez jména.
             active_task = task
-            active_is_grasp = is_grasp or any(w in task.lower() for w in GRASP_WORDS)
+            active_is_grasp = is_grasp
             if policy is not None and hasattr(policy, "reset"):
                 try:
                     policy.reset()
@@ -590,6 +708,7 @@ def main() -> None:
                 try:
                     obs = robot.get_observation()
                     cache_frame(obs)
+                    load = extract_gripper_load(obs)
                     current = np.array(
                         [float(v) for k, v in obs.items()
                          if isinstance(v, (int, float)) and k.endswith(".pos")],

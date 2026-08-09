@@ -56,7 +56,7 @@ DEFAULT_CONFIG: dict = {
     "camera_width": 640,
     "camera_height": 480,
     "camera_fps": 30,
-    "camera2_name": "",
+    "camera2_name": "wrist",
     "camera2_index": "1",
     "camera2_width": 640,
     "camera2_height": 480,
@@ -87,7 +87,7 @@ DEFAULT_CONFIG: dict = {
     "llm_model": "local-llm",
     "vlm_model": "local-vlm",
     # orchestration
-    "max_replans": 3,
+    "max_replans": 5,
     # planner behaviour
     "planner_vision": True,
     "planner_reasoning": True,
@@ -96,7 +96,11 @@ DEFAULT_CONFIG: dict = {
     "protocol_a_threshold_rad": 0.005,
     "protocol_a_patience": 5,
     "protocol_b_enabled": True,
-    "protocol_b_limit_ma": 250,
+    "protocol_b_limit_ma": 100,
+    # Práh, nad kterým se proud gripperu čte jako „něco drží" — zvlášť od
+    # protokolu B, který ukončuje krok. Držení se pozná už při mnohem nižším
+    # proudu než sevření, které má krok ukončit.
+    "holding_limit_ma": 20,
     "gripper_state_in_context": True,
 }
 

@@ -45,17 +45,50 @@ function setState(state) {
   el('stop').disabled = !running;
 }
 
+let executedAttempts = [];
+
+function escapeAttr(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderProgressSummary() {
+  const box = el('summary');
+  if (!executedAttempts.length) {
+    box.innerHTML = '<div style="color:var(--muted)">probíhá…</div>';
+    return;
+  }
+  let html = '<div class="summary-list">';
+  let stepCounter = 1;
+  executedAttempts.forEach((item) => {
+    if (item.isReplan) {
+      html += `<div class="summary-replan">
+        <b>↳ Re-plán #${item.num}</b>
+        ${item.reasoning ? `<div style="margin-top:2px"><i>CEO: „${escapeAttr(item.reasoning)}“</i></div>` : ''}
+      </div>`;
+    } else if (item.isStep) {
+      const ok = item.success;
+      const mark = ok ? '<span style="color:var(--green)">✓ SUCCESS</span>' : `<span style="color:var(--red)">✗ FAILED ${item.tag}</span>`;
+      const reasonStr = item.reason ? ` <span style="color:var(--muted)">(${item.reason})</span>` : '';
+      html += `<div class="summary-entry">
+        ${stepCounter++}. <code class="inline">${item.step}</code> → ${mark}${reasonStr}
+      </div>`;
+    }
+  });
+  html += '</div>';
+  box.innerHTML = html;
+  box.style.color = 'var(--text)';
+}
+
 function showSummary(data) {
   const box = el('summary');
   const ok = data.success;
-  const steps = (data.steps || []).map(
-    (s) => `<div>${s.success ? '✓' : '✗'} <code class="inline">${s.step}</code> — ${s.tag}${s.reason ? ` · ${s.reason}` : ''}</div>`
-  ).join('');
-  box.innerHTML = `<b class="${ok ? 'ok' : 'fail'}">${ok ? 'ÚSPĚCH' : 'NEÚSPĚCH'}</b>
-    · ${data.duration_s} s · ${(data.steps || []).length} kroků
-    ${data.error ? `<div style="color:var(--red);margin-top:6px">${data.error}</div>` : ''}
-    <div style="margin-top:8px">${steps}</div>`;
-  box.style.color = 'var(--text)';
+  let header = `<div style="margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+    <b class="${ok ? 'ok' : 'fail'}" style="font-size:15px">${ok ? 'ÚSPĚCH' : 'NEÚSPĚCH'}</b>
+    · ${data.duration_s} s · ${executedAttempts.filter(x => x.isStep).length} pokusů
+    ${data.error ? `<div style="color:var(--red);margin-top:4px">${data.error}</div>` : ''}
+  </div>`;
+  renderProgressSummary();
+  box.innerHTML = header + box.innerHTML;
 }
 
 function handleEvent(event) {
@@ -63,7 +96,9 @@ function handleEvent(event) {
     case 'run_started':
       Object.keys(stepMarks).forEach((k) => delete stepMarks[k]);
       planSteps = [];
+      executedAttempts = [];
       renderPlan();
+      el('summary').innerHTML = '<div style="color:var(--muted)">probíhá exekuce…</div>';
       el('log').innerHTML = '';
       logLine('EVENT', `▶ Běh spuštěn: „${event.instruction}"`);
       break;
@@ -73,6 +108,16 @@ function handleEvent(event) {
     case 'plan':
       planSteps = event.steps || [];
       Object.keys(stepMarks).forEach((k) => delete stepMarks[k]);
+      if (event.replan) {
+        executedAttempts.push({
+          isReplan: true,
+          num: event.replan,
+          reasoning: event.reasoning || '',
+        });
+        renderProgressSummary();
+      } else if (event.reasoning) {
+        logLine('INFO', `Odůvodnění CEO: „${event.reasoning}“`);
+      }
       renderPlan(stepMarks);
       logLine('EVENT', `Plán${event.replan ? ` (re-plán ${event.replan})` : ''}: [${planSteps.join(', ')}]`);
       break;
@@ -84,16 +129,33 @@ function handleEvent(event) {
         logLine('INFO', `Krok '${event.step}' ukončen: ${event.reason}`);
       } else if (event.phase === 'verified') {
         stepMarks[event.index] = event.success ? 'ok' : 'fail';
+        executedAttempts.push({
+          isStep: true,
+          step: event.step,
+          success: event.success,
+          tag: event.tag,
+          reason: event.reason,
+        });
+        renderProgressSummary();
         logLine(event.success ? 'SUCCESS' : 'WARN',
           `Verifikace '${event.step}': ${event.success ? 'úspěch' : `selhání ${event.tag}`}`);
       }
       renderPlan(stepMarks);
       break;
-    case 'snapshot':
-      el('snapshot').src = `data:image/jpeg;base64,${event.image}`;
-      el('snapshot').style.display = 'block';
-      el('no-snapshot').style.display = 'none';
+    // Blok kvůli deklaracím uvnitř case — bez něj by se const dostal do
+    // scope celého switche a kolidoval s dalšími větvemi.
+    case 'snapshot': {
+      const imgs = Array.isArray(event.images) ? event.images : (event.image ? [event.image] : []);
+      const grid = el('snapshot-grid');
+      const noSnap = el('no-snapshot');
+      if (imgs.length && grid) {
+        grid.innerHTML = imgs.map((b64, idx) =>
+          `<img src="data:image/jpeg;base64,${b64}" alt="Kamera ${idx + 1}" style="max-width:${imgs.length > 1 ? '48%' : '100%'};flex:1;min-width:140px;border-radius:var(--radius);border:1px solid var(--border)">`
+        ).join('');
+        if (noSnap) noSnap.style.display = 'none';
+      }
       break;
+    }
     case 'telemetry':
       el('telemetry').textContent = event.message;
       break;

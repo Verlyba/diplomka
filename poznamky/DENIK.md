@@ -289,6 +289,67 @@ jestli je to hotové.
   nemá, takže spadá do (opraveného) globálního defaultu 5000 — a protože má
   na disku jen 1000, správně to teď appka hlásí křížkem.
 
+## 2026-08-09 — revize cizích změn (více kamer, povinné ověření úchopu)
+
+Kontrola rozpracovaných změn (více kamer do obou modelů, `extract_gripper_load`,
+povinné ověření úchopu protokolem B, přepsané prompty, průběh běhu v UI).
+Funkčnost ověřena spuštěním daemona v simulovaném režimu a celého
+orchestračního cyklu s falešným LM Studiem.
+
+**Opravené chyby:**
+
+1. **`active_task = task` bylo smazáno** (`inference_daemon.py`, `SET_TASK`).
+   `active_task` tím zůstal prázdný řetězec po celou dobu běhu, takže se
+   politika podmiňovala na `""` místo na jméno kroku a `[STATUS] TASK_DONE`
+   hlásil krok bez jména. Ověřeno empiricky (`TASK_DONE:  | Protokol B…`),
+   po opravě `TASK_DONE: pick_cube | …`. U ACT to je bez následku, u jazykově
+   podmíněné politiky (SmolVLA je v nabídce) by to bylo zásadní.
+2. **`protocol_b_enabled` zmizelo ze `server.py` DEFAULT_CONFIG**, přestože ho
+   kód čte a UI má pro něj zaškrtávátko. Doplněno zpět.
+3. **`holding_limit_ma` nešlo nastavit z UI** — nový klíč se používal, ale pole
+   chybělo. Doplněno vedle limitu protokolu B, s vysvětlením, proč jsou to dva
+   *různé* prahy (ukončení kroku vs. odečet „drží/nedrží").
+4. **`_verify` volal VLM podruhé se stejným snímkem**, když se nový snímek
+   nepodařilo pořídit — zaručeně stejná odpověď za cenu dalšího volání.
+5. **`case 'snapshot'` v `run.js`** deklaroval `const` bez bloku (scope celého
+   switche). Zabaleno do `{}`.
+6. **Mrtvé klíče `latch_timeout_s` a `step_timeout_s`** zůstaly v `config.json`
+   po commitu `2f5e62a`, ačkoli je už nikdo nečte. Odstraněny; docstring
+   `compute_step_timeouts.py` na ně přestal odkazovat.
+7. **`GRASP_WORDS`** zůstalo jako mrtvý kód po zrušení heuristiky podle názvu
+   kroku. Odstraněno (i s vysvětlením, proč se hádat nemá).
+
+**Zásadní pojistka — povinné ověření úchopu mohlo utopit každý běh.**
+Nová logika bere u úchopových kroků neaktivování protokolu B jako tvrdé
+selhání `[object_missed]`, bez ohledu na inspektora. To dává smysl, *pokud
+čidlo proudu funguje*. Jenže ve skutečných bězích v `runs/` telemetrie hlásila
+`load:0` pořád — proud se nikdy nepřečetl. Ověřeno testem: při nulovém čidle
+každý úchop selže, spotřebuje se celý rozpočet re-plánů a běh skončí chybou —
+**pokaždé, bez šance uspět**. Doplněno: `Daemon.load_ever_nonzero` sleduje,
+jestli čidlo za celý běh vůbec někdy vrátilo nenulovou hodnotu; když ne,
+kontrola se přeskočí, krok posoudí inspektor a do logu jde hlasitá chyba.
+Když čidlo funguje, kontrola platí beze změny (ověřeno oběma scénáři).
+
+**Čtení proudu přepsáno.** `get_observation()` u SO-101 vrací jen `<motor>.pos`
+a snímky — proud tam **není vůbec**, takže větev parsující observation je pro
+tenhle robot mrtvá a jedinou funkční cestou je přímé čtení registru ze
+sběrnice. `Present_Current` (reg. 69) v tabulce `sts3215` je a nenormalizuje se.
+Původní implementace ale zkoušela až 4 názvy registrů **v každém snímku**
+(30×/s) a při nulovém proudu udělala dvě sériové transakce navíc na sběrnici,
+která už při nahrávání padala na 19 Hz. Přepsáno: funkční registr se zjistí
+jednou a pak se používá; když neprojde žádný, zkoušení se vypne.
+
+**Co zůstává k ověření na hardwaru (nelze rozhodnout od stolu):**
+
+- **Jednotky prahů.** `Present_Current` je surová hodnota registru, u STS3215
+  má LSB řádově jednotky mA (datasheet uvádí 6,5 mA). Prahy `protocol_b_limit_ma
+  = 100` a `holding_limit_ma = 20` jsou ale pojmenované i použité jako
+  miliampéry. Dokud se skutečná hodnota nezměří, nelze říct, jestli 100
+  znamená 100 mA nebo ~650 mA. **Změřit a prahy podle toho nastavit.**
+- Jestli `bus.read("Present_Current", "gripper")` na daném kusu hardwaru vůbec
+  projde — daemon to teď loguje hned po připojení.
+- Jestli přidané čtení nezpůsobí propady pod 30 Hz.
+
 ## Otevřené otázky / co ověřit dál
 
 - Spustit pár testovacích běhů s novými `timeout_s` a zkontrolovat, jestli

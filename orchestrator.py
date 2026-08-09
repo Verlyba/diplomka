@@ -29,38 +29,35 @@ HERE = Path(__file__).resolve().parent
 PLANNER_SYSTEM_PROMPT = (
     "You are the planning layer of a three-layer robotic manipulation system.\n\n"
     "WHAT YOU CONTROL\n"
-    "You do not move the robot yourself. You choose WHICH pre-trained skill runs next. Each skill "
-    "is a separate neural policy trained on demonstrations of one phase of the task. A skill runs "
-    "for a bounded time, then a vision inspector photographs the workspace and reports whether it "
-    "worked.\n\n"
+    "You do not move the robot directly. You choose WHICH pre-trained skill runs next. Each skill "
+    "is a separate neural policy trained on demonstrations of one phase of a manipulation task. "
+    "A skill runs for a bounded time, after which a visual inspector and robot telemetry evaluate the workspace.\n\n"
     "HOW TO DECIDE\n"
-    "- Plan from the CURRENT state, not from the beginning of the task. A step that already "
-    "succeeded and whose result still holds must NOT be repeated — re-running a grasp on an object "
-    "that is already held will usually drop it.\n"
-    "- When a photo is attached it is the ground truth about the workspace. A failure tag is only "
-    "the inspector's closest match from a short fixed list and can be imprecise or plain wrong. "
-    "When the photo and the tag disagree, believe the photo.\n"
-    "- Read the photo concretely: is anything held in the gripper, where is the arm, where are the "
-    "objects relative to each other and to the target?\n"
-    "- Choose the SHORTEST sequence that gets from this state to the goal. Do not pad the plan with "
-    "steps whose effect has already been achieved.\n"
-    "- If the same approach has already failed twice in this run, do not simply repeat it a third "
-    "time. Either go back to a skill that re-establishes its precondition, or give up with "
-    "[\"ABORT\"].\n\n"
+    "- 1. GOAL SATISFACTION CHECK (CRITICAL): Always check if the goal is ALREADY satisfied in the workspace photos "
+    "(e.g., if the target object is already inside the container / target location). If the goal is satisfied, "
+    "DO NOT plan any more skills — output ONLY [\"DONE\"].\n"
+    "- 2. WORKSPACE & STATE PERCEPTION: Evaluate the current state of the workspace and robot from the "
+    "attached photos, sensor telemetry (e.g. ROBOT STATE / gripper current), and past progress BEFORE choosing skills.\n"
+    "- 3. INTERMEDIATE STATE CONTINUATION: The workspace or robot may ALREADY be in an intermediate stage "
+    "(e.g., an object is already held, aligned, or moved). Do NOT start over or repeat skills whose outcome is "
+    "already achieved. Re-executing an already accomplished skill (such as attempting to grasp when an object is "
+    "already held) can disrupt the environment.\n"
+    "- 4. CONTINUATION FROM PROGRESS: Review PROGRESS THIS RUN. If earlier skills succeeded and their effects remain valid, "
+    "continue from the current state by selecting ONLY the remaining skills needed to complete the goal.\n"
+    "- 5. OPTIMAL SEQUENCE: Output the shortest sequence of valid skill IDs that transitions the current state to the goal.\n\n"
     "SPECIAL ANSWERS\n"
-    '- ["DONE"]  — the goal is already satisfied; there is nothing left to do.\n'
-    '- ["ABORT"] — no sequence of the available skills can recover from this state.\n'
+    '- ["DONE"]  — the goal is ALREADY satisfied in the current workspace state (e.g. object is in destination).\n'
+    '- ["ABORT"] — no sequence of the available skills can reach the goal from the current state.\n'
     "Use either one alone, never mixed with skill IDs."
 )
 
 PLANNER_OUTPUT_REASONING = (
     "OUTPUT FORMAT\n"
-    "First write ONE line beginning with \"REASONING:\" describing what you actually see and what "
-    "state the task is in (one or two sentences).\n"
-    "Then, on the LAST line, output ONLY the JSON array. Write nothing after it.\n\n"
+    "First write ONE line beginning with \"REASONING:\" describing the current workspace/robot state and why you chose the remaining sequence or [\"DONE\"] (one or two sentences).\n"
+    "Then, on the LAST line, output ONLY the valid JSON array of skill ID strings or [\"DONE\"].\n\n"
     "Example:\n"
-    "REASONING: the gripper is empty and the cube is back on the table, so the grasp has to be redone from the approach.\n"
-    '["grab_cube", "pick_cube", "move", "release"]'
+    "REASONING: The target object is already placed inside the target location in the photo; goal is satisfied.\n"
+    '["DONE"]'
 )
 
 PLANNER_OUTPUT_TERSE = (
@@ -69,22 +66,18 @@ PLANNER_OUTPUT_TERSE = (
     "No extra text, no markdown wrappers, no explanation."
 )
 
-VERIFY_PROMPT = (
-    "You are the inspector of a robotic manipulation system. The photo shows the workspace "
-    "immediately after the robot finished one step.\n\n"
-    "STEP EXECUTED: '{step}'\n"
-    "IT SHOULD HAVE ACHIEVED: {expected}\n\n"
-    "Decide whether that outcome is visible in the photo.\n\n"
-    "When you are not certain, report a failure rather than SUCCESS. A wrong SUCCESS makes the "
-    "robot continue from a state it is not actually in and the error compounds through every later "
-    "step; a wrong failure only costs one retry.\n\n"
-    "Answer with exactly one tag and nothing else:\n"
-    "  SUCCESS            the expected outcome is clearly visible\n"
-    "  [object_missed]    the robot did not reach or align with the object\n"
-    "  [object_slipped]   the object is no longer held / has fallen\n"
-    "  [target_moved]     the target has shifted so the plan no longer fits\n"
-    "  [unclear]          the photo does not allow a decision (occluded, blurred, out of frame)\n"
-    "  [unknown_failure]  something else went wrong"
+VERIFY_PROMPT_RULES = (
+    "IMPORTANT VERIFICATION GUIDANCE:\n"
+    "- If the expected outcome is satisfied in the photo, reply strictly with SUCCESS.\n"
+    "- Do NOT expect the robot to be holding an object if the step is marked [positioning/approach, no grasp].\n"
+    "- For approach/positioning steps ('nájezd'), if the gripper is positioned near or above the target object with open jaws, that is SUCCESS.\n\n"
+    "Choose EXACTLY ONE response tag from this list:\n"
+    "  SUCCESS            the expected outcome is clearly achieved\n"
+    "  [object_missed]    the robot arm is completely far away or missed the target area entirely\n"
+    "  [object_slipped]   an object slipped or dropped during a carrying phase\n"
+    "  [target_moved]     the target object shifted out of reach\n"
+    "  [unclear]          photo is unclear, blurry, or occluded\n"
+    "  [unknown_failure]  other severe failure"
 )
 
 # [unclear] is deliberately not in this list — it means "take another photo",
@@ -118,23 +111,48 @@ class LMStudio:
         return [m.get("id", "") for m in data.get("data", [])]
 
     def chat(self, model: str, messages: list[dict], temperature: float = 0.1,
-             max_tokens: int = 512) -> str:
+             max_tokens: int = 2048) -> str:
         data = self._post("/chat/completions", {
             "model": model, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens,
         })
-        return data["choices"][0]["message"]["content"]
+        msg = data.get("choices", [{}])[0].get("message", {})
+        content = msg.get("content") or ""
+        reasoning = msg.get("reasoning_content") or ""
+        if not content.strip() and reasoning.strip():
+            return reasoning
+        if reasoning.strip() and content.strip():
+            return f"{reasoning}\n{content}"
+        return content
 
-    def chat_with_image(self, model: str, prompt: str, image_b64: str,
-                        temperature: float = 0.1) -> str:
-        return self.chat(model, [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url",
-                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-            ],
-        }], temperature=temperature, max_tokens=64)
+    def chat_with_images(self, model: str, user_prompt: str,
+                         images_b64: str | list[str] | None = None,
+                         system_prompt: str | None = None,
+                         temperature: float = 0.1,
+                         max_tokens: int = 2048) -> str:
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        if isinstance(images_b64, str):
+            imgs = [images_b64] if images_b64 else []
+        elif isinstance(images_b64, list):
+            imgs = [i for i in images_b64 if i]
+        else:
+            imgs = []
+
+        if imgs:
+            user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+            for img in imgs:
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img}"}
+                })
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": user_prompt})
+
+        return self.chat(model, messages, temperature=temperature, max_tokens=max_tokens)
 
 
 def parse_json_array(text: str) -> list[str] | None:
@@ -179,6 +197,17 @@ def parse_json_array(text: str) -> list[str] | None:
     return None
 
 
+def parse_reasoning_sentence(text: str) -> str:
+    """Extract a 1-sentence reasoning/justification from the CEO planner's reply."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.upper().startswith("REASONING:"):
+            res = line[len("REASONING:"):].strip().strip('*"` ')
+            if res:
+                return res
+    return ""
+
+
 # ── The inference daemon, seen from the orchestrator side ───────────────────
 
 class Daemon:
@@ -196,11 +225,18 @@ class Daemon:
         self._done_reason = ""
         self._snapshot = threading.Event()
         self._snapshot_b64 = ""
-        # Last gripper current seen in telemetry, in mA. Whether the arm is
-        # actually holding something is much more reliable from this than from
-        # a vision model squinting at a small object in a top-down photo, so
-        # it gets fed into the planner's context.
+        # Last gripper current seen in telemetry. Whether the arm is actually
+        # holding something is much more reliable from this than from a vision
+        # model squinting at a small object in a top-down photo, so it gets fed
+        # into the planner's context.
         self.last_load: float | None = None
+        # Did the current sensor EVER report a non-zero value in this run? On
+        # the SO-101 the reading comes from a direct motor-bus register read
+        # that may simply not work (it reported a flat 0 on hardware before
+        # extract_gripper_load() was rewritten). Without this flag a broken
+        # sensor is indistinguishable from "nothing grasped", and the mandatory
+        # grasp check below would fail every single grasp step forever.
+        self.load_ever_nonzero = False
 
     # -- lifecycle ---------------------------------------------------------
     def start(self, policy_path: str) -> None:
@@ -256,6 +292,8 @@ class Daemon:
                     if field.startswith("load:"):
                         try:
                             self.last_load = float(field[len("load:"):])
+                            if self.last_load > 0:
+                                self.load_ever_nonzero = True
                         except ValueError:
                             pass
                 self.emit("telemetry", message=payload)
@@ -310,14 +348,26 @@ class Daemon:
             return f"timeout po {timeout:.0f} s"
         return self._done_reason
 
-    def snapshot(self, timeout: float = 10.0) -> str:
-        self._snapshot.clear()
-        self._snapshot_b64 = ""
-        try:
-            self._send("SNAP")
-        except RuntimeError:
-            return ""
-        return self._snapshot_b64 if self._snapshot.wait(timeout) else ""
+    def snapshot(self, timeout: float = 10.0) -> list[str]:
+        for _ in range(3):
+            self._snapshot.clear()
+            self._snapshot_b64 = ""
+            try:
+                self._send("SNAP")
+            except RuntimeError:
+                return []
+            if self._snapshot.wait(timeout) and self._snapshot_b64:
+                raw = self._snapshot_b64.strip()
+                try:
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        return [str(v) for v in data.values() if v]
+                    elif isinstance(data, list):
+                        return [str(v) for v in data if v]
+                except json.JSONDecodeError:
+                    return [raw] if raw else []
+            time.sleep(0.3)
+        return []
 
     def stop(self) -> None:
         if not self.proc or self.proc.poll() is not None:
@@ -478,33 +528,33 @@ class Orchestrator:
     def _gripper_note(self) -> str:
         """One line about what the gripper current says, or '' when unavailable.
 
-        Whether the arm is actually holding something is far more reliably read
-        off the gripper servo current than guessed from a small object in a
-        640x480 top-down photo — so when it is available it goes into the
-        planner's context alongside the image. Off by default for tasks where
-        it means nothing (no grasping phase, different end effector).
+        Idle/open gripper draws 0-8 mA. Any current >= 20 mA indicates active
+        torque on an object ('something appears to be held').
         """
         if not self.cfg.get("gripper_state_in_context", True):
             return ""
         if self.daemon is None or self.daemon.last_load is None:
             return ""
         load = self.daemon.last_load
-        limit = float(self.cfg.get("protocol_b_limit_ma", 250))
-        holding = "something appears to be held" if load > limit else "nothing appears to be held"
-        return f"ROBOT STATE: gripper current {load:.0f} mA — {holding}"
+        holding_limit = float(self.cfg.get("holding_limit_ma", 20))
+
+        holding_str = "something appears to be held" if load >= holding_limit else "nothing appears to be held"
+        return f"ROBOT STATE: gripper current {load:.0f} mA — {holding_str}"
 
     def _build_initial_context(self, instruction: str, has_image: bool) -> str:
         lines = [f"GOAL: {instruction}", "",
-                 "This is the start of the run — no skill has been executed yet."]
+                 "INITIAL RUN STATE: No skill has been executed yet in this run."]
         note = self._gripper_note()
         if note:
             lines.append(note)
         if has_image:
-            lines.append("The attached photo shows the workspace as it is right now.")
-            lines.append("Plan the skills needed to get from THIS state to the goal. "
-                         "If the goal already appears satisfied, answer [\"DONE\"].")
+            lines.append("The attached photo shows the workspace right now at the start of the run.")
+            lines.append("FIRST: check if the goal is ALREADY satisfied in the photo (e.g. object is inside target location). If so, answer ONLY [\"DONE\"].")
+            lines.append("Otherwise, observe the workspace carefully: determine what phase the robot and environment are currently in. "
+                         "If an intermediate phase is already accomplished (e.g. an object is already grasped/held or aligned), "
+                         "do NOT repeat earlier skills. Plan ONLY the remaining skills needed to reach the goal.")
         else:
-            lines.append("No photo of the workspace is available; assume the standard start state.")
+            lines.append("No photo of the workspace is available; assume standard start state.")
         return "\n".join(lines)
 
     def _build_replan_context(self, instruction: str, step: str, tag: str,
@@ -541,15 +591,19 @@ class Orchestrator:
         lines.append(f"Re-plan attempt {replans} of {max_replans}.")
         lines.append("")
         if has_image:
-            lines.append("The attached photo shows the workspace right now. "
-                         "Decide what the robot should do from here to reach the goal.")
+            lines.append("The attached photo shows the workspace right now.")
+            lines.append("FIRST: check if the goal is ALREADY satisfied in the photo (e.g. the target object is already inside the target location/destination). "
+                         "If the goal is satisfied, respond ONLY with [\"DONE\"].")
+            lines.append("Otherwise, observe the workspace state carefully (photos + ROBOT STATE + PROGRESS THIS RUN). "
+                         "If an intermediate stage is already accomplished or if an object is already held/aligned, "
+                         "do NOT repeat earlier skills. Plan ONLY the remaining skills needed from this current state to reach the goal.")
         else:
-            lines.append("No photo is available — decide from the progress above.")
+            lines.append("No photo is available — evaluate ROBOT STATE and PROGRESS THIS RUN to plan the remaining skills to reach the goal.")
         return "\n".join(lines)
 
-    def _create_plan(self, instruction: str, image_b64: str | None = None) -> list[str]:
-        """Ask the CEO for a plan. On re-plan calls image_b64 is the same
-        snapshot the inspector just judged — the CEO reasons from the failure
+    def _create_plan(self, instruction: str, images_b64: list[str] | None = None) -> tuple[list[str], str]:
+        """Ask the CEO for a plan. On re-plan calls images_b64 are the same
+        snapshots the inspector just judged — the CEO reasons from the failure
         *tag* either way, but the tag alone can't describe anything outside
         its small fixed vocabulary (a second object in the way, the wrong
         thing moved, ...). Without the photo, re-planning is really just
@@ -560,45 +614,46 @@ class Orchestrator:
             plan = [s["slug"] for s in step_catalog(self.cfg)]
             self.emit("log", level="WARN",
                       message="Plánovač přeskočen — použito pevné pořadí kroků.")
-            return plan
+            return plan, ""
 
         if not self.cfg.get("planner_vision", True):
-            image_b64 = None
+            images_b64 = None
 
+        count_str = f" ({len(images_b64)} snímky kamery)" if images_b64 else ""
         self.emit("log", level="INFO",
-                  message=f"CEO plánuje: „{instruction}\"" + (" (se snímkem scény)" if image_b64 else ""))
+                  message=f"CEO plánuje: „{instruction}\"{count_str}")
         system = self._build_planner_prompt()
         model = self.cfg.get("llm_model", "local-llm")
 
         def ask(with_image: bool) -> str:
-            user_content: Any = instruction
-            if with_image and image_b64:
-                user_content = [
-                    {"type": "text", "text": instruction},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-                ]
-            return self.lm.chat(model, [{"role": "system", "content": system},
-                                        {"role": "user", "content": user_content}])
+            imgs = images_b64 if with_image else None
+            return self.lm.chat_with_images(
+                model=model,
+                user_prompt=instruction,
+                images_b64=imgs,
+                system_prompt=system,
+                temperature=0.1,
+                max_tokens=2048
+            )
 
         try:
             reply = ask(with_image=True)
         except Exception as e:
-            if not image_b64:
+            if not images_b64:
                 raise
-            # The configured planner model may not accept image input at all
-            # (LM Studio then usually answers with an HTTP error rather than
-            # silently ignoring the image) — fall back to text-only so a
-            # non-vision planner model doesn't hard-fail the whole re-plan.
             self.emit("log", level="WARN",
                       message=f"Plánovač se snímkem selhal ({e}) — zkouším bez snímku "
                               "(model plánovače asi neumí obraz).")
             reply = ask(with_image=False)
 
+        reasoning = parse_reasoning_sentence(reply)
         plan = parse_json_array(reply)
         if plan is None:
             raise RuntimeError(f"CEO nevrátil platné JSON pole: {reply[:200]}")
         self.emit("log", level="INFO", message=f"Surový plán: {plan}")
-        return plan
+        if reasoning:
+            self.emit("log", level="INFO", message=f"Odůvodnění CEO: „{reasoning}“")
+        return plan, reasoning
 
     def _resolve_plan(self, raw_plan: list[str]) -> list[str]:
         """Drop hallucinated IDs and expand the goal into its ordered steps.
@@ -636,17 +691,10 @@ class Orchestrator:
                           message=f"Neznámé ID kroku '{item}' — zahozeno.")
         return resolved
 
-    # -- layer 3: the inspector -------------------------------------------
+    # -- layer 3: the inspector ───────────────────────────────────────────
     @staticmethod
     def _read_verdict(raw_reply: str) -> tuple[bool, str]:
-        """Map the inspector's reply onto a verdict.
-
-        SUCCESS is matched strictly (the whole answer, bar punctuation) rather
-        than as a substring: 'the step was not successful' contains the
-        substring SUCCESS, and the old check turned exactly that kind of reply
-        into a pass. Anything that is neither a known tag nor a clean SUCCESS
-        counts as a failure — an unreadable verdict must never advance the plan.
-        """
+        """Map the inspector's reply onto a verdict."""
         upper = raw_reply.upper()
         for tag in FAILURE_TAGS:
             if tag.upper() in upper:
@@ -657,20 +705,53 @@ class Orchestrator:
             return True, "SUCCESS"
         return False, "[unknown_failure]"
 
-    def _verify(self, step_slug: str, image_b64: str) -> tuple[bool, str]:
-        step_cfg = next((s for s in step_catalog(self.cfg) if s["slug"] == step_slug), {})
-        # verify_hint describes the observable END STATE; description is the
-        # dataset annotation of the ACTION ("nájezd nad kostku"), which is a
-        # poor thing to ask a vision model to confirm. Fall back to it only
-        # when no hint is configured.
-        expected = step_cfg.get("verify_hint") or step_cfg.get("description") or step_slug
-        prompt = VERIFY_PROMPT.format(step=step_slug, expected=expected)
-        if self.cfg.get("scene_description"):
-            prompt = f"Scene: {self.cfg['scene_description']}\n\n" + prompt
+    def _verify(self, step_slug: str, images_b64: list[str], plan: list[str] | None = None, step_index: int = 0) -> tuple[bool, str]:
+        cfg = self.cfg
+        catalog = step_catalog(cfg)
+        step_cfg = next((s for s in catalog if s["slug"] == step_slug), {})
+        step_desc = step_cfg.get("description") or step_slug
+        expected = step_cfg.get("verify_hint") or step_desc
+
+        lines = [
+            "You are the visual inspector of a robotic manipulation system.",
+            "Your task is to inspect the attached photo(s) of the workspace after a step completed.\n",
+        ]
+        if cfg.get("scene_description"):
+            lines.append(f"SCENE & ENVIRONMENT:\n{cfg['scene_description']}\n")
+
+        lines.append(f"OVERALL GOAL: '{cfg.get('task_slug')}' — {cfg.get('task_description', '')}\n")
+
+        if plan:
+            lines.append("ACTIVE PLAN CREATED BY CEO PLANNER:")
+            for i, p_slug in enumerate(plan, 1):
+                p_cfg = next((s for s in catalog if s["slug"] == p_slug), {})
+                p_desc = p_cfg.get("description") or p_slug
+                grasp_note = " [grasps object]" if p_cfg.get("grasp") else " [positioning/approach, no grasp]"
+                if i - 1 < step_index:
+                    status = "[COMPLETED PREVIOUSLY]"
+                elif i - 1 == step_index:
+                    status = "[JUST EXECUTED - VERIFY THIS NOW]"
+                else:
+                    status = "[PENDING LATER IN PLAN]"
+                lines.append(f"  {i}. '{p_slug}' ({p_desc}){grasp_note} -> {status}")
+            lines.append("")
+        else:
+            lines.append("TASK SKILLS CATALOG (ALL STEPS IN TASK):")
+            for i, s in enumerate(catalog, 1):
+                grasp_note = " [grasps object]" if s.get("grasp") else " [positioning/approach, no grasp]"
+                lines.append(f"  {i}. '{s['slug']}' ({s['description']}){grasp_note}")
+            lines.append("")
+
+        total_steps = len(plan) if plan else len(catalog)
+        lines.append(f"STEP JUST EXECUTED (STEP {step_index + 1} OF {total_steps}): '{step_slug}' ({step_desc})")
+        lines.append(f"EXPECTED OUTCOME TO VERIFY NOW: {expected}\n")
+        lines.append(VERIFY_PROMPT_RULES)
+
+        prompt = "\n".join(lines)
 
         model = self.cfg.get("vlm_model", "local-vlm")
         for attempt in (1, 2):
-            reply = self.lm.chat_with_image(model, prompt, image_b64)
+            reply = self.lm.chat_with_images(model=model, user_prompt=prompt, images_b64=images_b64, temperature=0.1, max_tokens=1024)
             raw_reply = reply.strip()
             self.emit("log", level="INFO",
                       message=f"VLM inspektor ({model}) odpovídá: „{raw_reply}\"")
@@ -679,21 +760,23 @@ class Orchestrator:
             # [unclear] means "I cannot tell from this photo", not "it failed".
             # A fresh snapshot is far cheaper than a re-plan, so take one and
             # ask once more before treating it as a failure.
-            if tag == UNCLEAR_TAG and attempt == 1 and self.daemon is not None:
-                self.emit("log", level="WARN",
-                          message="Inspektor nedokázal ze snímku rozhodnout — nový snímek.")
-                fresh = self.daemon.snapshot()
-                if fresh:
-                    image_b64 = fresh
-                    self.emit("snapshot", image=fresh, step=step_slug)
-                    continue
-            return success, tag
-        return False, UNCLEAR_TAG
+            if tag != UNCLEAR_TAG or attempt == 2 or self.daemon is None:
+                break
+            self.emit("log", level="WARN",
+                      message="Inspektor nedokázal ze snímků rozhodnout — nový snímek.")
+            fresh = self.daemon.snapshot()
+            if not fresh:
+                # Bez nového snímku by druhý dotaz jen zopakoval tentýž obrázek
+                # a stál další volání VLM se zaručeně stejnou odpovědí.
+                break
+            images_b64 = fresh
+            self.emit("snapshot", images=fresh, step=step_slug)
+        return success, tag
 
     # -- the loop ----------------------------------------------------------
     def run(self, instruction: str) -> dict:
         cfg = self.cfg
-        max_replans = int(cfg.get("max_replans", 3))
+        max_replans = int(cfg.get("max_replans", 5))
         replans = 0
         started = time.time()
         self.results = []
@@ -701,29 +784,26 @@ class Orchestrator:
         try:
             self.emit("state", state="PLANNING")
 
-            # Boot the daemon BEFORE planning so the planner can look at the
-            # actual starting scene instead of assuming the textbook one. The
-            # policy it boots with is irrelevant (SET_POLICY swaps it per
-            # step); it just needs something loadable to come up with.
-            initial_image = ""
+            initial_images: list[str] = []
             catalog = step_catalog(cfg)
             if catalog and cfg.get("planner_vision", True) and not cfg.get("skip_planner"):
                 try:
                     self.daemon = Daemon(cfg, self.emit)
                     self.daemon.start(step_output_dir(cfg, catalog[0]["slug"]))
-                    initial_image = self.daemon.snapshot()
-                    if initial_image:
-                        self.emit("snapshot", image=initial_image, step="(výchozí scéna)")
+                    initial_images = self.daemon.snapshot()
+                    if initial_images:
+                        self.emit("snapshot", images=initial_images, step="(výchozí scéna)")
                 except Exception as e:
                     self.emit("log", level="WARN",
                               message=f"Výchozí snímek scény se nepodařilo pořídit ({e}) — "
                                       "plánuji bez něj.")
                     self.daemon = None
 
-            plan = self._resolve_plan(self._create_plan(
-                self._build_initial_context(instruction, bool(initial_image)),
-                image_b64=initial_image or None))
-            self.emit("plan", steps=plan)
+            raw_plan, ceo_reasoning = self._create_plan(
+                self._build_initial_context(instruction, bool(initial_images)),
+                images_b64=initial_images or None)
+            plan = self._resolve_plan(raw_plan)
+            self.emit("plan", steps=plan, reasoning=ceo_reasoning)
 
             if plan == [PLAN_DONE]:
                 self.emit("log", level="INFO",
@@ -780,31 +860,55 @@ class Orchestrator:
                         self.daemon = None
                 self.emit("step", index=index, step=step, phase="executed", reason=reason)
 
-                # 3) the inspector
+                # 3) physical validation + visual inspector
                 self.emit("state", state="VERIFYING")
-                image = self.daemon.snapshot()
-                if image:
-                    self.emit("snapshot", image=image, step=step)
-                if cfg.get("skip_inspector"):
+                images = self.daemon.snapshot()
+                if images:
+                    self.emit("snapshot", images=images, step=step)
+
+                # Physical validation: for grasp steps the current rise
+                # (protocol B) is mandatory and outranks the vision model.
+                #
+                # But only when the sensor demonstrably works. If no non-zero
+                # current has been seen even once in this run, a flat zero
+                # means "no reading", not "nothing grasped" — enforcing the
+                # check then fails every grasp step and burns the whole
+                # re-plan budget on a run that cannot possibly succeed. In
+                # that case defer to the inspector and say so loudly.
+                grasp_check_applies = is_grasp and cfg.get("protocol_b_enabled", True)
+                if grasp_check_applies and not self.daemon.load_ever_nonzero:
+                    grasp_check_applies = False
+                    self.emit("log", level="ERROR",
+                              message="Proud gripperu je celý běh nulový — čidlo nejspíš nic "
+                                      "nevrací, takže fyzické ověření úchopu nelze použít. "
+                                      "Krok posuzuje jen inspektor. Zkontroluj protokol B "
+                                      "a čtení registru proudu.")
+                protocol_b_ok = not grasp_check_applies or ("Protokol B" in (reason or ""))
+
+                if not protocol_b_ok:
+                    success, tag = False, "[object_missed]"
+                    self.emit("log", level="WARN",
+                              message=f"Fyzické ověření úchopu selhalo — krok '{step}' neaktivoval "
+                                      f"proudový protokol B (proud nepřešel práh). Označeno jako [object_missed].")
+                elif cfg.get("skip_inspector"):
                     success, tag = True, "SKIPPED"
                     self.emit("log", level="WARN",
                               message="Inspektor vypnutý (skip_inspector) — krok "
                                       "považován za úspěšný bez ověření.")
-                elif image:
-                    success, tag = self._verify(step, image)
+                elif images:
+                    success, tag = self._verify(step, images, plan=plan, step_index=index)
                 else:
-                    # Missing camera frame is a genuine failure, not a free
-                    # pass — treating it as success (the old behaviour) let
-                    # any camera/VLM hiccup silently count as task completion.
+                    # Missing camera frame is a genuine failure, not a free pass
                     success, tag = False, "[no_image]"
                     self.emit("log", level="ERROR",
                               message="Snímek z kamery se nepodařilo získat — krok "
                                       "označen jako neúspěšný.")
 
-                self.results.append({"step": step, "success": success, "tag": tag,
-                                     "reason": reason})
+                att_num = len(self.results) + 1
+                self.results.append({"attempt": att_num, "replan": replans, "step": step,
+                                     "success": success, "tag": tag, "reason": reason})
                 self.emit("step", index=index, step=step, phase="verified",
-                          success=success, tag=tag)
+                          success=success, tag=tag, reason=reason, attempt=att_num)
 
                 if success:
                     index += 1
@@ -818,16 +922,12 @@ class Orchestrator:
                 self.emit("log", level="WARN",
                           message=f"Krok '{step}' selhal ({tag}) — re-plán {replans}/{max_replans}.")
                 self.emit("state", state="PLANNING")
-                # Full picture of the run so far — NOT an instruction to resume
-                # at the failed step. Telling it where to start is what made
-                # every re-plan return the same tail of the catalog no matter
-                # what had actually happened on the table.
                 context = self._build_replan_context(
                     instruction, step, tag, reason or "", replans, max_replans,
-                    has_image=bool(image))
-                # Same snapshot the inspector just judged — the CEO should see
-                # what actually changed on the table, not just the tag word.
-                plan = self._resolve_plan(self._create_plan(context, image_b64=image or None))
+                    has_image=bool(images))
+                raw_plan, ceo_reasoning = self._create_plan(context, images_b64=images or None)
+                plan = self._resolve_plan(raw_plan)
+                self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
 
                 if plan == [PLAN_DONE]:
                     self.emit("log", level="INFO",
