@@ -10,7 +10,9 @@ let cfg = null;
 function fillForm() {
   document.querySelectorAll('[data-key]').forEach((el) => {
     const value = cfg[el.dataset.key];
-    if (value !== undefined) el.value = value;
+    if (value === undefined) return;
+    if (el.type === 'checkbox') el.checked = Boolean(value);
+    else el.value = value;
   });
   document.getElementById('boundaries').placeholder =
     Array.from({ length: Math.max(derive.steps(cfg).length - 1, 1) },
@@ -21,7 +23,9 @@ function fillForm() {
 
 function readForm() {
   document.querySelectorAll('[data-key]').forEach((el) => {
-    cfg[el.dataset.key] = el.type === 'number' ? Number(el.value) : el.value;
+    if (el.type === 'checkbox') cfg[el.dataset.key] = el.checked;
+    else if (el.type === 'number') cfg[el.dataset.key] = Number(el.value);
+    else cfg[el.dataset.key] = el.value;
   });
 }
 
@@ -41,7 +45,11 @@ function renderSteps() {
       <input class="timeout" type="number" min="1" step="0.5" placeholder="výchozí"
         title="Časový limit tohoto kroku (s) — prázdné = použije se globální „Timeout kroku""
         value="${step.timeout_s != null ? step.timeout_s : ''}">
-      <button type="button" title="Odebrat krok">✕</button>`;
+      <button type="button" title="Odebrat krok">✕</button>
+      <div class="idx"></div>
+      <input class="hint" type="text" placeholder="co má být po kroku VIDĚT (nepovinné, jinak se použije popis)"
+        title="Popis koncového stavu pro VLM inspektora. Popis kroku je akce („nájezd nad kostku“), inspektor ale potřebuje pozorovatelný výsledek („gripper je přímo nad kostkou, čelisti otevřené“)."
+        value="${escapeAttr(step.verify_hint || '')}">`;
     row.querySelector('.slug').addEventListener('input', (e) => {
       cfg.steps[i].slug = e.target.value.trim(); render();
     });
@@ -55,6 +63,11 @@ function renderSteps() {
       const v = e.target.value.trim();
       if (v === '') delete cfg.steps[i].timeout_s;
       else cfg.steps[i].timeout_s = Number(v);
+    });
+    row.querySelector('.hint').addEventListener('input', (e) => {
+      const v = e.target.value.trim();
+      if (v === '') delete cfg.steps[i].verify_hint;
+      else cfg.steps[i].verify_hint = v;
     });
     row.querySelector('button').addEventListener('click', () => {
       cfg.steps.splice(i, 1); renderSteps(); render();
@@ -318,7 +331,8 @@ function render() {
   fillForm();
 
   document.querySelectorAll('[data-key]').forEach((el) => {
-    el.addEventListener('input', () => { readForm(); render(); });
+    const evt = el.type === 'checkbox' ? 'change' : 'input';
+    el.addEventListener(evt, () => { readForm(); render(); });
   });
   document.getElementById('boundaries').addEventListener('input', render);
 

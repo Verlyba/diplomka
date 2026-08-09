@@ -155,6 +155,83 @@ odpoví HTTP chybou), kód to odchytí a zkusí re-plán znovu jen s textem —
 model plánovače tedy musí být vision-capable, aby z týhle opravy byl plný
 užitek, jinak appka jen tiše spadne zpátky na starší (slepé) chování.
 
+## 2026-08-08 — přepracování promptů obou modelů, konfigurovatelné protokoly
+
+Vzniklo z brainstormu nad tím, proč plánovač vždycky vygeneruje stejnou
+posloupnost kroků, i když by nebyla potřeba nebo byla špatná. Diagnóza měla
+čtyři příčiny, tři z nich se opravily, jedna je v pořádku a nechává se:
+
+1. **Počáteční plán byl deterministický** — a to je správně. Pro měření je
+   výhoda, že plánovač do výsledků nevnáší vlastní rozptyl. Problém byl jinde.
+2. **Re-plán dostával přímo příkaz „starting from '{step}'"** — takže poslušně
+   vracel ocas katalogu bez ohledu na to, co se na stole skutečně stalo.
+   **Opraveno:** ten pokyn je pryč. Místo něj dostane fakta (co proběhlo, co
+   uspělo, kolikrát tento krok už selhal, co hlásí gripper, fotka) a rozhodne
+   se sám.
+3. **Nesměl uvažovat** (`Return ONLY a valid JSON array`), což je pro malý
+   4B model na vizuální úloze hodně. **Opraveno:** volitelné „uvažování
+   nahlas“ — jedna věta o tom, co vidí, teprve pak plán na posledním řádku.
+4. **Neměl jak říct „nic není potřeba" ani „tohle nejde".** Prázdné pole
+   spadlo do fallbacku, který ho stejně naplnil. **Opraveno:** sentinely
+   `["DONE"]` a `["ABORT"]`, které se propisují až do výsledku běhu.
+
+**Blokátor, který to celé podmiňoval:** `parse_json_array()` bral vše mezi
+PRVNÍ `[` a POSLEDNÍ `]`. Jakmile by model směl psát prózu, věta
+„tag `[object_missed]` byl nepřesný, plán je `["grab_cube"]`" by se parsovala
+od `[object_missed]`, spadla na `JSONDecodeError` a shodila celý běh.
+**Opraveno:** parser hledá všechny vyvážené `[...]` úseky a zkouší je od
+posledního zpět — próza včetně chybových tagů v hranatých závorkách je tím
+neškodná a plán se čte z finálního výroku modelu. Otestováno na 9 případech
+včetně těch, co starou verzi shazovaly.
+
+**Počáteční snímek pro plánovač.** Daemon se teď startuje PŘED plánováním
+(s policy prvního kroku z katalogu — je to jedno, `SET_POLICY` ji stejně
+prohodí) a pořídí snímek výchozí scény. Plánovač tak nevidí učebnicový stav,
+ale skutečný. Když se snímek nepodaří pořídit, plánuje se bez něj.
+
+**Fúze s proudem gripperu.** `Daemon` si teď pamatuje poslední hodnotu `load`
+z telemetrie a plánovač dostává větu typu „gripper current 281 mA — something
+appears to be held". Je to podstatně spolehlivější než odhad z fotky shora,
+kde je malá kostka v čelistech sotva vidět — plánovač pak neopakuje úchop nad
+předmětem, který už drží. Vypínatelné (`gripper_state_in_context`).
+
+**Konfigurovatelné ukončovací protokoly.** Dřív byly prahy natvrdo v kódu.
+Robot je ale univerzální a kroky si autor navrhuje sám — úloha bez úchopu
+protokol B nepotřebuje, jiný gripper nebo předmět potřebuje jiný limit
+proudu. Přidáno do konfigurace i do UI s vysvětlením, co která metoda dělá
+a kdy ji vypnout: `protocol_a_enabled`, `protocol_a_threshold_rad`,
+`protocol_a_patience`, `protocol_b_enabled`, `protocol_b_limit_ma`.
+Daemon dostal odpovídající přepínače (`--no-protocol-a`, `--no-protocol-b`,
+`--protocol-a.threshold`, `--protocol-a.patience`, `--protocol-b.limit`);
+`--no-triggers` zůstává jako hlavní vypínač pro baseline.
+
+**VLM inspektor:**
+- **Asymetrie chyb v promptu.** Špatné `SUCCESS` posune plán ze stavu, ve
+  kterém robot není, a chyba se kumuluje; špatné selhání stojí jeden retry.
+  Prompt teď explicitně říká: nejsi-li si jistý, hlas selhání.
+- **Nalezena a opravena past v `_verify`:** kontrola `if "SUCCESS" in upper`
+  byla substringová, takže odpověď „the step was not successful“ obsahuje
+  `SUCCESSFUL` → `SUCCESS` a **vyhodnotila by se jako úspěch**. Nově se
+  SUCCESS matchuje na celou odpověď (po odstranění interpunkce); cokoli
+  nečitelného je selhání, nikdy ne postup dál.
+- **Nový tag `[unclear]`** pro zakrytý/rozmazaný snímek. Neznamená selhání,
+  ale „nedokážu z tohohle rozhodnout" — udělá se nový snímek a zeptá se
+  ještě jednou, což je mnohem levnější než re-plán.
+- **Nepovinné pole `verify_hint`** u kroku. `description` je anotace datasetu
+  a popisuje AKCI („nájezd nad kostku“), jenže inspektor potřebuje
+  pozorovatelný VÝSLEDEK („gripper je přímo nad kostkou, čelisti otevřené“).
+  Bez vyplnění se použije popis jako dřív.
+
+**Neimplementováno záměrně — učení napříč běhy.** Zvažovalo se dávat
+plánovači statistiku z minulých běhů („`pick_cube` selhává ve 40 %"). Pro
+diplomku je to past: orchestrace by se během měření učila a baseline ne, čímž
+padá zásada „stejná data, liší se jen schéma" a jednotlivé pokusy přestanou
+být nezávislé (rozbité intervaly spolehlivosti). Čistá cesta by byla nechat
+systém sbírat zkušenost na ladicích bězích, poučky **zamrznout** a teprve pak
+měřit — nebo z toho udělat samostatný experiment C měřený odděleně.
+Paměť v rámci jednoho běhu (historie pokusů v kontextu) tímhle problémem
+netrpí a implementovaná je.
+
 ## Otevřené otázky / co ověřit dál
 
 - Spustit pár testovacích běhů s novými `timeout_s` a zkontrolovat, jestli
@@ -166,5 +243,16 @@ užitek, jinak appka jen tiše spadne zpátky na starší (slepé) chování.
   `SET_TASK` a fyzicky sledovat gripper.
 - `move`/`pick_cube` modely měly jen 3000 tréninkových kroků (úmyslně kvůli
   malému datasetu) — zvážit rollout test na více checkpointech.
+- **Ověřit, že `google/gemma-4-e4b` v LM Studiu skutečně přijímá obrázky.**
+  Pokud ne, uvidíš v logu „Plánovač se snímkem selhal … zkouším bez snímku“
+  a celá práce s fotkou (počáteční i re-plán) vyjde naprázdno. Alternativa:
+  použít na plánování taky `qwen2.5-vl-7b-instruct`.
+- Ověřit, jestli `planner_reasoning` malému modelu pomáhá, nebo škodí —
+  porovnat pár běhů zapnuto/vypnuto, nebrat zlepšení jako samozřejmost.
+- Vyplnit `verify_hint` u zbylých tří kroků (u `grab_cube` je vyplněný jako
+  ukázka) — inspektor tím dostane pozorovatelný cíl místo popisu akce.
+- Zvážit posílání dvojice snímků před/po místo jednoho — otázka „změnilo se
+  něco?“ je pro VLM výrazně snazší než „je tohle správný koncový stav?“.
+  Daemon snímky cachuje, takže je to levné.
 - `release_act` mezitím dotrénován (`outputs/training/pick_and_place_release_act`
   existuje) — všechny 4 krokové modely jsou teď kompletní.

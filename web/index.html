@@ -157,10 +157,70 @@
           <label class="field">Model inspektora (VLM) <input data-key="vlm_model" type="text"></label>
           <label class="field">Timeout kroku (s) <input data-key="latch_timeout_s" type="number"></label>
         </div>
-        <div class="note">Model plánovače dostává při re-plánu po selhání kroku i snímek scény
-          (stejný, co právě posoudil inspektor) — musí tedy <b>umět obraz</b>, jinak appka tiše
-          spadne zpátky na re-plán jen podle textového tagu selhání (méně spolehlivé, protože
-          tag popisuje jen nejbližší ze čtyř kategorií, ne skutečný stav stolu).</div>
+        <div class="grid" style="margin-top:12px">
+          <label class="checkline" title="Plánovač dostane snímek scény před prvním plánem i při každém re-plánu">
+            <input data-key="planner_vision" type="checkbox"> Posílat plánovači snímky scény
+          </label>
+          <label class="checkline" title="Plánovač nejdřív popíše, co vidí, teprve pak vydá plán">
+            <input data-key="planner_reasoning" type="checkbox"> Nechat plánovač uvažovat nahlas
+          </label>
+        </div>
+        <div class="note">Model plánovače dostává snímek scény <b>před prvním plánem</b> (aby viděl
+          skutečný výchozí stav a nevymýšlel plán naslepo) i <b>při re-plánu po selhání</b> (stejný
+          snímek, co právě posoudil inspektor). Musí tedy <b>umět obraz</b> — jinak appka tiše spadne
+          zpátky na plánování jen z textu, což je méně spolehlivé, protože chybový tag popisuje jen
+          nejbližší ze čtyř kategorií, ne skutečný stav stolu. Neumí-li model obraz, vypni
+          „Posílat plánovači snímky“.</div>
+        <div class="note"><b>Uvažování nahlas</b> nechá plánovač nejdřív napsat jednu větu o tom, co
+          na snímku vidí, a teprve na posledním řádku vydat plán. Malé modely tím obvykle rozhodují
+          přesněji, ale odpověď je delší a pomalejší. Vypnuté = model vrací rovnou jen JSON pole.</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Ukončovací protokoly kroku</legend>
+        <p style="color:var(--muted);font-size:13px;margin-top:0">
+          Určují, kdy krok skončí sám od sebe — dřív, než vyprší jeho časový limit. Vhodné hodnoty
+          závisí na úloze i hardwaru, proto jde obojí vypnout a přenastavit: robot je univerzální
+          a kroky si navrhuješ sám.</p>
+        <div class="grid">
+          <label class="checkline" title="Krok skončí, když se klouby přestanou hýbat">
+            <input data-key="protocol_a_enabled" type="checkbox"> Protokol A — dosednutí kloubů
+          </label>
+          <label class="field">Práh dosednutí (rad)
+            <input data-key="protocol_a_threshold_rad" type="number" step="0.001" min="0">
+          </label>
+          <label class="field">Počet snímků v klidu
+            <input data-key="protocol_a_patience" type="number" step="1" min="1">
+          </label>
+        </div>
+        <div class="note"><b>Protokol A</b> ukončí krok, když se všechny klouby (kromě gripperu)
+          přiblíží k předpovídanému cíli blíž než uvedený práh, a vydrží tak zadaný počet snímků
+          po sobě. Znamená to, že pohyb dojel a dál už se nic neděje. Funguje pro libovolný krok
+          bez ohledu na to, jestli se něco uchopuje.</div>
+        <div class="grid" style="margin-top:12px">
+          <label class="checkline" title="Krok skončí, když proud gripperu překročí limit">
+            <input data-key="protocol_b_enabled" type="checkbox"> Protokol B — proud gripperu
+          </label>
+          <label class="field">Limit proudu (mA)
+            <input data-key="protocol_b_limit_ma" type="number" step="10" min="0">
+          </label>
+          <label class="checkline" title="Hodnotu proudu dostane plánovač jako informaci, jestli robot něco drží">
+            <input data-key="gripper_state_in_context" type="checkbox"> Hlásit stav gripperu plánovači
+          </label>
+        </div>
+        <div class="note"><b>Protokol B</b> se týká jen kroků označených jako <b>úchop</b>. Když
+          čelisti sevřou předmět, servo se zatíží a jeho proud vyskočí — překročení limitu je proto
+          spolehlivá známka, že robot něco drží, a krok se ukončí, aby politika předmět dál
+          nemačkala. Limit závisí na gripperu a předmětu: měkký nebo lehký předmět potřebuje nižší
+          hodnotu, tuhý vyšší. <b>Úloha bez úchopu protokol B nepotřebuje</b> — pak ho vypni.</div>
+        <div class="note">Zaškrtnuté <b>„Hlásit stav gripperu plánovači“</b> přidá do zadání pro
+          plánovač jednu větu s naměřeným proudem a tím, jestli robot podle něj něco drží. Je to
+          výrazně spolehlivější údaj než odhad z fotky shora, kde je malý předmět v čelistech sotva
+          vidět — plánovač pak neopakuje úchop nad předmětem, který už drží. Netýká-li se to tvé
+          úlohy, vypni.</div>
+        <div class="note warn">Baseline (monolitický model) běží vždy s <b>vypnutými oběma
+          protokoly</b> — končí jen časovým limitem. Tohle nastavení se ho proto netýká, platí jen
+          pro orchestraci.</div>
       </fieldset>
 
       <div class="row">

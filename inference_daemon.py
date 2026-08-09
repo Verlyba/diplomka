@@ -156,10 +156,16 @@ except (ImportError, AttributeError) as e:  # pragma: no cover - env dependent
     log.warning("LeRobot unavailable (%s) — simulated mode only.", e)
 
 
-# ── Termination protocol constants ──────────────────────────────────────────
+# ── Termination protocol settings ───────────────────────────────────────────
+# Defaults; every one of them is overridable from the command line because the
+# right values are task- and hardware-specific. A different gripper, a heavier
+# object or a task with completely different steps needs different thresholds,
+# and some tasks have no grasping phase at all — hence the on/off switches.
 PROTOCOL_A_THRESHOLD = 0.005   # rad
 PROTOCOL_A_PATIENCE = 5        # consecutive frames
 PROTOCOL_B_LOAD_LIMIT = 250.0  # mA
+use_protocol_a = True
+use_protocol_b = True
 # Záložní heuristika: pokud orchestrátor krok neoznačí příznakem |grasp,
 # pozná se úchopový krok podle názvu.
 GRASP_WORDS = ("uchop", "grab", "grasp", "pick", "close", "sevri", "chyt")
@@ -461,6 +467,8 @@ def stdin_reader(max_seconds: float) -> None:
 
 def main() -> None:
     global state, active_task, active_is_grasp, device, simulated, use_triggers
+    global use_protocol_a, use_protocol_b
+    global PROTOCOL_A_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_B_LOAD_LIMIT
 
     ap = argparse.ArgumentParser(description="Persistent inference daemon")
     ap.add_argument("--robot.type", dest="robot_type", default="so101_follower")
@@ -488,9 +496,31 @@ def main() -> None:
     ap.add_argument("--no-triggers", dest="no_triggers", action="store_true",
                     help="Disable protocols A/B — the task ends only on STOP or --max-seconds "
                          "(this is how the monolithic baseline is run).")
+    # Individual protocol switches and thresholds. The right values depend on
+    # the task and the hardware, so nothing here is hardcoded: a task with no
+    # grasping phase can turn protocol B off entirely, a different gripper or
+    # a heavier object needs a different current limit, and so on.
+    ap.add_argument("--no-protocol-a", dest="no_protocol_a", action="store_true",
+                    help="Disable protocol A (joints settled near the predicted target).")
+    ap.add_argument("--no-protocol-b", dest="no_protocol_b", action="store_true",
+                    help="Disable protocol B (gripper servo current threshold).")
+    ap.add_argument("--protocol-a.threshold", dest="protocol_a_threshold", type=float,
+                    default=PROTOCOL_A_THRESHOLD,
+                    help=f"Protocol A: max joint delta in rad (default {PROTOCOL_A_THRESHOLD}).")
+    ap.add_argument("--protocol-a.patience", dest="protocol_a_patience", type=int,
+                    default=PROTOCOL_A_PATIENCE,
+                    help=f"Protocol A: consecutive settled frames (default {PROTOCOL_A_PATIENCE}).")
+    ap.add_argument("--protocol-b.limit", dest="protocol_b_limit", type=float,
+                    default=PROTOCOL_B_LOAD_LIMIT,
+                    help=f"Protocol B: gripper current in mA (default {PROTOCOL_B_LOAD_LIMIT}).")
     args = ap.parse_args()
 
     use_triggers = not args.no_triggers
+    use_protocol_a = not args.no_protocol_a
+    use_protocol_b = not args.no_protocol_b
+    PROTOCOL_A_THRESHOLD = args.protocol_a_threshold
+    PROTOCOL_A_PATIENCE = args.protocol_a_patience
+    PROTOCOL_B_LOAD_LIMIT = args.protocol_b_limit
 
     def _cam_entry(name: str, index: str, width: int, height: int, fps: int) -> dict:
         try:
@@ -601,9 +631,9 @@ def main() -> None:
             settled = settled + 1 if bool(np.all(deltas < PROTOCOL_A_THRESHOLD)) else 0
 
             reason = ""
-            if use_triggers and active_is_grasp and load > PROTOCOL_B_LOAD_LIMIT:
+            if use_triggers and use_protocol_b and active_is_grasp and load > PROTOCOL_B_LOAD_LIMIT:
                 reason = f"Protokol B (proud gripperu {load:.0f} mA > {PROTOCOL_B_LOAD_LIMIT:.0f} mA)"
-            elif use_triggers and settled >= PROTOCOL_A_PATIENCE:
+            elif use_triggers and use_protocol_a and settled >= PROTOCOL_A_PATIENCE:
                 max_d = float(np.max(deltas)) if deltas.size else 0.0
                 reason = f"Protokol A (klouby dosedly, max delta {max_d:.5f} rad)"
             elif task_deadline and time.time() > task_deadline:

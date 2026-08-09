@@ -27,35 +27,72 @@ from typing import Any, Callable
 HERE = Path(__file__).resolve().parent
 
 PLANNER_SYSTEM_PROMPT = (
-    "You are an intelligent robotic arm task planner.\n"
-    "Your objective is to analyze the user's high-level goal (and any error feedback from a previous step) "
-    "and select an ordered sequence of atomic skill IDs to execute.\n\n"
-    "RULES:\n"
-    "1. Select skill IDs ONLY from the provided list of Available Atomic Skills.\n"
-    "2. Each skill has an ID, a description of what action it performs, and its expected outcome.\n"
-    "3. If a step previously failed (e.g. [object_missed] or [object_slipped]), generate a recovery plan "
-    "starting AT the failed step, not earlier. Do not repeat steps that already succeeded unless the failure "
-    "reason implies they must be redone (e.g. the grasped object was dropped, or the target moved so an "
-    "earlier positioning step is no longer valid).\n"
-    "4. When a photo of the current scene is attached, it shows the ACTUAL current state of the workspace — "
-    "trust it over the failure tag text. The tag names only the closest category of what the inspector saw; "
-    "the photo may show a different or additional problem (e.g. a second object now in the way, the gripper "
-    "empty when the tag says [target_moved]). Base the recovery plan on what the photo actually shows.\n"
-    "5. Return ONLY a valid JSON array of skill ID strings (e.g. [\"skill_a\", \"skill_b\"]). No extra text, markdown wrappers, or explanations."
+    "You are the planning layer of a three-layer robotic manipulation system.\n\n"
+    "WHAT YOU CONTROL\n"
+    "You do not move the robot yourself. You choose WHICH pre-trained skill runs next. Each skill "
+    "is a separate neural policy trained on demonstrations of one phase of the task. A skill runs "
+    "for a bounded time, then a vision inspector photographs the workspace and reports whether it "
+    "worked.\n\n"
+    "HOW TO DECIDE\n"
+    "- Plan from the CURRENT state, not from the beginning of the task. A step that already "
+    "succeeded and whose result still holds must NOT be repeated — re-running a grasp on an object "
+    "that is already held will usually drop it.\n"
+    "- When a photo is attached it is the ground truth about the workspace. A failure tag is only "
+    "the inspector's closest match from a short fixed list and can be imprecise or plain wrong. "
+    "When the photo and the tag disagree, believe the photo.\n"
+    "- Read the photo concretely: is anything held in the gripper, where is the arm, where are the "
+    "objects relative to each other and to the target?\n"
+    "- Choose the SHORTEST sequence that gets from this state to the goal. Do not pad the plan with "
+    "steps whose effect has already been achieved.\n"
+    "- If the same approach has already failed twice in this run, do not simply repeat it a third "
+    "time. Either go back to a skill that re-establishes its precondition, or give up with "
+    "[\"ABORT\"].\n\n"
+    "SPECIAL ANSWERS\n"
+    '- ["DONE"]  — the goal is already satisfied; there is nothing left to do.\n'
+    '- ["ABORT"] — no sequence of the available skills can recover from this state.\n'
+    "Use either one alone, never mixed with skill IDs."
+)
+
+PLANNER_OUTPUT_REASONING = (
+    "OUTPUT FORMAT\n"
+    "First write ONE line beginning with \"REASONING:\" describing what you actually see and what "
+    "state the task is in (one or two sentences).\n"
+    "Then, on the LAST line, output ONLY the JSON array. Write nothing after it.\n\n"
+    "Example:\n"
+    "REASONING: the gripper is empty and the cube is back on the table, so the grasp has to be redone from the approach.\n"
+    '["grab_cube", "pick_cube", "move", "release"]'
+)
+
+PLANNER_OUTPUT_TERSE = (
+    "OUTPUT FORMAT\n"
+    'Return ONLY a valid JSON array of skill ID strings, e.g. ["skill_a", "skill_b"]. '
+    "No extra text, no markdown wrappers, no explanation."
 )
 
 VERIFY_PROMPT = (
-    "The robot just finished executing step '{step}'. Expected outcome: {expected}\n"
-    "Look at the image and answer with EXACTLY one of these tags:\n"
-    '- "SUCCESS" if the expected outcome is clearly achieved in the image\n'
-    '- "[object_missed]" if the robot missed or failed to reach the object\n'
-    '- "[object_slipped]" if the object slipped or fell out of the gripper\n'
-    '- "[target_moved]" if the target container or bowl moved unexpectedly\n'
-    '- "[unknown_failure]" for any other failure\n'
-    "Answer with the tag only, no other text."
+    "You are the inspector of a robotic manipulation system. The photo shows the workspace "
+    "immediately after the robot finished one step.\n\n"
+    "STEP EXECUTED: '{step}'\n"
+    "IT SHOULD HAVE ACHIEVED: {expected}\n\n"
+    "Decide whether that outcome is visible in the photo.\n\n"
+    "When you are not certain, report a failure rather than SUCCESS. A wrong SUCCESS makes the "
+    "robot continue from a state it is not actually in and the error compounds through every later "
+    "step; a wrong failure only costs one retry.\n\n"
+    "Answer with exactly one tag and nothing else:\n"
+    "  SUCCESS            the expected outcome is clearly visible\n"
+    "  [object_missed]    the robot did not reach or align with the object\n"
+    "  [object_slipped]   the object is no longer held / has fallen\n"
+    "  [target_moved]     the target has shifted so the plan no longer fits\n"
+    "  [unclear]          the photo does not allow a decision (occluded, blurred, out of frame)\n"
+    "  [unknown_failure]  something else went wrong"
 )
 
+# [unclear] is deliberately not in this list — it means "take another photo",
+# not "the step failed". It is handled separately in _verify().
 FAILURE_TAGS = ["[object_missed]", "[object_slipped]", "[target_moved]", "[unknown_failure]"]
+UNCLEAR_TAG = "[unclear]"
+PLAN_DONE = "DONE"
+PLAN_ABORT = "ABORT"
 
 
 # ── LM Studio client (OpenAI-compatible, stdlib only) ───────────────────────
@@ -101,19 +138,44 @@ class LMStudio:
 
 
 def parse_json_array(text: str) -> list[str] | None:
-    """Parse a JSON array out of a model reply, tolerating ``` fences."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = "\n".join(l for l in cleaned.splitlines() if not l.strip().startswith("```"))
-    start, end = cleaned.find("["), cleaned.rfind("]")
-    if start != -1 and end > start:
-        cleaned = cleaned[start:end + 1]
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-        return parsed
+    """Parse the model's plan array out of a reply that may contain prose.
+
+    The old implementation took everything between the FIRST '[' and the LAST
+    ']', which breaks the moment the model is allowed to explain itself: a
+    reply like
+
+        REASONING: the tag [object_missed] was imprecise
+        ["grab_cube"]
+
+    would be sliced from '[object_missed]' and fail to parse, taking the whole
+    run down with it. Instead, scan for every balanced [...] span, try them
+    from the last one backwards, and return the first that parses as a list of
+    strings — so prose (including bracketed failure tags) before the actual
+    answer is harmless, and the plan is always read from the model's final
+    statement rather than its first bracket.
+    """
+    cleaned = "\n".join(l for l in text.splitlines() if not l.strip().startswith("```")).strip()
+
+    spans: list[str] = []
+    depth, start = 0, -1
+    for i, ch in enumerate(cleaned):
+        if ch == "[":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "]" and depth > 0:
+            depth -= 1
+            if depth == 0 and start != -1:
+                spans.append(cleaned[start:i + 1])
+                start = -1
+
+    for span in reversed(spans):
+        try:
+            parsed = json.loads(span)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+            return parsed
     return None
 
 
@@ -134,6 +196,11 @@ class Daemon:
         self._done_reason = ""
         self._snapshot = threading.Event()
         self._snapshot_b64 = ""
+        # Last gripper current seen in telemetry, in mA. Whether the arm is
+        # actually holding something is much more reliable from this than from
+        # a vision model squinting at a small object in a top-down photo, so
+        # it gets fed into the planner's context.
+        self.last_load: float | None = None
 
     # -- lifecycle ---------------------------------------------------------
     def start(self, policy_path: str) -> None:
@@ -152,6 +219,16 @@ class Daemon:
         cameras = cameras_json(cfg)
         if cameras:
             cmd.append(f"--robot.cameras={cameras}")
+        # Termination protocols are task-specific: a task with no grasping
+        # phase has no use for protocol B, and a different gripper or payload
+        # needs a different current limit.
+        if not cfg.get("protocol_a_enabled", True):
+            cmd.append("--no-protocol-a")
+        if not cfg.get("protocol_b_enabled", True):
+            cmd.append("--no-protocol-b")
+        cmd.append(f"--protocol-a.threshold={float(cfg.get('protocol_a_threshold_rad', 0.005))}")
+        cmd.append(f"--protocol-a.patience={int(cfg.get('protocol_a_patience', 5))}")
+        cmd.append(f"--protocol-b.limit={float(cfg.get('protocol_b_limit_ma', 250))}")
 
         self.emit("log", level="INFO", message="Spouštím inferenční daemon: " + " ".join(cmd))
         self.proc = subprocess.Popen(
@@ -173,7 +250,15 @@ class Daemon:
                 self._snapshot_b64 = line[len("[SNAPSHOT] "):].strip()
                 self._snapshot.set()
             elif line.startswith("[TELEMETRY] "):
-                self.emit("telemetry", message=line[len("[TELEMETRY] "):])
+                payload = line[len("[TELEMETRY] "):]
+                for field in payload.split("|"):
+                    field = field.strip()
+                    if field.startswith("load:"):
+                        try:
+                            self.last_load = float(field[len("load:"):])
+                        except ValueError:
+                            pass
+                self.emit("telemetry", message=payload)
             elif line.startswith("[STATUS] "):
                 status = line[len("[STATUS] "):]
                 self.emit("log", level="INFO", message=f"daemon: {status}")
@@ -328,13 +413,87 @@ class Orchestrator:
         cfg = self.cfg
         lines = [PLANNER_SYSTEM_PROMPT]
         if cfg.get("scene_description"):
-            lines.append("\nEnvironment & Scene Description:\n" + cfg["scene_description"])
-        lines.append(f"\nOverall Task Goal: '{cfg.get('task_slug')}' — {cfg.get('task_description', '')}")
-        lines.append("\nAvailable Atomic Skills (use ONLY these skill IDs):")
+            lines.append("\nENVIRONMENT & SCENE\n" + cfg["scene_description"])
+        lines.append(f"\nGOAL: '{cfg.get('task_slug')}' — {cfg.get('task_description', '')}")
+        lines.append("\nAVAILABLE SKILLS (use ONLY these skill IDs):")
         for s in step_catalog(cfg):
-            grasp_type = " (Grasping action)" if s.get("grasp") else ""
-            lines.append(f"- Skill ID: '{s['slug']}' | Action/Outcome: {s['description']}{grasp_type}")
-        lines.append("\nRespond ONLY with a JSON array of skill IDs.")
+            grasp_type = " [ends by closing the gripper on the object]" if s.get("grasp") else ""
+            lines.append(f"- '{s['slug']}': {s['description']}{grasp_type}")
+        lines.append("")
+        lines.append(PLANNER_OUTPUT_REASONING if cfg.get("planner_reasoning", True)
+                     else PLANNER_OUTPUT_TERSE)
+        return "\n".join(lines)
+
+    def _gripper_note(self) -> str:
+        """One line about what the gripper current says, or '' when unavailable.
+
+        Whether the arm is actually holding something is far more reliably read
+        off the gripper servo current than guessed from a small object in a
+        640x480 top-down photo — so when it is available it goes into the
+        planner's context alongside the image. Off by default for tasks where
+        it means nothing (no grasping phase, different end effector).
+        """
+        if not self.cfg.get("gripper_state_in_context", True):
+            return ""
+        if self.daemon is None or self.daemon.last_load is None:
+            return ""
+        load = self.daemon.last_load
+        limit = float(self.cfg.get("protocol_b_limit_ma", 250))
+        holding = "something appears to be held" if load > limit else "nothing appears to be held"
+        return f"ROBOT STATE: gripper current {load:.0f} mA — {holding}"
+
+    def _build_initial_context(self, instruction: str, has_image: bool) -> str:
+        lines = [f"GOAL: {instruction}", "",
+                 "This is the start of the run — no skill has been executed yet."]
+        note = self._gripper_note()
+        if note:
+            lines.append(note)
+        if has_image:
+            lines.append("The attached photo shows the workspace as it is right now.")
+            lines.append("Plan the skills needed to get from THIS state to the goal. "
+                         "If the goal already appears satisfied, answer [\"DONE\"].")
+        else:
+            lines.append("No photo of the workspace is available; assume the standard start state.")
+        return "\n".join(lines)
+
+    def _build_replan_context(self, instruction: str, step: str, tag: str,
+                              reason: str, replans: int, max_replans: int,
+                              has_image: bool) -> str:
+        """Everything the planner needs to decide what to do next.
+
+        Deliberately does NOT tell it to "start from the failed step" — that
+        instruction is what made every re-plan produce the same tail of the
+        catalog regardless of what actually happened. The planner gets the
+        facts (what ran, what succeeded, how often this step has failed, what
+        the gripper reports, the photo) and decides for itself.
+        """
+        expected = next((s.get("verify_hint") or s.get("description")
+                         for s in step_catalog(self.cfg) if s["slug"] == step), step)
+        failures_here = sum(1 for r in self.results if r["step"] == step and not r["success"])
+
+        lines = [f"GOAL: {instruction}", "", "PROGRESS THIS RUN:"]
+        if not self.results:
+            lines.append("  (nothing completed yet)")
+        for i, r in enumerate(self.results, 1):
+            verdict = "SUCCESS" if r["success"] else f"FAILED {r['tag']}"
+            ended = r.get("reason") or "?"
+            lines.append(f"  {i}. {r['step']} -> {verdict}  (ended: {ended})")
+
+        lines += ["", f"LAST STEP: '{step}' — should have achieved: {expected}",
+                  f"The inspector reported {tag}."]
+        if failures_here > 1:
+            lines.append(f"This step has now failed {failures_here}x in this run — "
+                         "repeating it unchanged is unlikely to work.")
+        note = self._gripper_note()
+        if note:
+            lines.append(note)
+        lines.append(f"Re-plan attempt {replans} of {max_replans}.")
+        lines.append("")
+        if has_image:
+            lines.append("The attached photo shows the workspace right now. "
+                         "Decide what the robot should do from here to reach the goal.")
+        else:
+            lines.append("No photo is available — decide from the progress above.")
         return "\n".join(lines)
 
     def _create_plan(self, instruction: str, image_b64: str | None = None) -> list[str]:
@@ -351,6 +510,9 @@ class Orchestrator:
             self.emit("log", level="WARN",
                       message="Plánovač přeskočen — použito pevné pořadí kroků.")
             return plan
+
+        if not self.cfg.get("planner_vision", True):
+            image_b64 = None
 
         self.emit("log", level="INFO",
                   message=f"CEO plánuje: „{instruction}\"" + (" (se snímkem scény)" if image_b64 else ""))
@@ -388,13 +550,32 @@ class Orchestrator:
         return plan
 
     def _resolve_plan(self, raw_plan: list[str]) -> list[str]:
-        """Drop hallucinated IDs and expand the goal into its ordered steps."""
+        """Drop hallucinated IDs and expand the goal into its ordered steps.
+
+        The two sentinels are passed through untouched so the caller can tell
+        "the planner deliberately said there is nothing to do / nothing that
+        can be done" apart from "the planner produced garbage" — both of which
+        used to arrive here as an empty list.
+        """
         steps = step_catalog(self.cfg)
         known = {s["slug"] for s in steps}
         goal = self.cfg.get("task_slug", "")
+
+        sentinels = {PLAN_DONE, PLAN_ABORT}
+        upper = [i.strip().upper() for i in raw_plan]
+        for sentinel in (PLAN_DONE, PLAN_ABORT):
+            if sentinel in upper:
+                if len(raw_plan) > 1:
+                    self.emit("log", level="WARN",
+                              message=f"Plánovač vrátil {sentinel} spolu s kroky — "
+                                      f"beru jen {sentinel}.")
+                return [sentinel]
+
         resolved: list[str] = []
         for item in raw_plan:
             item = item.strip()
+            if item.upper() in sentinels:
+                continue
             if item == goal:
                 resolved.extend(s["slug"] for s in steps)
             elif item in known:
@@ -405,24 +586,58 @@ class Orchestrator:
         return resolved
 
     # -- layer 3: the inspector -------------------------------------------
-    def _verify(self, step_slug: str, image_b64: str) -> tuple[bool, str]:
-        expected = next((s["description"] for s in step_catalog(self.cfg)
-                         if s["slug"] == step_slug), step_slug)
-        prompt = VERIFY_PROMPT.format(step=step_slug, expected=expected or step_slug)
-        if self.cfg.get("scene_description"):
-            prompt = f"Scene: {self.cfg['scene_description']}\n\n" + prompt
-        reply = self.lm.chat_with_image(self.cfg.get("vlm_model", "local-vlm"),
-                                        prompt, image_b64)
-        raw_reply = reply.strip()
-        self.emit("log", level="INFO",
-                  message=f"VLM inspektor ({self.cfg.get('vlm_model', 'vlm')}) odpovídá: „{raw_reply}\"")
+    @staticmethod
+    def _read_verdict(raw_reply: str) -> tuple[bool, str]:
+        """Map the inspector's reply onto a verdict.
+
+        SUCCESS is matched strictly (the whole answer, bar punctuation) rather
+        than as a substring: 'the step was not successful' contains the
+        substring SUCCESS, and the old check turned exactly that kind of reply
+        into a pass. Anything that is neither a known tag nor a clean SUCCESS
+        counts as a failure — an unreadable verdict must never advance the plan.
+        """
         upper = raw_reply.upper()
         for tag in FAILURE_TAGS:
             if tag.upper() in upper:
                 return False, tag
-        if "SUCCESS" in upper:
+        if UNCLEAR_TAG.upper() in upper:
+            return False, UNCLEAR_TAG
+        if upper.strip().strip('."\'*` ') == "SUCCESS":
             return True, "SUCCESS"
         return False, "[unknown_failure]"
+
+    def _verify(self, step_slug: str, image_b64: str) -> tuple[bool, str]:
+        step_cfg = next((s for s in step_catalog(self.cfg) if s["slug"] == step_slug), {})
+        # verify_hint describes the observable END STATE; description is the
+        # dataset annotation of the ACTION ("nájezd nad kostku"), which is a
+        # poor thing to ask a vision model to confirm. Fall back to it only
+        # when no hint is configured.
+        expected = step_cfg.get("verify_hint") or step_cfg.get("description") or step_slug
+        prompt = VERIFY_PROMPT.format(step=step_slug, expected=expected)
+        if self.cfg.get("scene_description"):
+            prompt = f"Scene: {self.cfg['scene_description']}\n\n" + prompt
+
+        model = self.cfg.get("vlm_model", "local-vlm")
+        for attempt in (1, 2):
+            reply = self.lm.chat_with_image(model, prompt, image_b64)
+            raw_reply = reply.strip()
+            self.emit("log", level="INFO",
+                      message=f"VLM inspektor ({model}) odpovídá: „{raw_reply}\"")
+            success, tag = self._read_verdict(raw_reply)
+
+            # [unclear] means "I cannot tell from this photo", not "it failed".
+            # A fresh snapshot is far cheaper than a re-plan, so take one and
+            # ask once more before treating it as a failure.
+            if tag == UNCLEAR_TAG and attempt == 1 and self.daemon is not None:
+                self.emit("log", level="WARN",
+                          message="Inspektor nedokázal ze snímku rozhodnout — nový snímek.")
+                fresh = self.daemon.snapshot()
+                if fresh:
+                    image_b64 = fresh
+                    self.emit("snapshot", image=fresh, step=step_slug)
+                    continue
+            return success, tag
+        return False, UNCLEAR_TAG
 
     # -- the loop ----------------------------------------------------------
     def run(self, instruction: str) -> dict:
@@ -435,9 +650,37 @@ class Orchestrator:
 
         try:
             self.emit("state", state="PLANNING")
-            plan = self._resolve_plan(self._create_plan(instruction))
+
+            # Boot the daemon BEFORE planning so the planner can look at the
+            # actual starting scene instead of assuming the textbook one. The
+            # policy it boots with is irrelevant (SET_POLICY swaps it per
+            # step); it just needs something loadable to come up with.
+            initial_image = ""
+            catalog = step_catalog(cfg)
+            if catalog and cfg.get("planner_vision", True) and not cfg.get("skip_planner"):
+                try:
+                    self.daemon = Daemon(cfg, self.emit)
+                    self.daemon.start(step_output_dir(cfg, catalog[0]["slug"]))
+                    initial_image = self.daemon.snapshot()
+                    if initial_image:
+                        self.emit("snapshot", image=initial_image, step="(výchozí scéna)")
+                except Exception as e:
+                    self.emit("log", level="WARN",
+                              message=f"Výchozí snímek scény se nepodařilo pořídit ({e}) — "
+                                      "plánuji bez něj.")
+                    self.daemon = None
+
+            plan = self._resolve_plan(self._create_plan(
+                self._build_initial_context(instruction, bool(initial_image)),
+                image_b64=initial_image or None))
             self.emit("plan", steps=plan)
 
+            if plan == [PLAN_DONE]:
+                self.emit("log", level="INFO",
+                          message="Plánovač vyhodnotil, že cíl je už splněný — nic se nespouští.")
+                return self._finish(True, started)
+            if plan == [PLAN_ABORT]:
+                raise RuntimeError("Plánovač označil úlohu za neproveditelnou z výchozího stavu.")
             if not plan:
                 self.emit("log", level="WARN", message="Plán je prázdný — konec.")
                 return self._finish(True, started)
@@ -527,11 +770,25 @@ class Orchestrator:
                 self.emit("log", level="WARN",
                           message=f"Krok '{step}' selhal ({tag}) — re-plán {replans}/{max_replans}.")
                 self.emit("state", state="PLANNING")
-                context = (f"The robot tried to execute '{instruction}', but step '{step}' failed ({tag}). "
-                           f"Generate a new recovery plan starting from '{step}' to finish the instruction '{instruction}'.")
+                # Full picture of the run so far — NOT an instruction to resume
+                # at the failed step. Telling it where to start is what made
+                # every re-plan return the same tail of the catalog no matter
+                # what had actually happened on the table.
+                context = self._build_replan_context(
+                    instruction, step, tag, reason or "", replans, max_replans,
+                    has_image=bool(image))
                 # Same snapshot the inspector just judged — the CEO should see
                 # what actually changed on the table, not just the tag word.
                 plan = self._resolve_plan(self._create_plan(context, image_b64=image or None))
+
+                if plan == [PLAN_DONE]:
+                    self.emit("log", level="INFO",
+                              message="Plánovač po selhání vyhodnotil, že cíl je přesto splněný.")
+                    return self._finish(True, started)
+                if plan == [PLAN_ABORT]:
+                    raise RuntimeError(
+                        f"Plánovač označil stav po selhání kroku '{step}' ({tag}) "
+                        "za nezotavitelný.")
                 if not plan:
                     # Robust fallback: retry from the failed step onwards
                     all_slugs = [s["slug"] for s in step_catalog(cfg)]

@@ -129,8 +129,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .checkline input { width: auto; }
 
 /* ── Editor kroků ─────────────────────────────────────────────────────── */
-.step-row { display: grid; grid-template-columns: 30px 1fr 2fr auto 70px 34px; gap: 10px; align-items: center; margin-bottom: 8px; }
+.step-row { display: grid; grid-template-columns: 30px 1fr 2fr auto 70px 34px; gap: 10px 10px; align-items: center; margin-bottom: 12px; }
 .step-row .timeout { width: 100%; }
+/* druhý řádek: nápověda pro VLM inspektora přes zbytek mřížky */
+.step-row .hint { grid-column: 2 / -1; font-size: 13px; }
 .step-row .checkline { white-space: nowrap; }
 .step-row .idx { color: var(--accent); font-family: var(--mono); font-size: 13px; text-align: center; }
 

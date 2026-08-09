@@ -89,6 +89,16 @@ DEFAULT_CONFIG: dict = {
     "latch_timeout_s": 60,
     "step_timeout_s": 8,
     "max_replans": 3,
+    # planner behaviour
+    "planner_vision": True,
+    "planner_reasoning": True,
+    # step termination protocols — task- and hardware-specific, hence togglable
+    "protocol_a_enabled": True,
+    "protocol_a_threshold_rad": 0.005,
+    "protocol_a_patience": 5,
+    "protocol_b_enabled": True,
+    "protocol_b_limit_ma": 250,
+    "gripper_state_in_context": True,
 }
 
 MIME = {

@@ -57,6 +57,20 @@ const DEFAULTS = {
   latch_timeout_s: 60,
   step_timeout_s: 8,
   max_replans: 3,
+
+  // Plánovač: posílat mu snímky scény a nechat ho nejdřív popsat, co vidí.
+  planner_vision: true,
+  planner_reasoning: true,
+
+  // Ukončovací protokoly kroku. Správné hodnoty závisí na úloze i hardwaru
+  // (jiný gripper, jiný předmět, úloha bez úchopu), proto jsou obě metody
+  // vypínatelné a jejich prahy konfigurovatelné.
+  protocol_a_enabled: true,
+  protocol_a_threshold_rad: 0.005,
+  protocol_a_patience: 5,
+  protocol_b_enabled: true,
+  protocol_b_limit_ma: 250,
+  gripper_state_in_context: true,
 };
 
 /** Načte konfiguraci: nejdřív backend (autorita), jinak localStorage. */
