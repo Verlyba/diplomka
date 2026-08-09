@@ -232,6 +232,35 @@ měřit — nebo z toho udělat samostatný experiment C měřený odděleně.
 Paměť v rámci jednoho běhu (historie pokusů v kontextu) tímhle problémem
 netrpí a implementovaná je.
 
+## 2026-08-09 — appka nekontrolovala, co je natrénované; oprava verify_hint
+
+Vzniklo z konkrétní stížnosti nad screenshotem editoru kroků: appka neříká,
+jestli je pro daný krok checkpoint vůbec hotový, a formulář nejasně
+komunikuje, které pole čte který model.
+
+**Nalezena a opravená chyba:** `step_catalog()` nikdy nekopírovala
+`verify_hint` z konfigurace do katalogu, kterým se krmí `_verify()`. Pole ve
+formuláři šlo vyplnit, uložilo se do `config.json`, ale inspektor ho **nikdy
+neviděl** — vždycky dostal jen `description` jako fallback. Vyplněná
+nápověda u `grab_cube` z minulé iterace tedy celou dobu nedělala nic.
+
+**Kontrola natrénovanosti.** Nová `orchestrator.checkpoint_status(path)` dělá
+přesně tu samou kontrolu, kterou `inference_daemon.resolve_policy_dir()` dělá
+při skutečném načítání (`<path>/checkpoints/last/pretrained_model/config.json`
+existuje?) — takže appka a live běh se nemůžou rozejít v tom, co je „hotové".
+`model_status(cfg)` to spočítá pro baseline i všechny nakonfigurované kroky,
+nový endpoint `GET /api/models` to vystavuje. Setup stránka u každého kroku
+(a u baseline ve 2 sekcích) ukazuje kolečko: zeleně „● N kroků", žlutě
+„○ netrénováno" (title má plnou cestu). Zjištěno při ověřování: `release_act`
+má jen **1000 kroků** (ostatní 5000/5000/3000/3000) — silně nedotrénováno,
+řešit před měřením.
+
+**Zpřehlednění formuláře.** Editor kroků teď u každého pole píše, kam jde
+(do tooltipu i do statického vysvětlení nad tabulkou): slug → ID dovednosti
+pro LLM + jméno datasetu/checkpointu; popis → anotace + katalog pro LLM +
+záložní text pro VLM; úchop → LLM popis dovednosti + daemon protokol B;
+časový limit → jen daemon; cílový stav (hint) → jen VLM.
+
 ## Otevřené otázky / co ověřit dál
 
 - Spustit pár testovacích běhů s novými `timeout_s` a zkontrolovat, jestli
@@ -250,7 +279,10 @@ netrpí a implementovaná je.
 - Ověřit, jestli `planner_reasoning` malému modelu pomáhá, nebo škodí —
   porovnat pár běhů zapnuto/vypnuto, nebrat zlepšení jako samozřejmost.
 - Vyplnit `verify_hint` u zbylých tří kroků (u `grab_cube` je vyplněný jako
-  ukázka) — inspektor tím dostane pozorovatelný cíl místo popisu akce.
+  ukázka) — inspektor tím dostane pozorovatelný cíl místo popisu akce. Teď už
+  se skutečně použije (oprava `step_catalog()` 2026-08-09).
+- **`release_act` má jen 1000 tréninkových kroků** — dotrénovat před měřením,
+  appka to teď hlásí žlutě/zeleně přímo u kroku na Setup stránce.
 - Zvážit posílání dvojice snímků před/po místo jednoho — otázka „změnilo se
   něco?“ je pro VLM výrazně snazší než „je tohle správný koncový stav?“.
   Daemon snímky cachuje, takže je to levné.

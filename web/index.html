@@ -117,14 +117,35 @@
         </label>
         <h3>Kroky orchestrace</h3>
         <p style="color:var(--muted);font-size:13px;margin-top:0">
-          Pořadí = pořadí fází v jedné demonstraci. Popis je zároveň to, co má po kroku
-          vidět VLM inspektor. Zaškrtnutý <b>úchop</b> znamená, že krok končí sevřením objektu
-          (protokol B — proud gripperu), ne dosednutím kloubů. <b>Časový limit</b> je nepovinný —
-          prázdné pole použije globální „Timeout kroku" níže. Nastav ho podle skutečného trvání
-          téhle fáze v nahraných demonstracích (viz <code class="inline">&lt;dataset&gt;.marks.json</code>) —
-          plochý limit kratší než reálné trvání kroku ho bude systematicky uřezávat před dokončením.
+          Pořadí = pořadí fází v jedné demonstraci. Každé pole jde jinam — u každého je
+          napsáno kam:
         </p>
+        <ul style="color:var(--muted);font-size:13px;margin-top:0;padding-left:20px">
+          <li><b>Slug</b> — jméno kroku. Jde do názvu datasetu/checkpointu
+            (<code class="inline">local/&lt;úloha&gt;_&lt;slug&gt;</code>,
+            <code class="inline">outputs/training/&lt;úloha&gt;_&lt;slug&gt;_act</code>) a je to ID
+            dovednosti, kterým na něj odkazuje <b>LLM plánovač</b>.</li>
+          <li><b>Popis</b> — anotace datasetu (co se v tom kroku dělá) a zároveň text, který
+            <b>LLM plánovač</b> vidí u každé dovednosti v katalogu. Používá ho i <b>VLM inspektor</b>,
+            ale jen když není vyplněná nápověda níže — popis akce („nájezd nad kostku") je pro
+            ověřování horší než popis výsledku.</li>
+          <li><b>Úchop</b> — řekne <b>LLM plánovači</b>, že dovednost končí sevřením (přidá se to
+            do jejího popisu v katalogu), a <b>daemonu</b>, že se na tomto kroku má sledovat
+            protokol B (proud gripperu).</li>
+          <li><b>Časový limit</b> — jde jen <b>daemonu</b>, jako horní hranice délky kroku. Nepovinné,
+            prázdné pole použije globální „Timeout kroku" níže. Nastav podle skutečného trvání téhle
+            fáze v nahraných demonstracích (<code class="inline">&lt;dataset&gt;.marks.json</code>) —
+            plochý limit kratší než reálné trvání ho bude systematicky uřezávat před dokončením.</li>
+          <li><b>Cílový stav (nápověda)</b> — jde jen <b>VLM inspektorovi</b>, přepisuje k tomuto
+            účelu popis. Popis kroku je akce, tohle pole má být pozorovatelný výsledek („gripper je
+            přímo nad kostkou, čelisti otevřené").</li>
+        </ul>
         <div id="steps-editor"></div>
+        <div id="model-status-legend" class="note" style="display:none">
+          Kolečko u kroku = existuje natrénovaný checkpoint pro <code class="inline">outputs/training/&lt;úloha&gt;_&lt;slug&gt;_act</code>
+          (přesně ta cesta, kterou by při běhu načetl daemon) — nesouvisí s LLM/VLM, jen s tím, jestli
+          je krokový model vůbec hotový.
+        </div>
         <button id="add-step" type="button">+ Přidat krok</button>
       </fieldset>
 
@@ -419,7 +440,9 @@
       <p><b>A) Baseline:</b> jeden model na celou úlohu z plného datasetu.
          <b>B) Orchestrace:</b> jeden malý model na každý krok z dílčích datasetů.
          Stejná architektura, stejné hyperparametry, stejná data — liší se jen dělení úlohy.</p>
-      <h3>A) Monolitický baseline</h3>
+      <h3>A) Monolitický baseline
+        <span class="model-badge" data-badge-for="__baseline__" title="Stav se zjišťuje…">…</span>
+      </h3>
       <div id="cmds-train-baseline"></div>
       <h3>B) Modely jednotlivých kroků</h3>
       <div id="cmds-train-steps"></div>
@@ -446,7 +469,8 @@
     <div class="block-body">
       <p>Baseline se pouští stejným daemonem jako kroky orchestrace — jen s vypnutými
         ukončovacími protokoly a jedním modelem na celou úlohu. Díky tomu se obě větve
-        porovnání liší opravdu jen tím, co se měří.</p>
+        porovnání liší opravdu jen tím, co se měří.
+        <span class="model-badge" data-badge-for="__baseline__" title="Stav se zjišťuje…">…</span></p>
       <div id="cmds-baseline-run"></div>
       <div class="note">Daemon čte příkazy ze standardního vstupu. Po hlášce
         <code class="inline">[STATUS] DAEMON_READY</code> napiš

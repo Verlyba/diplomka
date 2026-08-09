@@ -4,6 +4,40 @@
  * příkazové řádky a dej k nim tlačítko „kopírovat". Nic nespouští. */
 
 let cfg = null;
+let modelStatus = null; // { baseline: {trained, steps, path}, steps: {slug: {...}} } — z /api/models
+
+/** Nastaví text/třídu/title existujícího <span class="model-badge"> podle
+ *  stavu checkpointu — mutace na místě, ne vkládání nového <span> přes
+ *  innerHTML (to by ho vnořilo do sebe sama). Stejná cesta, co by načetl
+ *  daemon (viz orchestrator.checkpoint_status) — appka a live běh se tu
+ *  nemůžou rozejít. */
+function applyStatusBadge(el, info) {
+  if (!info) {
+    el.textContent = '…'; el.className = 'model-badge'; el.title = 'Stav se zjišťuje…';
+  } else if (info.trained) {
+    el.textContent = `● ${info.steps} kroků`; el.className = 'model-badge ok'; el.title = info.path;
+  } else {
+    el.textContent = '○ netrénováno'; el.className = 'model-badge warn'; el.title = info.path;
+  }
+}
+
+async function refreshModelStatus() {
+  try {
+    const resp = await fetch('/api/models');
+    if (!resp.ok) return;
+    modelStatus = await resp.json();
+  } catch (_) {
+    return; // server neběží / cesta nedostupná — badge zůstane "zjišťuje se"
+  }
+  document.querySelectorAll('.step-row [data-badge-for]').forEach((el) => {
+    applyStatusBadge(el, modelStatus.steps[el.dataset.badgeFor]);
+  });
+  document.querySelectorAll('[data-badge-for="__baseline__"]').forEach((el) => {
+    applyStatusBadge(el, modelStatus.baseline);
+  });
+  const legend = document.getElementById('model-status-legend');
+  if (legend) legend.style.display = '';
+}
 
 /* ── Formulář ──────────────────────────────────────────────────────────── */
 
@@ -37,18 +71,24 @@ function renderSteps() {
     row.className = 'step-row';
     row.innerHTML = `
       <div class="idx">${i + 1}.</div>
-      <input class="slug" type="text" placeholder="slug_kroku" value="${escapeAttr(step.slug || '')}">
-      <input class="desc" type="text" placeholder="co má být po kroku vidět" value="${escapeAttr(step.description || '')}">
-      <label class="checkline" title="Krok končí sevřením objektu (protokol B), ne dosednutím kloubů">
+      <input class="slug" type="text" placeholder="slug_kroku" value="${escapeAttr(step.slug || '')}"
+        title="ID dovednosti pro LLM plánovač; jde i do jmen datasetu a checkpointu">
+      <input class="desc" type="text" placeholder="popis akce → dataset + LLM plánovač"
+        title="Anotace datasetu a popis dovednosti pro LLM plánovače. Záložní text pro VLM
+inspektora, pokud níže nevyplníš cílový stav."
+        value="${escapeAttr(step.description || '')}">
+      <label class="checkline" title="→ LLM plánovač (popis dovednosti) a daemon (protokol B — proud gripperu)">
         <input class="grasp" type="checkbox" ${step.grasp ? 'checked' : ''}> úchop
       </label>
       <input class="timeout" type="number" min="1" step="0.5" placeholder="výchozí"
-        title="Časový limit tohoto kroku (s) — prázdné = použije se globální „Timeout kroku""
+        title="→ daemon. Časový limit tohoto kroku (s) — prázdné = použije se globální „Timeout kroku""
         value="${step.timeout_s != null ? step.timeout_s : ''}">
+      <span class="model-badge" data-badge-for="${escapeAttr(step.slug || '')}" title="Stav se zjišťuje…">…</span>
       <button type="button" title="Odebrat krok">✕</button>
       <div class="idx"></div>
-      <input class="hint" type="text" placeholder="co má být po kroku VIDĚT (nepovinné, jinak se použije popis)"
-        title="Popis koncového stavu pro VLM inspektora. Popis kroku je akce („nájezd nad kostku“), inspektor ale potřebuje pozorovatelný výsledek („gripper je přímo nad kostkou, čelisti otevřené“)."
+      <input class="hint" type="text" placeholder="cílový stav → jen VLM inspektor (nepovinné, jinak se použije popis)"
+        title="→ VLM inspektor. Popis kroku výše je AKCE („nájezd nad kostku“), inspektor ale
+potřebuje pozorovatelný VÝSLEDEK („gripper je přímo nad kostkou, čelisti otevřené“)."
         value="${escapeAttr(step.verify_hint || '')}">`;
     row.querySelector('.slug').addEventListener('input', (e) => {
       cfg.steps[i].slug = e.target.value.trim(); render();
@@ -74,6 +114,7 @@ function renderSteps() {
     });
     host.appendChild(row);
   });
+  refreshModelStatus();
 }
 
 function escapeAttr(s) {

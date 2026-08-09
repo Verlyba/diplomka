@@ -11,6 +11,7 @@ orchestration page needs:
     GET  /api/config     current configuration (shared with the setup page)
     POST /api/config     save the configuration to config.json
     GET  /api/lmstudio   which models LM Studio currently has loaded
+    GET  /api/models     which baseline/step ACT checkpoints actually exist on disk
     POST /api/run        start an orchestration run  {instruction, ...}
     POST /api/stop       stop the running orchestration
     GET  /api/status     is something running right now
@@ -320,6 +321,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "models": models})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
+        elif path == "/api/models":
+            # Same path lookup orchestrator.py itself uses (checkpoint_status),
+            # so "Setup říká trénováno" and "co se skutečně nahraje" nemůžou
+            # rozejít — počítá se to jednou, ne dvakrát na dvou místech.
+            self._send_json(orch.model_status(load_config()))
         elif path == "/api/runs":
             runs_dir = HERE / "runs"
             files = sorted((f.name for f in runs_dir.glob("*.json")), reverse=True) \

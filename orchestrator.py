@@ -385,8 +385,42 @@ def step_catalog(cfg: dict) -> list[dict]:
                     entry["timeout_s"] = float(timeout_s)
                 except (TypeError, ValueError):
                     pass
+            verify_hint = (step.get("verify_hint") or "").strip()
+            if verify_hint:
+                entry["verify_hint"] = verify_hint
             out.append(entry)
     return out
+
+
+def checkpoint_status(output_dir: str) -> dict:
+    """Whether `<output_dir>/checkpoints/last` resolves to a real, loadable
+    checkpoint, and at how many training steps — the exact same lookup
+    inference_daemon.py's resolve_policy_dir() does, so "appka říká trénováno"
+    and "daemon to skutečně nahraje" can never disagree.
+    """
+    last = Path(output_dir) / "checkpoints" / "last"
+    resolved = last.resolve() if last.exists() else None
+    pretrained = (resolved / "pretrained_model") if resolved else None
+    trained = bool(pretrained and (pretrained / "config.json").exists())
+    steps = None
+    if trained:
+        try:
+            steps = int(resolved.name)
+        except ValueError:
+            steps = None
+    return {"path": output_dir, "trained": trained, "steps": steps}
+
+
+def model_status(cfg: dict) -> dict:
+    """Checkpoint status for the baseline and every configured step —
+    exactly the models a live orchestration run or the baseline daemon would
+    try to load right now, so the Setup page can show it before you find out
+    the hard way mid-run."""
+    return {
+        "baseline": checkpoint_status(baseline_output_dir(cfg)),
+        "steps": {s["slug"]: checkpoint_status(step_output_dir(cfg, s["slug"]))
+                  for s in step_catalog(cfg)},
+    }
 
 
 # ── Orchestrator ────────────────────────────────────────────────────────────
