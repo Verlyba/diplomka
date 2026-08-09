@@ -388,15 +388,28 @@ def step_catalog(cfg: dict) -> list[dict]:
             verify_hint = (step.get("verify_hint") or "").strip()
             if verify_hint:
                 entry["verify_hint"] = verify_hint
+            train_steps = step.get("train_steps")
+            if train_steps not in (None, ""):
+                try:
+                    entry["train_steps"] = int(train_steps)
+                except (TypeError, ValueError):
+                    pass
             out.append(entry)
     return out
 
 
-def checkpoint_status(output_dir: str) -> dict:
+def checkpoint_status(output_dir: str, target_steps: int | None = None) -> dict:
     """Whether `<output_dir>/checkpoints/last` resolves to a real, loadable
     checkpoint, and at how many training steps — the exact same lookup
     inference_daemon.py's resolve_policy_dir() does, so "appka říká trénováno"
     and "daemon to skutečně nahraje" can never disagree.
+
+    `sufficient` compares the checkpoint's own step count against
+    `target_steps` (the configured --steps for this model, per-step override
+    or the global default) — a fajfka means "trained to what's currently
+    configured", not just "some checkpoint exists somewhere". Raise the
+    target after training and the badge turns back into a cross until you
+    train further, on purpose.
     """
     last = Path(output_dir) / "checkpoints" / "last"
     resolved = last.resolve() if last.exists() else None
@@ -408,7 +421,9 @@ def checkpoint_status(output_dir: str) -> dict:
             steps = int(resolved.name)
         except ValueError:
             steps = None
-    return {"path": output_dir, "trained": trained, "steps": steps}
+    sufficient = trained and (target_steps is None or (steps or 0) >= target_steps)
+    return {"path": output_dir, "trained": trained, "steps": steps,
+            "target_steps": target_steps, "sufficient": sufficient}
 
 
 def model_status(cfg: dict) -> dict:
@@ -416,9 +431,11 @@ def model_status(cfg: dict) -> dict:
     exactly the models a live orchestration run or the baseline daemon would
     try to load right now, so the Setup page can show it before you find out
     the hard way mid-run."""
+    default_target = int(cfg.get("train_steps") or 0) or None
     return {
-        "baseline": checkpoint_status(baseline_output_dir(cfg)),
-        "steps": {s["slug"]: checkpoint_status(step_output_dir(cfg, s["slug"]))
+        "baseline": checkpoint_status(baseline_output_dir(cfg), default_target),
+        "steps": {s["slug"]: checkpoint_status(step_output_dir(cfg, s["slug"]),
+                                                s.get("train_steps") or default_target)
                   for s in step_catalog(cfg)},
     }
 

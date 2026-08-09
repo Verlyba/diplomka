@@ -129,11 +129,13 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .checkline input { width: auto; }
 
 /* ── Editor kroků ─────────────────────────────────────────────────────── */
-.step-row { display: grid; grid-template-columns: 30px 1fr 2fr auto 70px 92px 34px; gap: 10px 10px; align-items: center; margin-bottom: 12px; }
-.step-row .timeout { width: 100%; }
-/* druhý řádek: nápověda pro VLM inspektora přes zbytek mřížky */
-.step-row .hint { grid-column: 2 / -1; font-size: 13px; }
-.model-badge { font-size: 12px; text-align: center; padding: 3px 6px; border-radius: var(--radius); white-space: nowrap; color: var(--muted); }
+.step-row { display: grid; grid-template-columns: 30px 1fr 2fr auto 70px 36px 34px; gap: 10px 10px; align-items: center; margin-bottom: 12px; }
+.step-row .timeout, .step-row .train-steps { width: 100%; }
+/* druhý řádek: nápověda pro VLM inspektora (šíře) + kroků tréninku
+   (přesně pod „Časový limit", stejná šířka sloupce) */
+.step-row .hint { grid-column: 2 / 5; font-size: 13px; }
+.step-row .train-steps { grid-column: 5 / 6; font-size: 13px; }
+.model-badge { font-size: 14px; font-weight: 600; text-align: center; padding: 3px 0; border-radius: var(--radius); white-space: nowrap; color: var(--muted); }
 .model-badge.ok { color: var(--green); border: 1px solid var(--green); }
 .model-badge.warn { color: var(--yellow); border: 1px solid var(--yellow); }
 .step-row .checkline { white-space: nowrap; }

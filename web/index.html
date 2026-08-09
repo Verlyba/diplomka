@@ -139,12 +139,16 @@
           <li><b>Cílový stav (nápověda)</b> — jde jen <b>VLM inspektorovi</b>, přepisuje k tomuto
             účelu popis. Popis kroku je akce, tohle pole má být pozorovatelný výsledek („gripper je
             přímo nad kostkou, čelisti otevřené").</li>
+          <li><b>Kroků tréninku</b> — jde jen do generovaného <code class="inline">lerobot_train</code>
+            příkazu pro tenhle krok níže (sekce 7). Nepovinné, prázdné pole použije globální
+            „Kroků tréninku". Podle tohohle čísla appka pozná, jestli checkpoint fajfku zaslouží.</li>
         </ul>
         <div id="steps-editor"></div>
         <div id="model-status-legend" class="note" style="display:none">
-          Kolečko u kroku = existuje natrénovaný checkpoint pro <code class="inline">outputs/training/&lt;úloha&gt;_&lt;slug&gt;_act</code>
-          (přesně ta cesta, kterou by při běhu načetl daemon) — nesouvisí s LLM/VLM, jen s tím, jestli
-          je krokový model vůbec hotový.
+          <b>✓</b> = checkpoint na disku má aspoň tolik kroků, kolik je teď nastaveno v „Kroků
+          tréninku" u tohoto kroku (nebo v globálním, pokud pole nevyplníš). <b>✗</b> = checkpoint
+          buď vůbec neexistuje, nebo má méně kroků, než je aktuální cíl — zvednul jsi číslo a ještě
+          jsi nedotrénoval. Cesta a přesný počet kroků jsou v title (najetí myší).
         </div>
         <button id="add-step" type="button">+ Přidat krok</button>
       </fieldset>

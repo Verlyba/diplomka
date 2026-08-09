@@ -10,14 +10,26 @@ let modelStatus = null; // { baseline: {trained, steps, path}, steps: {slug: {..
  *  stavu checkpointu — mutace na místě, ne vkládání nového <span> přes
  *  innerHTML (to by ho vnořilo do sebe sama). Stejná cesta, co by načetl
  *  daemon (viz orchestrator.checkpoint_status) — appka a live běh se tu
- *  nemůžou rozejít. */
+ *  nemůžou rozejít.
+ *
+ *  Fajfka = natrénováno na (aspoň) aktuálně nastavený cíl. Křížek = buď
+ *  žádný checkpoint, nebo existuje, ale má míň kroků, než je teď v poli
+ *  „Kroků tréninku" — zvýšil jsi cíl a ještě jsi to nedotrénoval. */
 function applyStatusBadge(el, info) {
   if (!info) {
     el.textContent = '…'; el.className = 'model-badge'; el.title = 'Stav se zjišťuje…';
+    return;
+  }
+  const target = info.target_steps != null ? ` / cíl ${info.target_steps}` : '';
+  if (info.sufficient) {
+    el.textContent = '✓'; el.className = 'model-badge ok';
+    el.title = `${info.path}\nnatrénováno: ${info.steps} kroků${target}`;
   } else if (info.trained) {
-    el.textContent = `● ${info.steps} kroků`; el.className = 'model-badge ok'; el.title = info.path;
+    el.textContent = '✗'; el.className = 'model-badge warn';
+    el.title = `${info.path}\nnatrénováno jen ${info.steps} kroků${target} — dotrénovat`;
   } else {
-    el.textContent = '○ netrénováno'; el.className = 'model-badge warn'; el.title = info.path;
+    el.textContent = '✗'; el.className = 'model-badge warn';
+    el.title = `${info.path}\nnetrénováno${target}`;
   }
 }
 
@@ -89,7 +101,12 @@ inspektora, pokud níže nevyplníš cílový stav."
       <input class="hint" type="text" placeholder="cílový stav → jen VLM inspektor (nepovinné, jinak se použije popis)"
         title="→ VLM inspektor. Popis kroku výše je AKCE („nájezd nad kostku“), inspektor ale
 potřebuje pozorovatelný VÝSLEDEK („gripper je přímo nad kostkou, čelisti otevřené“)."
-        value="${escapeAttr(step.verify_hint || '')}">`;
+        value="${escapeAttr(step.verify_hint || '')}">
+      <input class="train-steps" type="number" min="1" step="500" placeholder="výchozí"
+        title="Kroků tréninku pro tento krok — prázdné = použije se globální „Kroků tréninku" níže.
+Podle tohohle čísla se i pozná, jestli je checkpoint hotový (fajfka), nebo jen částečně
+natrénovaný (křížek) — appka porovnává, kolik kroků checkpoint skutečně má."
+        value="${step.train_steps != null ? step.train_steps : ''}">`;
     row.querySelector('.slug').addEventListener('input', (e) => {
       cfg.steps[i].slug = e.target.value.trim(); render();
     });
@@ -108,6 +125,12 @@ potřebuje pozorovatelný VÝSLEDEK („gripper je přímo nad kostkou, čelisti
       const v = e.target.value.trim();
       if (v === '') delete cfg.steps[i].verify_hint;
       else cfg.steps[i].verify_hint = v;
+    });
+    row.querySelector('.train-steps').addEventListener('input', (e) => {
+      const v = e.target.value.trim();
+      if (v === '') delete cfg.steps[i].train_steps;
+      else cfg.steps[i].train_steps = Number(v);
+      render();
     });
     row.querySelector('button').addEventListener('click', () => {
       cfg.steps.splice(i, 1); renderSteps(); render();
@@ -305,12 +328,18 @@ function render() {
   ]);
 
   // 6) trénink
-  const trainFlags = (repo, job, out) => [`${py} -m lerobot.scripts.lerobot_train`,
-    arg('policy.type', c.policy_type), arg('dataset.repo_id', repo),
-    arg('steps', c.train_steps), arg('batch_size', c.batch_size),
-    arg('save_freq', c.save_freq), arg('job_name', job),
-    arg('policy.device', c.device), '--wandb.enable=false',
-    arg('output_dir', out), '--policy.push_to_hub=false'].join(' ');
+  const trainFlags = (repo, job, out, trainSteps) => {
+    const steps = trainSteps || c.train_steps;
+    // save_freq vyšší než cílové kroky by neuložilo žádný checkpoint —
+    // ohlídat to tu, ne až v chybové hlášce lerobot-train.
+    const saveFreq = Math.min(c.save_freq, steps);
+    return [`${py} -m lerobot.scripts.lerobot_train`,
+      arg('policy.type', c.policy_type), arg('dataset.repo_id', repo),
+      arg('steps', steps), arg('batch_size', c.batch_size),
+      arg('save_freq', saveFreq), arg('job_name', job),
+      arg('policy.device', c.device), '--wandb.enable=false',
+      arg('output_dir', out), '--policy.push_to_hub=false'].join(' ');
+  };
 
   fill('cmds-train-baseline', [
     [`Baseline ${c.policy_type.toUpperCase()}`, `celý dataset → ${derive.baselineOut(c)}`,
@@ -318,9 +347,9 @@ function render() {
   ]);
 
   fill('cmds-train-steps', steps.map((s, i) => [
-    `Krok ${i + 1}: ${s.slug}`,
+    `Krok ${i + 1}: ${s.slug}` + (s.train_steps ? ` (${s.train_steps} kroků)` : ''),
     `${derive.stepRepo(c, s.slug)} → ${derive.stepOut(c, s.slug)}`,
-    trainFlags(derive.stepRepo(c, s.slug), `${c.task_slug}_${s.slug}`, derive.stepOut(c, s.slug)),
+    trainFlags(derive.stepRepo(c, s.slug), `${c.task_slug}_${s.slug}`, derive.stepOut(c, s.slug), s.train_steps),
   ]));
 
   // 7) baseline běh

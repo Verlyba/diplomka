@@ -261,6 +261,34 @@ pro LLM + jméno datasetu/checkpointu; popis → anotace + katalog pro LLM +
 záložní text pro VLM; úchop → LLM popis dovednosti + daemon protokol B;
 časový limit → jen daemon; cílový stav (hint) → jen VLM.
 
+## 2026-08-09 — počet tréninkových kroků per krok, badge zjednodušený na fajfku
+
+Předchozí iterace (badge s cestou a počtem kroků) byla vedle — autor chtěl
+jednodušší věc: nastavit si u kroku, na kolik kroků se má trénovat, aby se
+podle toho přepsal generovaný `lerobot_train` příkaz, a mít jen fajfku/křížek,
+jestli je to hotové.
+
+- Nové nepovinné pole **„Kroků tréninku"** u každého kroku (`train_steps`),
+  stejný vzor jako `timeout_s` — prázdné pole = použije se globální „Kroků
+  tréninku". Generovaný příkaz v sekci 7 teď použije tohle číslo místo
+  globálního a `save_freq` se automaticky omezí na `min(save_freq, steps)` —
+  vyšší `save_freq` než cílové kroky by neuložilo žádný checkpoint vůbec,
+  což by se zjistilo až z chybové hlášky `lerobot-train`.
+- Badge zjednodušený na **✓ / ✗**. ✓ = checkpoint na disku má aspoň tolik
+  kroků, kolik je aktuálně nastavený cíl (per-krokové pole, nebo globální
+  default). ✗ = buď žádný checkpoint, nebo existuje, ale má míň kroků, než
+  je teď nastaveno — typicky proto, že se cíl zvedl a ještě se nedotrénovalo.
+  Backend to počítá v `checkpoint_status(path, target_steps)` /
+  `model_status(cfg)`, cesta a přesný počet kroků jsou v title po najetí myší.
+- Opraven i skutečný stav věci: globální `train_steps` v `config.json` byl
+  pořád `20000`, ale nikdy se na to nic netrénovalo — všechny čtyři modely
+  vznikly ručně spuštěnými příkazy s jinými čísly (5000/3000/3000/1000).
+  Nastaveno tak, aby fajfky odpovídaly realitě: `grab_cube` (5000),
+  `pick_cube` (3000), `move` (3000) mají teď per-krokový `train_steps`
+  rovný tomu, na co byly úmyslně natrénované (✓); `release` žádný override
+  nemá, takže spadá do (opraveného) globálního defaultu 5000 — a protože má
+  na disku jen 1000, správně to teď appka hlásí křížkem.
+
 ## Otevřené otázky / co ověřit dál
 
 - Spustit pár testovacích běhů s novými `timeout_s` a zkontrolovat, jestli
