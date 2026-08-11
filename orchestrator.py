@@ -275,7 +275,7 @@ class Daemon:
             cmd.append("--no-protocol-b")
         cmd.append(f"--protocol-a.threshold={float(cfg.get('protocol_a_threshold_rad', 0.005))}")
         cmd.append(f"--protocol-a.patience={int(cfg.get('protocol_a_patience', 5))}")
-        cmd.append(f"--protocol-b.limit={float(cfg.get('protocol_b_limit_ma', 250))}")
+        cmd.append(f"--protocol-b.limit={float(cfg.get('protocol_b_limit_ma', 280))}")
 
         self.emit("log", level="INFO", message="Spouštím inferenční daemon: " + " ".join(cmd))
         self.proc = subprocess.Popen(
@@ -735,7 +735,7 @@ class Orchestrator:
             return ""
         load = self.daemon.last_load
         baseline = self.daemon.last_baseline or 0.0
-        holding_limit = float(self.cfg.get("holding_limit_ma", 20))
+        holding_limit = float(self.cfg.get("holding_limit_ma", 50))
         rise = load - baseline
 
         holding_str = "something appears to be held" if rise >= holding_limit else "nothing appears to be held"
