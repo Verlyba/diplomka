@@ -60,9 +60,6 @@ function fillForm() {
     if (el.type === 'checkbox') el.checked = Boolean(value);
     else el.value = value;
   });
-  document.getElementById('boundaries').placeholder =
-    Array.from({ length: Math.max(derive.steps(cfg).length - 1, 1) },
-      (_, i) => (4 + i * 5).toFixed(1)).join(',');
   renderSteps();
   render();
   isFormDirty = false;
@@ -213,6 +210,10 @@ function render() {
   const steps = derive.steps(c);
   const cameras = derive.camerasArg(c);
   applyStrategy();
+
+  document.getElementById('boundaries').placeholder =
+    Array.from({ length: Math.max(steps.length - 1, 1) },
+      (_, i) => (4 + i * 5).toFixed(1)).join(',');
 
   // 1) instalace
   fill('cmds-install', [
@@ -411,6 +412,12 @@ let isFormDirty = false;
     cfg.steps = cfg.steps || [];
     cfg.steps.push({ slug: '', description: '', grasp: false });
     renderSteps(); render();
+    isFormDirty = true;
+  });
+
+  document.getElementById('reset').addEventListener('click', () => {
+    cfg = JSON.parse(JSON.stringify(DEFAULTS));
+    fillForm();
     isFormDirty = true;
   });
 
