@@ -25,13 +25,15 @@ stdout markers (parsed by orchestrator.py)
     [STATUS] TASK_DONE: <task> | <reason>
     [STATUS] TASK_STOPPED
     [SNAPSHOT] <base64 jpeg>
-    [TELEMETRY] joints:... | target:... | load:... | settle:n/5
+    [TELEMETRY] joints:... | target:... | load:... | baseline:... | settle:n/5
 
 Step termination (why a step ends without anybody telling it to):
     Protocol A — all joints settled under 0.005 rad from the target for 5
                  consecutive frames (the motion is finished).
-    Protocol B — gripper servo current above 250 mA (contact with an object),
-                 used for grasping steps so the policy does not keep squeezing.
+    Protocol B — gripper servo load/current risen above the idle baseline
+                 (contact with an object), used for grasping steps so the
+                 policy does not keep squeezing. Reads Present_Load or
+                 Present_Current, whichever the hardware actually populates.
 Once a step ends (either protocol, a timeout, or an explicit STOP) the arm's
 current position is captured and re-issued every tick until the next SET_TASK
 (see freeze_robot()) — otherwise whatever the orchestrator's LLM/VLM round
@@ -164,7 +166,7 @@ except (ImportError, AttributeError) as e:  # pragma: no cover - env dependent
 # and some tasks have no grasping phase at all — hence the on/off switches.
 PROTOCOL_A_THRESHOLD = 0.005   # rad
 PROTOCOL_A_PATIENCE = 5        # consecutive frames
-PROTOCOL_B_LOAD_LIMIT = 250.0  # mA
+PROTOCOL_B_LOAD_LIMIT = 250.0  # mA rise over the idle baseline (see idle_load_baseline)
 use_protocol_a = True
 use_protocol_b = True
 # Pozn.: dřív tu byla záložní heuristika GRASP_WORDS, která úchopový krok
@@ -190,6 +192,17 @@ simulated = True
 use_triggers = True
 task_deadline = 0.0
 hold_action: dict | None = None  # last commanded position, re-sent while WAITING to hold torque
+
+# Present_Current/Present_Load are raw register values, not calibrated mA —
+# an absolute threshold silently assumes a unit that may not hold on a given
+# servo/firmware. Comparing the RISE over an idle baseline sidesteps that: it
+# doesn't matter what "0" means, only how far the reading has moved from it.
+# The baseline is sampled during the first WAITING stretch of the run (gripper
+# open, nothing grasped yet) and then frozen — later WAITING periods can occur
+# mid-task with an object already held, so they must not be allowed to drag
+# the baseline upward.
+idle_load_baseline: float | None = None
+_any_task_started = False
 
 _frame_lock = threading.Lock()
 last_frames: dict[str, np.ndarray] = {}
@@ -351,55 +364,32 @@ def snapshot_b64() -> str:
 
 
 _logged_obs_keys = False
-_load_register: str | None = None   # registr, ze kterého se proud daří číst
-_load_register_dead = False         # žádný kandidát nefunguje — přestat zkoušet
+_load_register: str = "Present_Load"
+_last_valid_load: float = 0.0
 
 
 def extract_gripper_load(obs: dict) -> float:
-    """Extract gripper servo current/load in mA directly from Feetech motor bus or observation dict."""
-    global _logged_obs_keys
+    """Extract gripper servo load directly from Feetech motor bus or observation dict."""
+    global _logged_obs_keys, _load_register, _last_valid_load
     if not _logged_obs_keys and obs:
         non_img_keys = [k for k in obs.keys() if not k.startswith("observation.images")]
         log.info("Robot observation keys: %s", non_img_keys)
         _logged_obs_keys = True
 
-    # 1. Read directly from the motor bus. get_observation() of the SO-101
-    #    follower returns only "<motor>.pos" values and camera frames — no
-    #    current anywhere — so the bus read below is the ONLY path that can
-    #    actually produce a reading; branch 2 is just a safety net for other
-    #    robot classes.
-    #
-    #    This runs on every control tick, so it must not cost more than one
-    #    serial round-trip: the working register is resolved once and then
-    #    reused. A register that returns a value (even 0.0 — an idle gripper
-    #    genuinely draws almost nothing) counts as working; only an exception
-    #    disqualifies it. Once every candidate has failed, stop probing so a
-    #    robot without this register doesn't burn bus bandwidth every frame.
-    global _load_register, _load_register_dead
-    if robot is not None and not simulated and not _load_register_dead:
+    if robot is not None and not simulated:
         bus = getattr(robot, "bus", getattr(getattr(robot, "follower_arm", None), "bus", None))
         if bus is not None and hasattr(bus, "read"):
-            candidates = [_load_register] if _load_register else ["Present_Current", "Present_Load"]
-            for reg in candidates:
+            for reg in (_load_register, "Present_Load", "Present_Current"):
                 try:
                     val = bus.read(reg, "gripper")
-                except Exception as e:
-                    if _load_register:      # dosud fungující registr začal selhávat
-                        log.warning("Čtení registru %s selhalo (%s) — zkusím znovu příště.", reg, e)
-                        _load_register = None
-                    continue
-                if val is None:
-                    continue
-                if _load_register != reg:
-                    _load_register = reg
-                    log.info("Proud gripperu se čte z registru '%s' (surová hodnota "
-                             "registru, ne miliampéry — prahy nastav podle měření).", reg)
-                return abs(float(val.item() if hasattr(val, "item") else val))
-            if not _load_register:
-                _load_register_dead = True
-                log.warning("Žádný z registrů proudu gripperu (Present_Current, Present_Load) "
-                            "nejde přečíst — protokol B a stav gripperu pro plánovač "
-                            "nebudou fungovat. Další pokusy vypnuty.")
+                    if val is not None:
+                        fval = abs(float(val.item() if hasattr(val, "item") else val))
+                        _load_register = reg
+                        _last_valid_load = fval
+                        return fval
+                except Exception:
+                    pass
+            return _last_valid_load
 
     # 2. Fallback to parsing observation dictionary
     def _to_float(val: Any) -> float | None:
@@ -515,7 +505,7 @@ def freeze_robot() -> None:
 # ── stdin command loop ──────────────────────────────────────────────────────
 
 def stdin_reader(max_seconds: float) -> None:
-    global state, active_task, active_is_grasp, task_deadline
+    global state, active_task, active_is_grasp, task_deadline, _any_task_started
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -544,6 +534,7 @@ def stdin_reader(max_seconds: float) -> None:
             # hlásí krok bez jména.
             active_task = task
             active_is_grasp = is_grasp
+            _any_task_started = True
             if policy is not None and hasattr(policy, "reset"):
                 try:
                     policy.reset()
@@ -587,6 +578,7 @@ def main() -> None:
     global state, active_task, active_is_grasp, device, simulated, use_triggers
     global use_protocol_a, use_protocol_b
     global PROTOCOL_A_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_B_LOAD_LIMIT
+    global idle_load_baseline
 
     ap = argparse.ArgumentParser(description="Persistent inference daemon")
     ap.add_argument("--robot.type", dest="robot_type", default="so101_follower")
@@ -630,7 +622,8 @@ def main() -> None:
                     help=f"Protocol A: consecutive settled frames (default {PROTOCOL_A_PATIENCE}).")
     ap.add_argument("--protocol-b.limit", dest="protocol_b_limit", type=float,
                     default=PROTOCOL_B_LOAD_LIMIT,
-                    help=f"Protocol B: gripper current in mA (default {PROTOCOL_B_LOAD_LIMIT}).")
+                    help="Protocol B: gripper current rise over the idle baseline, in mA "
+                         f"(default {PROTOCOL_B_LOAD_LIMIT}).")
     args = ap.parse_args()
 
     use_triggers = not args.no_triggers
@@ -709,6 +702,9 @@ def main() -> None:
                     obs = robot.get_observation()
                     cache_frame(obs)
                     load = extract_gripper_load(obs)
+                    if not _any_task_started:
+                        idle_load_baseline = load if idle_load_baseline is None \
+                            else 0.9 * idle_load_baseline + 0.1 * load
                     current = np.array(
                         [float(v) for k, v in obs.items()
                          if isinstance(v, (int, float)) and k.endswith(".pos")],
@@ -750,8 +746,11 @@ def main() -> None:
             settled = settled + 1 if bool(np.all(deltas < PROTOCOL_A_THRESHOLD)) else 0
 
             reason = ""
-            if use_triggers and use_protocol_b and active_is_grasp and load > PROTOCOL_B_LOAD_LIMIT:
-                reason = f"Protokol B (proud gripperu {load:.0f} mA > {PROTOCOL_B_LOAD_LIMIT:.0f} mA)"
+            baseline = idle_load_baseline if idle_load_baseline is not None else 0.0
+            rise = load - baseline
+            if use_triggers and use_protocol_b and active_is_grasp and rise > PROTOCOL_B_LOAD_LIMIT:
+                reason = (f"Protokol B (zátěž gripperu {load:.0f}, nárůst {rise:.0f} "
+                          f"nad klid {baseline:.0f} > limit {PROTOCOL_B_LOAD_LIMIT:.0f})")
             elif use_triggers and use_protocol_a and settled >= PROTOCOL_A_PATIENCE:
                 max_d = float(np.max(deltas)) if deltas.size else 0.0
                 reason = f"Protokol A (klouby dosedly, max delta {max_d:.5f} rad)"
@@ -770,7 +769,9 @@ def main() -> None:
             print(
                 f"[TELEMETRY] joints:{','.join(f'{x:.3f}' for x in joints)} | "
                 f"target:{','.join(f'{x:.3f}' for x in target)} | "
-                f"load:{load:.0f} | settle:{settled}/{PROTOCOL_A_PATIENCE}",
+                f"load:{load:.0f} | "
+                f"baseline:{(idle_load_baseline if idle_load_baseline is not None else 0.0):.0f} | "
+                f"settle:{settled}/{PROTOCOL_A_PATIENCE}",
                 flush=True)
 
         elapsed = time.time() - tick

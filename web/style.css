@@ -269,3 +269,282 @@ table.plain td:first-child { font-family: var(--mono); font-size: 12.5px; color:
 .summary { font-size: 13.5px; }
 .summary b.ok { color: var(--green); }
 .summary b.fail { color: var(--red); }
+
+/* ── Modal Pop-up pro modaly a datasety ────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(10, 12, 16, 0.78);
+  backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 840px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.modal-header .close-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.modal-header .close-btn:hover {
+  background: var(--border);
+  color: var(--text);
+}
+.modal-body {
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.modal-section {
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.modal-section h4 {
+  margin: 0 0 12px 0;
+  font-size: 13.5px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dataset-select-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.dataset-select-row label {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ckpt-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ckpt-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.ckpt-card:hover {
+  border-color: var(--muted);
+}
+.ckpt-card.selected {
+  border-color: var(--accent);
+  background: rgba(255, 155, 48, 0.08);
+}
+.ckpt-card .radio-col {
+  display: flex;
+  align-items: center;
+  padding-right: 12px;
+}
+.ckpt-card .info-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ckpt-card .title {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ckpt-card .meta {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  gap: 12px;
+}
+.ckpt-card .badge-col {
+  padding-left: 12px;
+}
+.btn-doc {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-doc:hover {
+  background: var(--panel-2);
+  border-color: var(--accent);
+}
+
+button.secondary {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+button.secondary:hover {
+  background: var(--panel);
+  border-color: var(--muted);
+}
+button.warn {
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+button.warn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ffffff;
+}
+.btn-step-modal.active-custom {
+  border-color: var(--accent);
+  background: rgba(255, 155, 48, 0.15);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* ── Dataset list items v modalu ──────────────────────────────────────── */
+.ds-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  transition: border-color 0.15s;
+}
+.ds-item:hover { border-color: var(--muted); }
+.ds-item.ds-exists { border-left: 3px solid var(--green); }
+.ds-item.ds-missing { border-left: 3px solid var(--border); opacity: 0.75; }
+.ds-item .ds-icon { font-size: 14px; min-width: 18px; text-align: center; }
+.ds-item .ds-name { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-all; }
+.ds-item .ds-badge-pinned {
+  font-size: 10px;
+  background: rgba(255,155,48,0.15);
+  color: var(--accent);
+  border: 1px solid rgba(255,155,48,0.3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.ds-item .ds-remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.ds-item .ds-remove:hover { color: var(--red); background: rgba(224,82,82,0.12); }
+.ds-item .ds-select-train {
+  font-size: 11px;
+  padding: 2px 7px;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ds-item .ds-select-train:hover { border-color: var(--accent); color: var(--accent); }
+.ds-item .ds-select-train.active { border-color: var(--accent); color: var(--accent); background: rgba(255,155,48,0.1); }
+
+/* ── Přehled datasetů na disku (sekce 5) ──────────────────────────────── */
+.dataset-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.dataset-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+.dataset-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+.dataset-row-head:hover { background: var(--panel-2); }
+.dataset-row-head .name { font-family: var(--mono); font-weight: 600; font-size: 13px; color: var(--text); }
+.dataset-row-head .meta { font-size: 12px; color: var(--muted); flex: 1; }
+.dataset-row-head .marks-badge {
+  font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(255,155,48,0.12); color: var(--accent); border: 1px solid rgba(255,155,48,0.3);
+  white-space: nowrap;
+}
+.dataset-row-body {
+  display: none;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--inset);
+}
+.dataset-row.open .dataset-row-body { display: block; }
+.dataset-row.open .dataset-row-head .chevron { transform: rotate(90deg); }
+.dataset-row-head .chevron { display: inline-block; transition: transform .15s; color: var(--muted); }
+.episode-grid { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.episode-chip {
+  font-family: var(--mono); font-size: 12px;
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 3px 8px; cursor: pointer; background: var(--panel); color: var(--muted);
+  user-select: none;
+}
+.episode-chip:hover { border-color: var(--muted); }
+.episode-chip.checked { border-color: var(--red); background: rgba(239,68,68,0.12); color: #f87171; }
+.dataset-empty { color: var(--muted); font-size: 13px; font-style: italic; padding: 10px 0; }

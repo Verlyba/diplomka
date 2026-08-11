@@ -21,6 +21,17 @@
   <section class="block">
     <h2><b>0</b> Konfigurace</h2>
     <div class="block-body">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; background:var(--panel); padding:12px 16px; border-radius:var(--radius); border:1px solid var(--border); margin-bottom:16px;">
+        <div style="display:flex; align-items:center; gap:12px; flex:1;">
+          <label style="font-weight:600; color:var(--text); white-space:nowrap;">📁 Aktivní projekt / úloha:</label>
+          <select id="project-select" style="font-weight:600; font-size:14px; background:var(--inset); border-color:var(--accent); min-width:200px; flex:1; max-width:320px; color:var(--text); padding:6px 10px; border-radius:var(--radius);"></select>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <button type="button" id="btn-new-project" class="secondary" style="padding:6px 14px; font-weight:600; background:var(--accent); color:#1a1207; border:none; border-radius:var(--radius); cursor:pointer;">+ Nový projekt</button>
+          <button type="button" id="btn-delete-project" class="warn" style="padding:6px 12px; font-size:12px; border-radius:var(--radius); cursor:pointer;">🗑 Smazat projekt</button>
+        </div>
+      </div>
+
       <p>Vyplň jednou — všechny příkazy níže se samy přepíšou. Konfigurace se ukládá do
         prohlížeče a zároveň do <code class="inline">config.json</code> na serveru, odkud ji
         čte orchestrátor na druhé stránce.</p>
@@ -222,16 +233,16 @@
           po sobě. Znamená to, že pohyb dojel a dál už se nic neděje. Funguje pro libovolný krok
           bez ohledu na to, jestli se něco uchopuje.</div>
         <div class="grid" style="margin-top:12px">
-          <label class="checkline" title="Krok skončí, když proud gripperu překročí limit">
-            <input data-key="protocol_b_enabled" type="checkbox"> Protokol B — proud gripperu
+          <label class="checkline" title="Krok skončí, když zátěž gripperu (Present_Load 0-1000) vzroste nad klidovou hodnotu o víc než tento limit">
+            <input data-key="protocol_b_enabled" type="checkbox"> Protokol B — zátěž gripperu (Present_Load)
           </label>
-          <label class="field">Limit proudu — ukončení kroku (mA)
+          <label class="field">Nárůst zátěže nad klid — ukončení kroku (0-1000)
             <input data-key="protocol_b_limit_ma" type="number" step="10" min="0">
           </label>
-          <label class="field">Práh „něco drží" (mA)
+          <label class="field">Nárůst zátěže nad klid — práh „něco drží" (0-1000)
             <input data-key="holding_limit_ma" type="number" step="5" min="0">
           </label>
-          <label class="checkline" title="Hodnotu proudu dostane plánovač jako informaci, jestli robot něco drží">
+          <label class="checkline" title="Hodnotu zátěže dostane plánovač jako informaci, jestli robot něco drží">
             <input data-key="gripper_state_in_context" type="checkbox"> Hlásit stav gripperu plánovači
           </label>
         </div>
@@ -245,11 +256,15 @@
           výrazně spolehlivější údaj než odhad z fotky shora, kde je malý předmět v čelistech sotva
           vidět — plánovač pak neopakuje úchop nad předmětem, který už drží. Netýká-li se to tvé
           úlohy, vypni.</div>
-        <div class="note">Ty dva prahy nejsou totéž a mají být <b>různé</b>. <b>Limit proudu —
-          ukončení kroku</b> je hodnota, při které se sevření pokládá za dokončené a krok se ukončí;
-          musí odpovídat skutečnému sevření předmětu. <b>Práh „něco drží"</b> je nižší a slouží jen
-          k odečtení stavu (drží / nedrží) pro plánovač — držení už sevřeného předmětu vyžaduje
-          mnohem menší proud než okamžik sevření. Nečinný otevřený gripper odebírá jednotky mA.</div>
+        <div class="note">Obě hodnoty jsou <b>nárůst zátěže nad klidovou hodnotu</b>, ne absolutní
+          číslo — surová hodnota registru servomotoru není kalibrovaná na miliampéry, takže absolutní
+          práh by na jiném kusu hardwaru mohl znamenat něco úplně jiného. Klid se změří automaticky
+          na začátku běhu, než se poprvé něco uchopí. Ty dva prahy nejsou totéž a mají být
+          <b>různé</b>. <b>Nárůst — ukončení kroku</b> je hodnota, o kterou musí zátěž vzrůst nad
+          klid, aby se sevření pokládalo za dokončené a krok se ukončil; musí odpovídat skutečnému
+          sevření předmětu. <b>Nárůst — práh „něco drží"</b> je nižší a slouží jen k odečtení stavu
+          (drží / nedrží) pro plánovač — držení už sevřeného předmětu vyžaduje mnohem menší nárůst
+          než okamžik sevření.</div>
         <div class="note warn">Baseline (monolitický model) běží vždy s <b>vypnutými oběma
           protokoly</b> — končí jen časovým limitem. Tohle nastavení se ho proto netýká, platí jen
           pro orchestraci.</div>
@@ -366,6 +381,11 @@
           <b>v okamžiku přechodu zmáčkni mezerník</b>. Skript <code class="inline">record_with_marks.py</code>
           pustí normální <code class="inline">lerobot-record</code> a jen k němu přidá poslech té klávesy —
           do nahrávání samotného nezasahuje.</p>
+        <label class="field" style="max-width:320px;margin-bottom:14px">Počet epizod k přidání (--resume)
+          <input data-key="resume_episodes" type="number" min="1">
+          <span class="hint">kolik epizod PŘIBUDE příkazem „Dodatečné epizody" níže — nemusí být
+            stejně jako „Počet epizod" nahoře, který je pro nové nahrávání od nuly</span>
+        </label>
         <div id="cmds-record"></div>
         <div class="note">Klávesy v průběhu nahrávání: <b>mezerník</b> (nebo <b>m</b>) označí hranici kroku ·
           <b>u</b> vezme poslední značku zpět · <b>→</b> / <b>n</b> ukončí epizodu a uloží ji ·
@@ -406,6 +426,20 @@
         <div class="cmd-box"><pre>python -m lerobot.scripts.lerobot_edit_dataset --repo_id local/&lt;task&gt; --operation.type delete_episodes --operation.episode_indices "[1, 9]"</pre></div>
         Po smazání se čísla epizod v sidecaru <code class="inline">.marks.json</code> posunou — značky
         zbylých epizod je nutné přemapovat na nové indexy ručně.</div>
+
+      <h3 style="margin-top:22px">Přehled datasetů na disku</h3>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Co je právě uložené v <code class="inline">~/.cache/huggingface/lerobot/local/</code> —
+        s kolika epizodami, a rovnou smazání datasetu nebo vybraných epizod (bez ručního
+        opisování příkazů výše). Ve výchozím stavu jen datasety <b>aktuálního projektu</b>
+        (<code class="inline" id="dataset-overview-slug"></code>), ať se nesmíchají s ostatními.
+        <button type="button" id="btn-refresh-datasets" class="secondary" style="padding:3px 10px;font-size:12px;margin-left:8px">↻ Obnovit</button>
+      </p>
+      <label class="checkline" style="margin-bottom:8px">
+        <input type="checkbox" id="chk-datasets-all">
+        <span>Zobrazit i datasety ostatních projektů (pozor, snadná záměna)</span>
+      </label>
+      <div id="dataset-overview"></div>
     </div>
   </section>
 
@@ -481,7 +515,9 @@
       <p>Baseline se pouští stejným daemonem jako kroky orchestrace — jen s vypnutými
         ukončovacími protokoly a jedním modelem na celou úlohu. Díky tomu se obě větve
         porovnání liší opravdu jen tím, co se měří.
-        <span class="model-badge" data-badge-for="__baseline__" title="Stav se zjišťuje…">…</span></p>
+        <span class="model-badge" data-badge-for="__baseline__" title="Stav se zjišťuje…">…</span>
+        <button type="button" class="btn-doc" id="btn-baseline-modal" title="Správa modelů a datasetů pro baseline" style="margin-left:8px">📄 Správa baseline modelů</button>
+      </p>
       <div id="cmds-baseline-run"></div>
       <div class="note">Daemon čte příkazy ze standardního vstupu. Po hlášce
         <code class="inline">[STATUS] DAEMON_READY</code> napiš
@@ -502,6 +538,150 @@
   </section>
 
 </main>
+
+<!-- Modal popup pro správy modelů a nasekaných datasetů -->
+<div id="model-modal" class="modal-overlay" style="display:none">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3 id="modal-title">📄 Správa modelů a datasetů</h3>
+      <button type="button" class="close-btn" id="modal-close">&times;</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- SEKCE 1: Příprava / nasekání datasetu + správa datasetů -->
+      <div class="modal-section">
+        <h4>1 · Datasety a nasekání pro tento krok</h4>
+        <p style="font-size:12px; color:var(--muted); margin:0 0 10px 0">
+          Datasety odvozené ze slug kroků jsou připraveny jako cílové jméno — data nasbíráš nahrávkou se značkami a pak je automaticky rozseká <code class="inline">split_dataset.py</code>.
+          <span style="color:var(--accent)">✓</span> = data existují na disku, <span style="opacity:0.5">○</span> = zatím prázdné (čeká na data).
+        </p>
+
+        <!-- Seznam datasetů pro tento krok -->
+        <div id="modal-dataset-list" style="margin-bottom:12px; display:flex; flex-direction:column; gap:6px;"></div>
+
+        <!-- Přidat vlastní dataset -->
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:14px; background:var(--panel); padding:8px 12px; border-radius:var(--radius); border:1px dashed var(--border);">
+          <input id="modal-add-ds-input" type="text" placeholder="např. local/muj_extra_dataset nebo user/repo_id"
+            style="flex:1; font-size:12px; padding:5px 8px; background:var(--inset); border:1px solid var(--border); border-radius:var(--radius); color:var(--text);">
+          <button type="button" id="modal-add-ds-btn" style="padding:5px 12px; background:var(--accent); color:#1a1207; font-weight:600; border:none; border-radius:var(--radius); cursor:pointer; font-size:12px; white-space:nowrap;">+ Přidat dataset</button>
+        </div>
+
+        <!-- Split příkaz -->
+        <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:4px;">
+          <p style="font-size:12px; color:var(--muted); margin:0 0 8px 0;">Příkaz pro nasekání zdrojového datasetu na dílčí kroky:</p>
+          <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom:8px">
+            <label class="field" style="margin:0">Zdrojový dataset pro nasekání
+              <select id="modal-split-source-ds"></select>
+            </label>
+          </div>
+          <div class="cmd-box">
+            <pre id="modal-split-cmd-preview" style="margin:0; padding:10px; font-size:12px; font-family:var(--mono); background:var(--panel); border-radius:var(--radius); overflow-x:auto; white-space:pre-wrap; word-break:break-all;"></pre>
+            <div style="margin-top:10px; text-align:right">
+              <button type="button" id="modal-copy-split-cmd" class="copy" style="padding:6px 14px; background:var(--accent); color:#1a1207; border:none; border-radius:var(--radius); font-weight:600; cursor:pointer;">Zkopírovat příkaz pro nasekání</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SEKCE 2: Trénink a doučování (Fine-tuning) -->
+      <div class="modal-section">
+        <h4>2 · Trénink nového modelu nebo doučení stávajícího (Fine-tuning)</h4>
+        
+        <div style="display:flex; gap:16px; margin-bottom:14px; background:var(--panel); padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border);">
+          <label class="checkline" style="font-weight:600; color:var(--text); cursor:pointer">
+            <input type="radio" name="train_mode" value="new" checked id="train-mode-new"> Nový trénink (od nuly)
+          </label>
+          <label class="checkline" style="font-weight:600; color:var(--accent); cursor:pointer">
+            <input type="radio" name="train_mode" value="finetune" id="train-mode-finetune"> Doučit stávající model (Fine-tuning)
+          </label>
+        </div>
+
+        <div id="finetune-box" style="display:none; margin-bottom:14px; background:rgba(255,155,48,0.06); padding:12px 14px; border-radius:var(--radius); border:1px dashed var(--accent);">
+          <label class="field">Výchozí model pro doučení (--policy.path)
+            <select id="modal-finetune-base-select"></select>
+          </label>
+        </div>
+
+        <div class="dataset-select-row">
+          <label>Tréninkový dataset:</label>
+          <select id="modal-dataset-select"></select>
+          <span id="modal-dataset-select-exists" style="font-size:11px; margin-left:8px;"></span>
+        </div>
+
+        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom:14px">
+          <label class="field">Architektura
+            <select id="modal-policy-type">
+              <option value="act">act</option>
+              <option value="diffusion">diffusion</option>
+              <option value="vqbet">vqbet</option>
+              <option value="smolvla">smolvla</option>
+            </select>
+          </label>
+          <label class="field">Cílový počet kroků
+            <input id="modal-train-steps" type="number" step="500" value="20000">
+          </label>
+          <label class="field">Batch size
+            <input id="modal-batch-size" type="number" value="8">
+          </label>
+          <label class="field">save_freq
+            <input id="modal-save-freq" type="number" value="5000">
+          </label>
+          <label class="field">Zařízení
+            <select id="modal-device">
+              <option value="cuda">cuda</option>
+              <option value="cpu">cpu</option>
+              <option value="mps">mps</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="cmd-box" style="margin-top:8px">
+          <pre id="modal-cmd-preview" style="margin:0; padding:10px; font-size:12px; font-family:var(--mono); background:var(--panel); border-radius:var(--radius); overflow-x:auto; white-space:pre-wrap; word-break:break-all;"></pre>
+          <div style="margin-top:10px; text-align:right">
+            <button type="button" id="modal-copy-cmd" class="copy" style="padding:6px 14px; background:var(--accent); color:#1a1207; border:none; border-radius:var(--radius); font-weight:600; cursor:pointer;">Zkopírovat tréninkový / doučovací příkaz</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SEKCE 3: Natrénované modely a výběr -->
+      <div class="modal-section">
+        <h4>3 · Natrénované modely a výběr aktivního pro orchestraci</h4>
+        <p style="font-size:12px; color:var(--muted); margin:0 0 12px 0">
+          Zvol model, který se má použít při běhu orchestrace pro tento krok:
+        </p>
+        <div id="modal-ckpt-list" class="ckpt-card-list"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Modal pro nový projekt -->
+<div id="new-project-modal" class="modal-overlay" style="display:none">
+  <div class="modal-card" style="max-width:500px">
+    <div class="modal-header">
+      <h3>📁 Vytvořit nový projekt / úlohu</h3>
+      <button type="button" class="close-btn" id="new-project-close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px; color:var(--muted); margin:0 0 14px 0">
+        Vytvoří nový projekt s prázdnými kroky. Hardwarová konfigurace (ramena, kamery, porty, LM Studio) se zkopíruje z aktuálního projektu. Kroky, datasety i modely budou plně oddělené.
+      </p>
+      <div class="field" style="margin-bottom:12px">
+        <label style="font-size:13px; font-weight:600; color:var(--text); margin-bottom:4px; display:block">Název projektu (slug / ID)</label>
+        <input id="new-project-slug" type="text" placeholder="např. sort_cubes, pick_and_place_v2" style="width:100%; box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:16px">
+        <label style="font-size:13px; font-weight:600; color:var(--text); margin-bottom:4px; display:block">Popis celkové úlohy (pro VLM/LLM)</label>
+        <input id="new-project-desc" type="text" placeholder="např. Roztřiď kostky podle barev do misek" style="width:100%; box-sizing:border-box">
+      </div>
+      <div style="text-align:right; display:flex; justify-content:flex-end; gap:10px; margin-top:16px">
+        <button type="button" id="new-project-cancel" class="secondary" style="padding:6px 14px">Zrušit</button>
+        <button type="button" id="new-project-submit" style="padding:6px 16px; background:var(--accent); color:#1a1207; font-weight:600; border:none; border-radius:var(--radius); cursor:pointer">Vytvořit projekt</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script src="config.js"></script>
 <script src="setup.js"></script>

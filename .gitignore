@@ -6,6 +6,7 @@ __pycache__/
 
 # Uživatelská konfigurace (porty, ID ramen, cesty) — generuje se na stránce Setup
 config.json
+projects/
 
 # Záznamy běhů orchestrace
 runs/*.json

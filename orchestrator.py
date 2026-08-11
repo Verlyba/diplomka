@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
+# Kam record_with_marks.py / lerobot-record doopravdy ukládá "local/<name>"
+# datasety, bez ohledu na to, odkud tenhle proces běží (server.py má stejnou
+# konstantu — nejde sdílet importem, protože server.py naopak importuje tenhle
+# modul, tak by vznikl cyklus).
+LOCAL_DATASETS_DIR = Path.home() / ".cache" / "huggingface" / "lerobot" / "local"
 
 PLANNER_SYSTEM_PROMPT = (
     "You are the planning layer of a three-layer robotic manipulation system.\n\n"
@@ -230,6 +235,12 @@ class Daemon:
         # model squinting at a small object in a top-down photo, so it gets fed
         # into the planner's context.
         self.last_load: float | None = None
+        # Idle/resting current sampled by the daemon before any grasp ever ran
+        # in this session. "Present_Current" is a raw register value of unknown
+        # scale, so treating 20 (or any other number) as an absolute mA
+        # threshold is fragile; what's actually reliable is how far the
+        # reading has moved from this baseline.
+        self.last_baseline: float | None = None
         # Did the current sensor EVER report a non-zero value in this run? On
         # the SO-101 the reading comes from a direct motor-bus register read
         # that may simply not work (it reported a flat 0 on hardware before
@@ -294,6 +305,11 @@ class Daemon:
                             self.last_load = float(field[len("load:"):])
                             if self.last_load > 0:
                                 self.load_ever_nonzero = True
+                        except ValueError:
+                            pass
+                    elif field.startswith("baseline:"):
+                        try:
+                            self.last_baseline = float(field[len("baseline:"):])
                         except ValueError:
                             pass
                 self.emit("telemetry", message=payload)
@@ -411,11 +427,16 @@ def cameras_json(cfg: dict) -> str:
 
 
 def baseline_output_dir(cfg: dict) -> str:
+    if cfg.get("baseline_policy_path"):
+        return cfg["baseline_policy_path"]
     root = cfg.get("output_root") or "outputs/training"
     return f"{root}/{cfg.get('task_slug', 'task')}_{cfg.get('policy_type', 'act')}"
 
 
 def step_output_dir(cfg: dict, step_slug: str) -> str:
+    for s in cfg.get("steps", []):
+        if s.get("slug") == step_slug and s.get("policy_path"):
+            return s["policy_path"]
     root = cfg.get("output_root") or "outputs/training"
     return f"{root}/{cfg.get('task_slug', 'task')}_{step_slug}_{cfg.get('policy_type', 'act')}"
 
@@ -429,6 +450,8 @@ def step_catalog(cfg: dict) -> list[dict]:
             entry = {"slug": slug,
                      "description": (step.get("description") or "").strip(),
                      "grasp": bool(step.get("grasp"))}
+            if step.get("policy_path"):
+                entry["policy_path"] = step["policy_path"]
             timeout_s = step.get("timeout_s")
             if timeout_s not in (None, ""):
                 try:
@@ -450,17 +473,7 @@ def step_catalog(cfg: dict) -> list[dict]:
 
 def checkpoint_status(output_dir: str, target_steps: int | None = None) -> dict:
     """Whether `<output_dir>/checkpoints/last` resolves to a real, loadable
-    checkpoint, and at how many training steps — the exact same lookup
-    inference_daemon.py's resolve_policy_dir() does, so "appka říká trénováno"
-    and "daemon to skutečně nahraje" can never disagree.
-
-    `sufficient` compares the checkpoint's own step count against
-    `target_steps` (the configured --steps for this model, per-step override
-    or the global default) — a fajfka means "trained to what's currently
-    configured", not just "some checkpoint exists somewhere". Raise the
-    target after training and the badge turns back into a cross until you
-    train further, on purpose.
-    """
+    checkpoint, and at how many training steps."""
     last = Path(output_dir) / "checkpoints" / "last"
     resolved = last.resolve() if last.exists() else None
     pretrained = (resolved / "pretrained_model") if resolved else None
@@ -476,17 +489,198 @@ def checkpoint_status(output_dir: str, target_steps: int | None = None) -> dict:
             "target_steps": target_steps, "sufficient": sufficient}
 
 
+def _dataset_exists_on_disk(repo_id: str) -> bool:
+    """Check if a local dataset directory exists on disk.
+
+    record_with_marks.py / lerobot-record always write "local/<name>" to
+    LOCAL_DATASETS_DIR — this used to check `.../lerobot/<name>` (missing the
+    "local" path segment) and `./local/<name>` relative to wherever this
+    process happens to run, neither of which is where the data actually is,
+    so every dataset looked "empty" here regardless of what was recorded.
+    """
+    if repo_id.startswith("local/"):
+        name = repo_id[len("local/"):]
+        return (LOCAL_DATASETS_DIR / name).exists()
+    # Remote repo_ids: assume reachable
+    return True
+
+
+def _dataset_stats(repo_id: str) -> dict | None:
+    """{episodes, frames} from meta/info.json, or None if unavailable/not local.
+
+    Frames matter for picking --training.offline_steps: with batch_size B,
+    one full pass over the dataset is roughly frames / B steps, so this is
+    what you actually want on screen to size a training run, not just the
+    episode count."""
+    if not repo_id.startswith("local/"):
+        return None
+    info_file = LOCAL_DATASETS_DIR / repo_id[len("local/"):] / "meta" / "info.json"
+    if not info_file.exists():
+        return None
+    try:
+        with open(info_file, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return {"episodes": meta.get("total_episodes"), "frames": meta.get("total_frames")}
+    except Exception:
+        return None
+
+
+def find_available_datasets(cfg: dict, step_slug: str | None = None) -> list[dict]:
+    """List all dataset repo_ids available for the task and its steps.
+
+    Returns a list of dicts:
+        { repo_id: str, exists: bool, pinned: bool, episodes: int|None, frames: int|None }
+
+    - ``exists``: dataset directory found on disk (see LOCAL_DATASETS_DIR).
+      Derived names (local/task_step) are included even if data hasn't been
+      collected yet — they serve as the split-target names for split_dataset.py.
+    - ``pinned``: manually added by the user via the UI (stored in step.datasets[]).
+    """
+    task_slug = cfg.get("task_slug", "task")
+    seen: dict[str, dict] = {}
+
+    def add(repo_id: str, pinned: bool = False) -> None:
+        exists = _dataset_exists_on_disk(repo_id)
+        stats = _dataset_stats(repo_id) if exists else None
+        if repo_id not in seen:
+            seen[repo_id] = {"repo_id": repo_id, "exists": exists, "pinned": pinned,
+                              "episodes": (stats or {}).get("episodes"),
+                              "frames": (stats or {}).get("frames")}
+        elif pinned:
+            seen[repo_id]["pinned"] = True
+
+    # 1) Whole-task baseline dataset (always shown — may not exist yet)
+    add(f"local/{task_slug}")
+
+    # 2) Per-step derived datasets (always shown — serve as split targets)
+    for s in cfg.get("steps", []):
+        slug = s.get("slug")
+        if slug:
+            add(f"local/{task_slug}_{slug}")
+
+    # 3) Scan for any extra local/<task_slug>* datasets not covered above (e.g.
+    #    a manually renamed split target). Scoped to THIS project on purpose —
+    #    an unscoped scan would pull in every other project's datasets too,
+    #    which is confusing at best and a good way to train on the wrong data
+    #    at worst.
+    if LOCAL_DATASETS_DIR.exists():
+        for p in LOCAL_DATASETS_DIR.iterdir():
+            if p.is_dir() and (p.name == task_slug or p.name.startswith(f"{task_slug}_")):
+                add(f"local/{p.name}")
+
+    # 4) Manually pinned datasets stored in config (always shown even if missing)
+    if step_slug:
+        step_obj = next((s for s in cfg.get("steps", []) if s.get("slug") == step_slug), None)
+        if step_obj:
+            for pinned_id in (step_obj.get("datasets") or []):
+                if pinned_id:
+                    add(pinned_id, pinned=True)
+    else:
+        for pinned_id in (cfg.get("baseline_datasets") or []):
+            if pinned_id:
+                add(pinned_id, pinned=True)
+
+    # Sort: pinned first, then exists, then alphabetical
+    result = sorted(seen.values(), key=lambda d: (not d["pinned"], not d["exists"], d["repo_id"]))
+
+    # Move preferred step dataset to very top
+    if step_slug:
+        preferred = f"local/{task_slug}_{step_slug}"
+        result = sorted(result, key=lambda d: (d["repo_id"] != preferred, not d["pinned"], not d["exists"], d["repo_id"]))
+
+    return result
+
+
+def list_trained_checkpoints(cfg: dict, step_slug: str | None = None) -> list[dict]:
+    """Scan output_root for all trained checkpoints related to a step or baseline."""
+    root = Path(cfg.get("output_root") or "outputs/training")
+    task_slug = cfg.get("task_slug", "task")
+    default_policy = cfg.get("policy_type", "act")
+    
+    active_path = None
+    if step_slug:
+        for s in cfg.get("steps", []):
+            if s.get("slug") == step_slug and s.get("policy_path"):
+                active_path = s["policy_path"]
+    else:
+        active_path = cfg.get("baseline_policy_path")
+        
+    if not active_path:
+        active_path = step_output_dir(cfg, step_slug) if step_slug else baseline_output_dir(cfg)
+
+    checkpoints = []
+    if root.exists():
+        for model_dir in root.glob("*"):
+            if not model_dir.is_dir():
+                continue
+            dir_name = model_dir.name
+            
+            if step_slug:
+                if not (dir_name.startswith(f"{task_slug}_{step_slug}") or f"_{step_slug}_" in dir_name):
+                    continue
+            else:
+                step_slugs = [s.get("slug") for s in cfg.get("steps", []) if s.get("slug")]
+                if any(f"_{s}" in dir_name for s in step_slugs if s):
+                    continue
+                if not dir_name.startswith(task_slug):
+                    continue
+            
+            ckpt_info = checkpoint_status(str(model_dir))
+            
+            pol_type = default_policy
+            for pt in ("act", "diffusion", "vqbet", "smolvla"):
+                if dir_name.endswith(f"_{pt}"):
+                    pol_type = pt
+                    break
+                    
+            pretrained_cfg = model_dir / "checkpoints" / "last" / "pretrained_model" / "config.json"
+            dataset_used = f"local/{dir_name.rsplit('_', 1)[0]}" if "_" in dir_name else f"local/{dir_name}"
+            if pretrained_cfg.exists():
+                try:
+                    with open(pretrained_cfg, "r", encoding="utf-8") as f:
+                        pdata = json.load(f)
+                        if pdata.get("dataset_repo_id"):
+                            dataset_used = pdata["dataset_repo_id"]
+                        elif pdata.get("repo_id"):
+                            dataset_used = pdata["repo_id"]
+                except Exception:
+                    pass
+                    
+            ckpt_path = str(model_dir)
+            is_active = (active_path and (ckpt_path == active_path or str(Path(ckpt_path).resolve()) == str(Path(active_path).resolve())))
+            
+            checkpoints.append({
+                "name": dir_name,
+                "path": ckpt_path,
+                "policy_type": pol_type,
+                "trained": ckpt_info["trained"],
+                "steps": ckpt_info["steps"],
+                "dataset": dataset_used,
+                "active": bool(is_active)
+            })
+
+    return checkpoints
+
+
 def model_status(cfg: dict) -> dict:
-    """Checkpoint status for the baseline and every configured step —
-    exactly the models a live orchestration run or the baseline daemon would
-    try to load right now, so the Setup page can show it before you find out
-    the hard way mid-run."""
+    """Checkpoint status, datasets and checkpoints for baseline and every configured step."""
     default_target = int(cfg.get("train_steps") or 0) or None
+    
+    baseline_status = checkpoint_status(baseline_output_dir(cfg), default_target)
+    baseline_status["datasets"] = find_available_datasets(cfg, None)
+    baseline_status["checkpoints"] = list_trained_checkpoints(cfg, None)
+    
+    steps_dict = {}
+    for s in step_catalog(cfg):
+        slug = s["slug"]
+        s_status = checkpoint_status(step_output_dir(cfg, slug), s.get("train_steps") or default_target)
+        s_status["datasets"] = find_available_datasets(cfg, slug)
+        s_status["checkpoints"] = list_trained_checkpoints(cfg, slug)
+        steps_dict[slug] = s_status
+
     return {
-        "baseline": checkpoint_status(baseline_output_dir(cfg), default_target),
-        "steps": {s["slug"]: checkpoint_status(step_output_dir(cfg, s["slug"]),
-                                                s.get("train_steps") or default_target)
-                  for s in step_catalog(cfg)},
+        "baseline": baseline_status,
+        "steps": steps_dict,
     }
 
 
@@ -528,33 +722,39 @@ class Orchestrator:
     def _gripper_note(self) -> str:
         """One line about what the gripper current says, or '' when unavailable.
 
-        Idle/open gripper draws 0-8 mA. Any current >= 20 mA indicates active
-        torque on an object ('something appears to be held').
+        The daemon's Present_Load/Present_Current reading is a raw register
+        value of unknown scale, so an absolute mA threshold is fragile.
+        Instead this compares the reading against the idle baseline the
+        daemon sampled before any grasp ran in this session: a rise of
+        holding_limit_ma or more over that baseline indicates active torque
+        on an object.
         """
         if not self.cfg.get("gripper_state_in_context", True):
             return ""
         if self.daemon is None or self.daemon.last_load is None:
             return ""
         load = self.daemon.last_load
+        baseline = self.daemon.last_baseline or 0.0
         holding_limit = float(self.cfg.get("holding_limit_ma", 20))
+        rise = load - baseline
 
-        holding_str = "something appears to be held" if load >= holding_limit else "nothing appears to be held"
-        return f"ROBOT STATE: gripper current {load:.0f} mA — {holding_str}"
+        holding_str = "something appears to be held" if rise >= holding_limit else "nothing appears to be held"
+        return f"ROBOT STATE: gripper load {load:.0f}, {rise:+.0f} vs. idle — {holding_str}"
 
     def _build_initial_context(self, instruction: str, has_image: bool) -> str:
         lines = [f"GOAL: {instruction}", "",
-                 "INITIAL RUN STATE: No skill has been executed yet in this run."]
+                 "INITIAL WORKSPACE & ROBOT STATE:"]
         note = self._gripper_note()
         if note:
             lines.append(note)
         if has_image:
-            lines.append("The attached photo shows the workspace right now at the start of the run.")
+            lines.append("The attached photo shows the current workspace state at the start of the session.")
             lines.append("FIRST: check if the goal is ALREADY satisfied in the photo (e.g. object is inside target location). If so, answer ONLY [\"DONE\"].")
-            lines.append("Otherwise, observe the workspace carefully: determine what phase the robot and environment are currently in. "
-                         "If an intermediate phase is already accomplished (e.g. an object is already grasped/held or aligned), "
-                         "do NOT repeat earlier skills. Plan ONLY the remaining skills needed to reach the goal.")
+            lines.append("SECOND: determine what phase the robot and environment are CURRENTLY in. "
+                         "If an intermediate phase is ALREADY accomplished (e.g., an object is ALREADY grasped/held in the gripper or aligned), "
+                         "do NOT plan skills that approach or grasp the object! Plan ONLY the remaining skills (e.g., transport/move and release) needed from this current state to reach the goal.")
         else:
-            lines.append("No photo of the workspace is available; assume standard start state.")
+            lines.append("No photo of the workspace is available; decide from ROBOT STATE.")
         return "\n".join(lines)
 
     def _build_replan_context(self, instruction: str, step: str, tag: str,
@@ -879,17 +1079,17 @@ class Orchestrator:
                 if grasp_check_applies and not self.daemon.load_ever_nonzero:
                     grasp_check_applies = False
                     self.emit("log", level="ERROR",
-                              message="Proud gripperu je celý běh nulový — čidlo nejspíš nic "
+                              message="Zátěž gripperu je celý běh nulová — čidlo nejspíš nic "
                                       "nevrací, takže fyzické ověření úchopu nelze použít. "
                                       "Krok posuzuje jen inspektor. Zkontroluj protokol B "
-                                      "a čtení registru proudu.")
+                                      "a čtení registru zátěže.")
                 protocol_b_ok = not grasp_check_applies or ("Protokol B" in (reason or ""))
 
                 if not protocol_b_ok:
                     success, tag = False, "[object_missed]"
                     self.emit("log", level="WARN",
                               message=f"Fyzické ověření úchopu selhalo — krok '{step}' neaktivoval "
-                                      f"proudový protokol B (proud nepřešel práh). Označeno jako [object_missed].")
+                                      f"zátěžový protokol B (zátěž nepřešla práh). Označeno jako [object_missed].")
                 elif cfg.get("skip_inspector"):
                     success, tag = True, "SKIPPED"
                     self.emit("log", level="WARN",

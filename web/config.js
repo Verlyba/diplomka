@@ -41,6 +41,7 @@ const DEFAULTS = {
   ],
 
   episodes: 30,
+  resume_episodes: 5,
   episode_time_s: 20,
   reset_time_s: 8,
 
@@ -67,8 +68,8 @@ const DEFAULTS = {
   protocol_a_threshold_rad: 0.005,
   protocol_a_patience: 5,
   protocol_b_enabled: true,
-  protocol_b_limit_ma: 100,
-  holding_limit_ma: 20,
+  protocol_b_limit_ma: 280,
+  holding_limit_ma: 50,
   gripper_state_in_context: true,
 };
 
@@ -112,14 +113,29 @@ const derive = {
    *  Jen jedno lomítko — Hugging Face hub validuje repo_id jako
    *  `namespace/název`, takže `local/uloha/krok` by neprošlo. */
   stepRepo: (c, slug) => `local/${c.task_slug}_${slug}`,
-  /** Výstupní adresář tréninku baseline modelu. */
+  /** Výstupní adresář tréninku baseline modelu. Nový trénink vždy jde sem,
+   *  podle konvence názvu — i když je pro orchestraci připnutý jiný
+   *  checkpoint (viz baselineLoadPath), aby ho trénink omylem nepřepsal. */
   baselineOut: (c) => `${c.output_root}/${c.task_slug}_${c.policy_type}`,
   /** Kde na disku doopravdy leží dataset — LeRobotDataset.resume() to
    *  potřebuje explicitně, jinak by mu psaní do sdílené cache mohlo
    *  poškodit revizní snapshoty ostatních datasetů. */
   datasetRoot: (c) => `$HOME/.cache/huggingface/lerobot/${derive.baselineRepo(c)}`,
-  /** Výstupní adresář tréninku modelu jednoho kroku. */
+  /** Výstupní adresář tréninku modelu jednoho kroku. Stejná poznámka jako
+   *  u baselineOut platí i tady. */
   stepOut: (c, slug) => `${c.output_root}/${c.task_slug}_${slug}_${c.policy_type}`,
+  /** Odkud se baseline model doopravdy NAČÍTÁ ke spuštění — respektuje ruční
+   *  připnutí checkpointu z modálky "Správa modelů" (cfg.baseline_policy_path),
+   *  stejně jako baseline_output_dir() v orchestrator.py. Bez tohohle by ruční
+   *  příkaz "Baseline stejným daemonem" tiše ignoroval připnutý checkpoint a
+   *  vždycky sáhl po tom podle konvence názvu. */
+  baselineLoadPath: (c) => c.baseline_policy_path || derive.baselineOut(c),
+  /** Odkud se model kroku doopravdy NAČÍTÁ — respektuje ruční připnutí
+   *  (steps[i].policy_path), stejně jako step_output_dir() v orchestrator.py. */
+  stepLoadPath: (c, slug) => {
+    const step = (c.steps || []).find((s) => s.slug === slug);
+    return (step && step.policy_path) || derive.stepOut(c, slug);
+  },
   /** Draccus zápis kamer pro lerobot CLI — jedna nebo dvě, podle vyplnění. */
   camerasArg: (c) => {
     const one = (name, index, width, height, fps) => (name

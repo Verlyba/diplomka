@@ -236,21 +236,28 @@ def main() -> int:
                 _STATE["t0"] = time.perf_counter()
                 _STATE["counted"] = counted
                 _STATE["recording"] = True
-                # Opakovaná epizoda dostane stejný index — značky zahozeného
-                # pokusu musí zmizet s ním.
-                if _STATE["marks"].pop(str(episode), None):
-                    _persist()
                 if _STATE["path"] is None:
                     root = Path(str(getattr(dataset, "root", "") or ""))
                     _STATE["path"] = str(root.parent / f"{root.name}.marks.json")
                     # --resume pokračuje v existujícím datasetu — bez načtení
                     # starého sidecaru by ho první _persist() přepsal a značky
-                    # dřívějších epizod by zmizely.
+                    # dřívějších epizod by zmizely. Tohle musí proběhnout PŘED
+                    # pop() o dva řádky níž: dokud se nenačte, _STATE["marks"]
+                    # je prázdné (čerstvě spuštěný skript), takže by pop() na
+                    # znovupoužitý index nic nesmazal — a kdyby se mezi
+                    # nahráváním smazala epizoda přes lerobot_edit_dataset (ta
+                    # o sidecaru neví), nový záznam by se k té staré osiřelé
+                    # položce jen připojil, místo aby ji nahradil.
                     try:
                         existing = json.loads(Path(_STATE["path"]).read_text(encoding="utf-8"))
                         _STATE["marks"] = dict(existing.get("episodes", {}))
                     except (OSError, ValueError):
                         pass
+                # Opakovaná epizoda (nebo index uvolněný smazáním epizody přes
+                # lerobot_edit_dataset) dostane stejný index — staré značky se
+                # s ním musí zahodit, jinak se k nim nové jen připojí.
+                if _STATE["marks"].pop(str(episode), None):
+                    _persist()
                 path = _STATE["path"]
             _say(f"epizoda {episode} — nahrávám (fps {_STATE['fps']:.0f}, značky do {path})")
 
