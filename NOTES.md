@@ -5,6 +5,27 @@ tasks at the top; dated entries below, newest first.
 
 ## Open tasks
 
+- **[affects success accounting, needs a human decision] A garbage initial
+  plan (all step IDs hallucinated) is recorded as a successful run.**
+  `orchestrator.py` `Orchestrator.run()` ~L1008-1016 vs. `_resolve_plan()`
+  ~L858-865. `_resolve_plan()`'s own docstring says the `DONE`/`ABORT`
+  sentinels exist specifically so the caller "can tell 'the planner
+  deliberately said there is nothing to do / nothing that can be done' apart
+  from 'the planner produced garbage'-both of which used to arrive here as an
+  empty list." But `run()` doesn't act on that distinction: `if not plan:`
+  (empty list — i.e. every step ID the LLM returned was unknown/hallucinated
+  and dropped) is handled identically to `plan == [PLAN_DONE]` — both call
+  `self._finish(True, started)`. So a planning call that produced zero usable
+  steps gets written to `runs/*.json` as a **successful** run even though the
+  robot never moved and nothing was verified. This looks like a real bug
+  against the code's own stated intent, but fixing it changes what counts as
+  "success" for these runs — i.e. it would alter the thesis's success-rate
+  data, which is explicitly out of scope for an unattended fix. Note the
+  analogous empty-plan case *after a re-plan* (~L1140-1150) already does the
+  right thing (falls back to resuming from the failed step, or raises if that
+  also fails) — only the *initial* planning call's empty-plan handling has
+  this gap.
+
 - **[protocol semantics, needs a human decision] Protocol A can preempt
   Protocol B on grasp steps before contact is ever detected.**
   `inference_daemon.py` ~L744-763: Protocol A's "settled" check
@@ -63,6 +84,100 @@ tasks at the top; dated entries below, newest first.
   — only editable by hand-editing `config.json`. Flagging in case that's not
   intentional; not changing anything since adding form fields is a UI feature
   decision, not a bug fix.
+
+- **[uncertain, low priority] VLM inspector verdict parsing checks failure
+  tags via substring match over the whole reply, before requiring an exact
+  "SUCCESS".** `orchestrator.py` `_read_verdict()` ~L895-906: `FAILURE_TAGS`
+  are matched with `tag.upper() in upper` against the entire raw reply,
+  checked before the strict `upper.strip(...) == "SUCCESS"` branch. If a
+  verbose/CoT-style local VLM reply mentions a bracketed tag string while
+  explaining why that failure *doesn't* apply (but still concludes success),
+  the step could be misclassified as that failure. Whether this actually
+  happens depends on how strictly the configured local VLM follows "reply
+  strictly with SUCCESS" — plausible but not observed/confirmed against real
+  replies, so not touching the parsing logic on a guess.
+
+- **[uncertain, low priority] No request/response correlation on the
+  `Daemon` stdin/stdout protocol.** `orchestrator.py` `Daemon.snapshot()`
+  ~L367-386 and the `_policy_event`/`_task_done` handling in `run_task()`/
+  `set_policy()` ~L341-365: responses are matched to calls purely by shared
+  mutable state (e.g. `_snapshot`/`_snapshot_b64` cleared then awaited), with
+  no sequence ID. If a previous call's response arrives late — after that
+  call already timed out and gave up — a later call could consume it as its
+  own. Whether this is reachable depends on daemon responsiveness under real
+  hardware/camera latency; flagging as a latent race, not a confirmed one.
+
+- **[uncertain, low priority] Mark timestamps in `record_with_marks.py` may
+  be systematically ~1 frame late.** `record_with_marks.py` ~L93-94/182-185:
+  `_STATE["frames"]` is incremented at the *start* of the wrapped
+  `add_frame()`, so by the time frame index 0 has been written, the counter
+  already reads 1, and a mark taken right then computes `t = 1/fps` rather
+  than `0/fps`. The module's own docstring states marks are meant to share
+  the same time axis as the dataset's `timestamp` column (frame 0 -> t=0), so
+  this looks like a real off-by-one — but marks are human-key-press-triggered
+  and already coarse (the bias is one frame, ~33ms @30fps), and it's not
+  certain which reading `split_dataset.py`'s bisect actually wants w.r.t.
+  precision at a segment edge. Small enough and touches recorded-data timing
+  closely enough that I didn't want to change it without the thesis author
+  confirming the intended semantics.
+
+## 2026-08-12
+
+Picked up from yesterday's open-task list plus a fresh pass. Housekeeping
+first: local `main` had fallen behind a detached `HEAD` that actually held
+yesterday's 4 commits (`09cedb7`..`9d39f05`) — fast-forwarded `main` to match;
+`origin/main` already had them, so no data was actually at risk, just a stale
+local ref.
+
+Re-checked both standing open items from 2026-08-11 (Protocol A/B grasp
+preemption, checkpoint substring matching) — both still present, still
+correctly left alone pending a human decision.
+
+Reviewed fresh, in more depth than the first pass: `record_with_marks.py`,
+`split_dataset.py`, `merge_datasets.py`, `compute_step_timeouts.py` (dataset
+tooling), `server.py` + all of `web/` (backend/frontend field and endpoint
+matching), and `orchestrator.py`'s planner/inspector/re-plan loop.
+
+Fixed (safe, narrow, no protocol/scoring-behavior change):
+
+- `inference_daemon.py`: the module's own `PROTOCOL_B_LOAD_LIMIT` default
+  (used only as the `--protocol-b.limit` argparse default) was still 250,
+  while `server.py`'s `DEFAULT_CONFIG`, `web/config.js`'s `DEFAULTS`, and
+  `orchestrator.py`'s cfg fallback (aligned yesterday in `454335b`) all use
+  280. `orchestrator.py` always passes `--protocol-b.limit` explicitly on
+  every daemon launch, so this was dead in every real code path — same shape
+  as yesterday's fix, just the sibling file it missed. Aligned to 280.
+- `merge_datasets.py`: when a per-step dataset was missing a given episode
+  (e.g. that episode was deleted from one step's dataset but not the
+  others), the `continue` that skipped copying its (nonexistent) frames also
+  skipped appending that step's seam to the episode's `boundaries` list —
+  silently producing a `boundaries` list shorter than `len(steps)-1` for
+  that episode. `split_dataset.py` does catch the resulting count mismatch
+  and drops the whole episode on re-split, so it wasn't silently-wrong data,
+  but it was a real, avoidable loss of that episode. Restructured so the
+  boundary is always appended for that seam (as a zero-length segment when
+  the step contributed no frames), regardless of whether the step had
+  frames for this episode.
+- `orchestrator.py`: the re-plan path emitted a `"plan"` SSE event twice per
+  re-plan — once unconditionally right after `_resolve_plan()` (~L1130,
+  with the LLM's reasoning), and once more (~L1147) that was written to look
+  like it belonged to the `if not plan:` fallback block but was actually a
+  sibling statement at the same indent, so it fired on every re-plan
+  regardless of whether the empty-plan fallback triggered. `web/run.js`
+  treats every `"plan"` event with `replan` set as a new re-plan attempt, so
+  this produced two duplicate "re-plan #N" entries in the run's progress
+  summary and log for every real re-plan (the second with blank reasoning).
+  UI/log-only — `self.results` and the re-plan counter were never affected.
+  Moved the second emit inside the `if not plan:` block so it only fires
+  when the fallback plan substitution actually changes what was already
+  emitted.
+
+Found but NOT fixed — logged above as new open tasks. The most significant
+one: an initial plan that resolves to empty (every step ID hallucinated) is
+currently recorded as a *successful* run, which looks like a genuine bug
+against the code's own documented intent but touches success-rate accounting
+directly, so it's left for a deliberate decision rather than an unattended
+fix. The rest are lower-confidence/lower-impact items flagged for awareness.
 
 ## 2026-08-11
 
