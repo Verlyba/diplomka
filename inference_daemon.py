@@ -166,7 +166,7 @@ except (ImportError, AttributeError) as e:  # pragma: no cover - env dependent
 # and some tasks have no grasping phase at all — hence the on/off switches.
 PROTOCOL_A_THRESHOLD = 0.005   # rad
 PROTOCOL_A_PATIENCE = 5        # consecutive frames
-PROTOCOL_B_LOAD_LIMIT = 250.0  # mA rise over the idle baseline (see idle_load_baseline)
+PROTOCOL_B_LOAD_LIMIT = 280.0  # mA rise over the idle baseline (see idle_load_baseline)
 use_protocol_a = True
 use_protocol_b = True
 # Pozn.: dřív tu byla záložní heuristika GRASP_WORDS, která úchopový krok
