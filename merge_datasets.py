@@ -134,16 +134,19 @@ def main() -> int:
             rows = index.get(ep, [])
             if not rows:
                 log.warning("Krok '%s' nemá epizodu %d — vynechána.", step_slugs[step_i], ep)
-                continue
-            for idx in rows:
-                item = src[idx]
-                frame = {k: (to_image(item[k]) if k in image_keys else
-                             (item[k].numpy() if hasattr(item[k], "numpy") else np.asarray(item[k])))
-                         for k in features}
-                frame["task"] = task_text
-                dst.add_frame(frame)
-                frames_written += 1
-            # Hranice = konec tohohle kroku (u posledního kroku se nezapisuje)
+            else:
+                for idx in rows:
+                    item = src[idx]
+                    frame = {k: (to_image(item[k]) if k in image_keys else
+                                 (item[k].numpy() if hasattr(item[k], "numpy") else np.asarray(item[k])))
+                             for k in features}
+                    frame["task"] = task_text
+                    dst.add_frame(frame)
+                    frames_written += 1
+            # Hranice = konec tohohle kroku (u posledního kroku se nezapisuje).
+            # Vždy se připíše, i když tenhle krok epizodu neměl (nulová délka
+            # segmentu) — jinak by pro tuhle epizodu vzniklo míň hranic než
+            # kroků a split_dataset.py by ji celou zahodil kvůli neshodě počtu.
             if step_i < len(sources) - 1:
                 boundaries.append(round(frames_written / fps, 3))
         dst.save_episode()
