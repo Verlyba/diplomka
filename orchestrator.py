@@ -1144,7 +1144,7 @@ class Orchestrator:
                         plan = all_slugs[all_slugs.index(step):]
                         self.emit("log", level="INFO",
                                   message=f"Záložní re-plán: opakuji od kroku '{step}' -> {plan}")
-                self.emit("plan", steps=plan, replan=replans)
+                    self.emit("plan", steps=plan, replan=replans)
                 index = 0
                 if not plan:
                     raise RuntimeError("Re-plán vrátil prázdný plán.")
