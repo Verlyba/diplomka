@@ -5,6 +5,24 @@ tasks at the top; dated entries below, newest first.
 
 ## Open tasks
 
+- **[uncertain, low priority] `create_project()`'s field whitelist may drop
+  more settings than intended when starting a new project.**
+  `server.py` `create_project()` ~L240-248: the new project's config starts
+  from `dict(DEFAULT_CONFIG)`, then only a fixed whitelist of keys (python,
+  device, robot/teleop/camera fields, `fps`, `lm_url`/`llm_model`/`vlm_model`,
+  the protocol A/B settings) is copied over from the currently active
+  project. Everything else — `output_root`, `policy_type`, `train_steps`,
+  `batch_size`, `save_freq`, `data_strategy`, `max_replans`, `planner_vision`,
+  `planner_reasoning`, `gripper_state_in_context` — silently resets to
+  `DEFAULT_CONFIG` for every new project, even though these read more like
+  machine-wide preferences (where to put training output, how the planner
+  behaves) than per-task data. A user who tuned e.g. `output_root` or
+  `planner_vision` once and then adds a second task/project for the same
+  robot would get those reset without any indication. Could be intentional
+  (each project's training config is meant to be independent) or an
+  oversight in the whitelist — didn't want to guess at which behavior the
+  thesis author wants, so left the whitelist as-is and flagging here instead.
+
 - **[affects success accounting, needs a human decision] A garbage initial
   plan (all step IDs hallucinated) is recorded as a successful run.**
   `orchestrator.py` `Orchestrator.run()` ~L1008-1016 vs. `_resolve_plan()`
@@ -120,6 +138,51 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-13
+
+Housekeeping: local `main` was again a stale ref behind a detached `HEAD`
+that actually held yesterday's commit (`2a691ad`); `origin/main` already had
+it (fast-forward only, no data at risk) — reset local `main` to match.
+`git log` showed no commits since `2a691ad`, so there was nothing new to
+review from prior runs — this was a fresh deep pass over files the last two
+days already covered, looking for anything missed.
+
+Re-checked every standing open item against the current code: all six are
+still present exactly as described (Protocol A/B grasp preemption,
+checkpoint substring matching, the empty-initial-plan success bug, dead
+`/api/lmstudio` + `/api/runs` endpoints, config-only fields, VLM tag
+substring matching, daemon stdin/stdout correlation, marks off-by-one). No
+new evidence changed the confidence on any of them, so none were touched.
+
+Read in full and re-verified line-by-line: `inference_daemon.py`,
+`orchestrator.py` (all ~1200 lines, including the parts not quoted in past
+entries — `Daemon` lifecycle, `_verify()`'s retry-on-`[unclear]` loop,
+`_resolve_plan()`'s sentinel handling, `list_trained_checkpoints()`,
+`model_status()`), `server.py` (config/project/dataset endpoints),
+`web/config.js`, `web/run.js`, `web/setup.js` (all ~1185 lines, including the
+model/dataset management modal), `split_dataset.py`,
+`compute_step_timeouts.py`, `merge_datasets.py` (confirmed yesterday's
+boundary-append fix is correct and complete), `record_with_marks.py`,
+`measure_gripper_current.py`, `reset_homing.py`. Cross-checked every
+`data-key` in `web/index.html` against `DEFAULT_CONFIG`/`DEFAULTS` and every
+element ID `setup.js` looks up against the modal/project/dataset markup in
+`index.html` — no drift found beyond what's already logged as open tasks.
+Also checked `web/orchestrace.html`'s static explainer text (re-plan count,
+Protocol A/B thresholds) against current config defaults — still accurate
+after yesterday's fix.
+
+Found one new item, logged above as low priority/uncertain rather than
+fixed: `server.py`'s `create_project()` only carries a fixed whitelist of
+hardware/model fields over from the current project into a newly created
+one; several settings that read more like machine-wide preferences
+(`output_root`, `planner_vision`, `max_replans`, etc.) silently reset to
+`DEFAULT_CONFIG` instead. Could well be intentional per-project isolation,
+so not changed on a guess.
+
+Fixed: nothing this round — no new narrow, unambiguous, low-risk bug turned
+up that wasn't already either fixed on a previous day or blocked on a
+judgment call already logged above.
 
 ## 2026-08-12
 
