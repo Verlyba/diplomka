@@ -5,6 +5,49 @@ tasks at the top; dated entries below, newest first.
 
 ## Open tasks
 
+- **[design decision needed] Setup page's "Uložit" can silently revert
+  config.json edits made outside that browser tab — e.g. the still-open
+  page can wipe out per-step `timeout_s` values just written by
+  `compute_step_timeouts.py --apply`.** `web/setup.js` loads `cfg` into page
+  memory once (`loadConfig()`), never refreshes it, and "Uložit" POSTs the
+  whole in-memory object. `server.py` `save_config()`'s non-overwrite path
+  does `merged = load_config(); merged.update(cfg)` — a shallow update, so
+  `merged["steps"]` is wholesale replaced by whatever `steps` array the
+  browser still has in memory, silently dropping any `timeout_s` (or other
+  step field) that was written to `config.json` by another process since
+  the page was loaded. Concretely: open Setup → split dataset → run
+  `compute_step_timeouts.py --apply` in a terminal (writes `steps[].timeout_s`
+  straight to `config.json`) → back in the still-open tab, tweak an unrelated
+  field and click "Uložit" → the just-computed timeouts are gone, and the
+  next orchestration run silently falls back every step to the flat
+  `episode_time_s` — exactly the truncation problem
+  `compute_step_timeouts.py` exists to fix, with no error either side. Fixed
+  the other half of this (see 2026-08-14 entry: `compute_step_timeouts.py`
+  now also mirrors into `projects/<slug>.json`, so merely *switching
+  projects* no longer reverts the timeouts) but did not touch this
+  Save-button trigger — a correct fix means either re-fetching config
+  immediately before every save (risks clobbering unsaved form edits made in
+  the meantime) or deep-merging `steps[]` by slug (risks reviving
+  intentionally-deleted steps/fields), and picking between those is a UX
+  design call, not a mechanical bug fix.
+
+- **[uncertain, low priority] `web/setup.js`'s `arg()` quoting doesn't
+  protect against PowerShell `$`/backtick expansion in free-text fields.**
+  `web/setup.js` ~L179-184: `arg()` wraps values containing whitespace/braces/
+  quotes in double quotes and its comment claims this "works in PowerShell,
+  cmd.exe and bash" — but PowerShell expands `$variable`/`` `escapes `` even
+  inside double-quoted strings, unlike cmd.exe/bash. A `task_description` or
+  step description containing `$` (e.g. "kostka za $5") would have that
+  substring silently expanded (usually to empty, since such a variable is
+  normally undefined) when the generated `record_with_marks.py` command is
+  pasted into PowerShell, changing the dataset's per-frame task-annotation
+  text with no error anywhere. Plausible but requires specific characters in
+  free-text fields to trigger, and a real cross-shell fix isn't mechanical —
+  PowerShell/cmd/bash have incompatible quoting rules and the app
+  deliberately generates one command line for all three — so left alone
+  pending a decision on which shell to prioritize or whether to special-case
+  PowerShell quoting.
+
 - **[uncertain, low priority] `create_project()`'s field whitelist may drop
   more settings than intended when starting a new project.**
   `server.py` `create_project()` ~L240-248: the new project's config starts
@@ -138,6 +181,55 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-14
+
+Housekeeping: local `main` was again a stale ref (pointed at `0ff9fb4`) behind
+a detached `HEAD` that actually held yesterday's commit (`cc7b0aa`);
+`origin/main` already had it — fast-forwarded local `main` to match, no data
+at risk. No commits landed since yesterday's review, so today was another
+fresh deep pass rather than picking up new history.
+
+Re-verified all 9 standing open items against current code — all still
+present as described, none touched.
+
+Dispatched a focused review of the areas prior passes covered more lightly:
+`server.py`'s dataset-management endpoints, `web/config.js`, `web/run.js`'s
+SSE handling, `compute_step_timeouts.py`, `split_dataset.py`, and the
+dataset-management/multi-project UI added in `0ff9fb4` (newer code, less
+scrutiny so far). Cross-checked argparse flags in the dataset-tooling
+scripts against the commands `web/setup.js` generates, and every DOM id the
+modal/project/dataset UI in `setup.js` looks up against `index.html`.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `compute_step_timeouts.py`: `--apply` wrote the computed `steps[].timeout_s`
+  straight to `config.json` only, bypassing `server.py`'s `save_config()` —
+  which is the one place that normally keeps `config.json` and
+  `projects/<task_slug>.json` in sync on every write. Because
+  `select_project()` reloads `config.json` wholesale from the project file,
+  simply switching to a different project and back in the Setup UI (no Save
+  click needed) silently reverted the just-computed timeouts back to
+  whatever was in `projects/<slug>.json`. Made `--apply` mirror its write
+  into the matching `projects/<slug>.json` too, restoring the same
+  config.json/project-file sync invariant every other write path already
+  has. This does not fully close the bug — see the new open task above for
+  the remaining Setup-page "Uložit" trigger, which is a design call rather
+  than a mechanical fix.
+- `server.py`: `delete_project()`'s fallback (picking a new active project
+  after deleting the currently-active one) used an unsorted
+  `PROJECTS_DIR.glob("*.json")`, so which project became active depended on
+  filesystem directory-entry order rather than the alphabetical order the
+  project dropdown (`list_projects()`, which does `sorted(...)`) otherwise
+  implies. Sorted it to match.
+
+Found but NOT fixed — logged as two new open tasks above: the Setup page's
+stale in-memory `cfg` can still silently overwrite fresh on-disk config
+(including timeouts) on Save (needs a UX design call between re-fetch-before-
+save and deep-merge), and `web/setup.js`'s command-quoting doesn't protect
+against PowerShell `$`/backtick expansion in free-text fields (a real
+cross-shell fix isn't mechanical given the app intentionally generates one
+command line for PowerShell/cmd/bash alike).
 
 ## 2026-08-13
 
