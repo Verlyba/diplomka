@@ -177,6 +177,17 @@ def main() -> int:
     if changed:
         CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         log.info("Written to %s", CONFIG_FILE)
+
+        # server.py's save_config() always mirrors config.json into
+        # projects/<task_slug>.json; do the same here so switching projects
+        # in the Setup UI (which reloads config.json from that file) doesn't
+        # silently revert the timeouts this script just computed.
+        task_slug = cfg.get("task_slug")
+        if task_slug:
+            proj_file = HERE / "projects" / f"{task_slug}.json"
+            if proj_file.exists():
+                proj_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+                log.info("Written to %s", proj_file)
     else:
         log.info("config.json already matched the suggestions — nothing changed.")
     return 0
