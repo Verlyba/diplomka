@@ -269,7 +269,7 @@ def delete_project(slug: str) -> dict:
     proj_file.unlink()
     
     if is_active:
-        remaining = list(PROJECTS_DIR.glob("*.json"))
+        remaining = sorted(PROJECTS_DIR.glob("*.json"))
         if remaining:
             with open(remaining[0], "r", encoding="utf-8") as f:
                 new_active_cfg = json.load(f)
