@@ -1011,7 +1011,11 @@ async function openModelModal(stepSlug) {
   if (checkpoints && checkpoints.length > 0) {
     checkpoints.forEach(ckpt => {
       const opt = document.createElement('option');
-      opt.value = ckpt.path;
+      // ckpt.path je holý output_dir tréninku (viz list_trained_checkpoints
+      // v orchestrator.py); lerobot_train's --policy.path na rozdíl od
+      // inference_daemon.py's resolve_policy_dir() netoleruje obě varianty,
+      // takže je potřeba vždy vnořená cesta k pretrained_model.
+      opt.value = `${ckpt.path}/checkpoints/last/pretrained_model`;
       opt.textContent = `${ckpt.name} (${ckpt.steps || 0} kroků)`;
       finetuneBaseSelect.appendChild(opt);
     });
