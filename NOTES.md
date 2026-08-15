@@ -132,6 +132,16 @@ tasks at the top; dated entries below, newest first.
   `grab` and `grab_tight`), train checkpoints for both, and check whether
   `list_trained_checkpoints("grab")` in `orchestrator.py` includes the
   `grab_tight` checkpoint dir.
+  **2026-08-15 update:** the same root cause (unanchored `task_slug`
+  prefix matching) also affects *dataset* visibility, in two more spots —
+  not just checkpoint attribution: `server.py` `list_local_datasets()`
+  (`d.name == task_slug or d.name.startswith(f"{task_slug}_")`) and
+  `orchestrator.py` `find_available_datasets()`'s disk-scan branch (same
+  pattern). If one project's `task_slug` is a prefix of another's, the
+  Setup page's dataset overview and the model modal's "available datasets"
+  list both leak the other project's dataset dirs into the current
+  project's view. Same fix, same risk of breaking an intentional
+  loose-match fallback — left alone for the same reason.
 
 - **[informational, low priority] Dead API endpoints.** `GET /api/lmstudio`
   and `GET /api/runs` are implemented in `server.py` but no `web/*.js` file
@@ -181,6 +191,64 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-15
+
+Housekeeping: same recurring pattern as prior days — local `main` was a
+stale ref (pointed at `0ff9fb4`) behind a detached `HEAD` that actually held
+yesterday's commit (`98aadea`); a `git fetch origin main` showed
+`origin/main` was already at `98aadea` too (the local remote-tracking ref was
+just stale), so this was a plain fast-forward of local `main`, no data at
+risk. No commits landed since yesterday's review, so today was another fresh
+deep pass rather than picking up new history.
+
+Re-verified all 9 standing open items against current code via a dispatched
+review pass — all still present as described, no drift. Focused this pass's
+new scrutiny on areas covered more lightly before: `web/run.js`'s full SSE
+event handling, `server.py`'s dataset-management endpoints (pin/unpin,
+delete, delete-episodes, create/select/delete project), and the standalone
+scripts `measure_gripper_current.py`/`reset_homing.py` (confirmed these are
+hand-run tools with no cross-file coupling to break). Also re-read
+`inference_daemon.py` and `orchestrator.py` in full for anything the last 4
+passes may have missed.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `web/setup.js`: the "Doučit (fine-tune)" base-checkpoint dropdown in the
+  model modal (`openModelModal()`, populated ~L1009-1023) set each
+  `<option>`'s value to `ckpt.path` — the bare training-output directory
+  returned by `orchestrator.py`'s `list_trained_checkpoints()` (e.g.
+  `outputs/training/pick_and_place_grab_cube_act`), which has no
+  `config.json` directly in it; the loadable model actually lives at
+  `<that_dir>/checkpoints/last/pretrained_model`. The generated
+  `lerobot_train --policy.path=...` command consumed this dropdown value
+  verbatim (`updateModalCmdPreview()` ~L1099-1103) — whose own *fallback*
+  branch (used only when nothing is selected) already appended the correct
+  `/checkpoints/last/pretrained_model` suffix, proving the code already knew
+  stock `lerobot_train` needs the nested path and doesn't get
+  `inference_daemon.py`'s `resolve_policy_dir()` dual-path tolerance. Since
+  browsers auto-select a dropdown's first option, this broke fine-tune
+  command generation by default the moment any checkpoint existed — the
+  normal, encouraged way to fine-tune produced a copy-pasteable command that
+  would fail to load the base model, while leaving the dropdown untouched
+  (the fallback path) worked. Fixed by appending the same
+  `/checkpoints/last/pretrained_model` suffix where the dropdown option
+  value is built, so both branches agree. Confirmed `finetuneBaseSelect` is
+  used solely for this one purpose before changing it — not reused
+  elsewhere for something that wants the bare directory (e.g. the "active
+  checkpoint" radio buttons and `policy_path` assignments elsewhere in the
+  same file correctly keep using bare `ckpt.path`, since
+  `inference_daemon.py` tolerates both spellings there).
+
+Found but NOT fixed — extended an existing open item rather than adding a
+new one: the same unanchored `task_slug` prefix-matching pattern behind the
+already-logged checkpoint-attribution bug also turned up in two more spots
+(`server.py` `list_local_datasets()` and `orchestrator.py`
+`find_available_datasets()`'s disk-scan branch), leaking one project's
+dataset listing into another's if one `task_slug` is a prefix of the other.
+Logged as a 2026-08-15 update under the existing checkpoint-substring-match
+item above, same reasoning for leaving it alone (risk of breaking an
+intentional loose-match fallback without knowing the intended semantics).
 
 ## 2026-08-14
 
