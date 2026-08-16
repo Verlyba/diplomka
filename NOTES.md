@@ -5,6 +5,34 @@ tasks at the top; dated entries below, newest first.
 
 ## Open tasks
 
+- **[protocol semantics, needs a human decision] Protocol A's "settled" counter
+  isn't reset on an observation/inference failure, so it can inflate from
+  stale data instead of a real hold.** `inference_daemon.py` ~L723-746. In the
+  `RUNNING` branch, `predict_and_act()` failing (camera read error, transient
+  serial error, etc.) is caught by `except Exception as e: log.warning(...)`
+  with no other effect — `joints`/`target` are left exactly as they were on
+  the previous tick. Immediately after, `deltas = np.abs(target[:n_pos] -
+  joints[:n_pos])` and `settled = settled + 1 if ... else 0` (~L744-746) run
+  unconditionally on those stale values. If deltas were already under
+  threshold on the last successful tick, every subsequent *failed* tick keeps
+  incrementing `settled` off the same frozen numbers — Protocol A
+  (`settled >= PROTOCOL_A_PATIENCE`, default 5 frames ≈167ms @30fps) can then
+  fire purely from a string of read/inference failures, not from the arm
+  actually having reached and held its target. Notably asymmetric with
+  Protocol B: `load` is explicitly reset to `0.0` at the top of every tick
+  (~L696), so a failure naturally suppresses Protocol B (`rise = load -
+  baseline` goes negative) but nothing analogous resets/pauses Protocol A's
+  settled-counter on failure — suggesting this may be an oversight rather
+  than intentional. Whether the fix should be "reset `settled = 0` on
+  exception" or "skip the termination-protocol check entirely for that tick"
+  is a protocol-semantics call (changes exactly when/how a step ends under
+  hardware flakiness), so left alone per the "never change protocol A/B
+  thresholds/semantics on a guess" rule rather than picked unilaterally.
+  Trigger: repeated `robot.get_observation()`/inference exceptions while a
+  step is `RUNNING`, with the arm already near its target when the failures
+  start. Not confirmed against a real hardware failure log — flagging the
+  code-level asymmetry, not a reproduced incident.
+
 - **[design decision needed] Setup page's "Uložit" can silently revert
   config.json edits made outside that browser tab — e.g. the still-open
   page can wipe out per-step `timeout_s` values just written by
@@ -191,6 +219,76 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-16
+
+Housekeeping: local `main` was again a detached-`HEAD`/stale-ref situation
+(same recurring pattern as every prior day) but pointed at the correct
+commit already (`87b2815`, matching `origin/main`) — reset local `main` to
+track it, no data at risk, no commits landed since yesterday's review.
+
+Dispatched a fresh deep-review pass focused on areas covered more lightly
+before: `server.py`'s HTTP/concurrency handling (exception paths, whether
+any shared state is mutated without a lock, file-write atomicity),
+`web/orchestrace.html`/`web/style.css` in full, `inference_daemon.py`'s full
+stdin/stdout protocol and error paths beyond just Protocol A/B,
+`server.py`↔`web/*.js` endpoint/param cross-check, and unit/off-by-one
+scanning across timeout and threshold arithmetic. Re-confirmed all 10
+standing open items are unaffected by this pass (not re-verified line by
+line today — no commits landed to invalidate them).
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `server.py`: config-mutating request handlers had a real lost-update race
+  under concurrent requests. `ThreadingHTTPServer` runs each connection on
+  its own thread; `save_config()`, `select_project()`, `create_project()`,
+  `delete_project()`, and the `/api/datasets/pin` and `/api/datasets/unpin`
+  POST handlers all did `load_config()` → mutate a dict in memory →
+  `save_config()` (full-file overwrite) with no locking at all (only
+  `RunState` had a lock, and that guards run-start/stop, not config I/O).
+  Two requests landing close together — e.g. two Setup tabs open, or a
+  double-click on "Přidat dataset" — could interleave so the second
+  `save_config()` call overwrote the first's change entirely, silently
+  dropping it from `config.json`/`projects/<slug>.json` with no error on
+  either side. This is a distinct mechanism from the already-logged "stale
+  browser `cfg` on Save" item (that one is one tab's in-memory copy going
+  stale over time; this is genuinely concurrent server-side writes racing on
+  the same file). Added a module-level `_config_lock = threading.RLock()`
+  and wrapped the read-modify-write body of each of those five call sites in
+  `with _config_lock:` (RLock so `select_project()` etc. can call
+  `save_config()` internally without deadlocking). Purely serializes
+  concurrent writes — no change to any default, single-request behavior, or
+  file format.
+- `server.py`: `GET /api/models` had no exception handling, unlike its
+  sibling `GET /api/lmstudio` right above it (~L539-547 before the fix),
+  which wraps its call in `try/except` and returns a structured
+  `{"ok": false, "error": ...}`. If `orch.model_status()` (or anything it
+  calls — `checkpoint_status()`, `list_trained_checkpoints()`) raised for any
+  reason, the exception propagated out of `do_GET` uncaught: a traceback to
+  the server console and a broken connection instead of a normal HTTP
+  response. `web/setup.js`'s `refreshModelStatus()` already tolerates both a
+  non-OK status and a hard fetch failure (`if (!resp.ok) return` /
+  `catch (_) { return; }`), so this was a robustness gap rather than a
+  currently-visible bug. Wrapped the one line in the same try/except pattern
+  as `/api/lmstudio`, returning `{"ok": false, "error": ...}` with a 500
+  status on failure.
+
+Found but NOT fixed — logged as a new open task above rather than a guess:
+`inference_daemon.py`'s Protocol A "settled" counter isn't reset when
+`predict_and_act()` raises during a `RUNNING` step — the stale `joints`/
+`target` from the last successful tick keep feeding the settled-check, so a
+run of read/inference failures can trip Protocol A even though the arm never
+actually finished moving. Notably asymmetric with Protocol B's `load`, which
+*is* explicitly zeroed every tick and so naturally self-suppresses on
+failure. Whether to reset `settled` or skip the check entirely on a failed
+tick changes step-termination timing under hardware flakiness — a protocol
+call for the thesis author, not a mechanical fix, so left alone per the
+standing "never touch protocol A/B semantics on a guess" rule.
+
+No new UI/backend field mismatches, endpoint mismatches, or off-by-one/unit
+errors turned up in the areas swept this round (`web/orchestrace.html`,
+`web/style.css`, endpoint↔fetch cross-check, timeout/threshold unit
+arithmetic) beyond what's already logged.
 
 ## 2026-08-15
 
