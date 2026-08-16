@@ -166,6 +166,17 @@ bus = EventBus()
 
 # ── Configuration ───────────────────────────────────────────────────────────
 
+# Guards every config.json / projects/<slug>.json read-modify-write sequence.
+# ThreadingHTTPServer runs each request in its own thread, and several routes
+# (dataset pin/unpin, project select/create/delete) do load_config() -> mutate
+# -> save_config() with no other synchronization; without this lock two
+# concurrent requests can interleave and the second save silently discards
+# the first's change (lost update). RLock so save_config() can be called
+# from within another locked function (select_project() etc.) without
+# deadlocking.
+_config_lock = threading.RLock()
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
@@ -219,84 +230,88 @@ def list_projects() -> list[dict]:
     return res
 
 def select_project(slug: str) -> dict:
-    ensure_projects_dir()
-    slug = validate_slug(slug)
-    proj_file = PROJECTS_DIR / f"{slug}.json"
-    if not proj_file.exists():
-        raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
-    with open(proj_file, "r", encoding="utf-8") as f:
-        pdata = json.load(f)
-    return save_config(pdata, overwrite=True)
+    with _config_lock:
+        ensure_projects_dir()
+        slug = validate_slug(slug)
+        proj_file = PROJECTS_DIR / f"{slug}.json"
+        if not proj_file.exists():
+            raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
+        with open(proj_file, "r", encoding="utf-8") as f:
+            pdata = json.load(f)
+        return save_config(pdata, overwrite=True)
 
 def create_project(slug: str, description: str) -> dict:
-    ensure_projects_dir()
-    slug = validate_slug(slug)
-    proj_file = PROJECTS_DIR / f"{slug}.json"
-    if proj_file.exists():
-        raise ValueError(f"Projekt s názvem '{slug}' již existuje.")
-        
-    current_cfg = load_config()
-    new_cfg = dict(DEFAULT_CONFIG)
-    for hw_key in ("python", "device", "robot_type", "robot_port", "robot_id", 
-                   "teleop_type", "teleop_port", "teleop_id", 
-                   "camera_name", "camera_index", "camera_width", "camera_height", "camera_fps",
-                   "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
-                   "fps", "lm_url", "llm_model", "vlm_model", 
-                   "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
-                   "protocol_b_enabled", "protocol_b_limit_ma", "holding_limit_ma"):
-        if hw_key in current_cfg:
-            new_cfg[hw_key] = current_cfg[hw_key]
+    with _config_lock:
+        ensure_projects_dir()
+        slug = validate_slug(slug)
+        proj_file = PROJECTS_DIR / f"{slug}.json"
+        if proj_file.exists():
+            raise ValueError(f"Projekt s názvem '{slug}' již existuje.")
 
-    new_cfg["task_slug"] = slug
-    new_cfg["task_description"] = description
-    new_cfg["steps"] = []
-    
-    with open(proj_file, "w", encoding="utf-8") as f:
-        json.dump(new_cfg, f, ensure_ascii=False, indent=2)
-        
-    return save_config(new_cfg, overwrite=True)
+        current_cfg = load_config()
+        new_cfg = dict(DEFAULT_CONFIG)
+        for hw_key in ("python", "device", "robot_type", "robot_port", "robot_id",
+                       "teleop_type", "teleop_port", "teleop_id",
+                       "camera_name", "camera_index", "camera_width", "camera_height", "camera_fps",
+                       "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
+                       "fps", "lm_url", "llm_model", "vlm_model",
+                       "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
+                       "protocol_b_enabled", "protocol_b_limit_ma", "holding_limit_ma"):
+            if hw_key in current_cfg:
+                new_cfg[hw_key] = current_cfg[hw_key]
+
+        new_cfg["task_slug"] = slug
+        new_cfg["task_description"] = description
+        new_cfg["steps"] = []
+
+        with open(proj_file, "w", encoding="utf-8") as f:
+            json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
+        return save_config(new_cfg, overwrite=True)
 
 def delete_project(slug: str) -> dict:
-    ensure_projects_dir()
-    slug = validate_slug(slug)
-    proj_file = PROJECTS_DIR / f"{slug}.json"
-    if not proj_file.exists():
-        raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
-        
-    curr_cfg = load_config()
-    is_active = (slug == curr_cfg.get("task_slug"))
-    
-    proj_file.unlink()
-    
-    if is_active:
-        remaining = sorted(PROJECTS_DIR.glob("*.json"))
-        if remaining:
-            with open(remaining[0], "r", encoding="utf-8") as f:
-                new_active_cfg = json.load(f)
-        else:
-            new_active_cfg = dict(DEFAULT_CONFIG)
-        save_config(new_active_cfg, overwrite=True)
-        
-    return {"deleted": slug, "active_changed": is_active, "config": load_config()}
+    with _config_lock:
+        ensure_projects_dir()
+        slug = validate_slug(slug)
+        proj_file = PROJECTS_DIR / f"{slug}.json"
+        if not proj_file.exists():
+            raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
+
+        curr_cfg = load_config()
+        is_active = (slug == curr_cfg.get("task_slug"))
+
+        proj_file.unlink()
+
+        if is_active:
+            remaining = sorted(PROJECTS_DIR.glob("*.json"))
+            if remaining:
+                with open(remaining[0], "r", encoding="utf-8") as f:
+                    new_active_cfg = json.load(f)
+            else:
+                new_active_cfg = dict(DEFAULT_CONFIG)
+            save_config(new_active_cfg, overwrite=True)
+
+        return {"deleted": slug, "active_changed": is_active, "config": load_config()}
 
 def save_config(cfg: dict, overwrite: bool = False) -> dict:
-    if overwrite:
-        merged = dict(DEFAULT_CONFIG)
-        merged.update(cfg)
-    else:
-        merged = load_config()
-        merged.update(cfg)
-        
-    CONFIG_FILE.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-    
-    slug = merged.get("task_slug")
-    if slug and re.match(r"^[a-z0-9_-]+$", slug):
-        PROJECTS_DIR.mkdir(exist_ok=True)
-        proj_file = PROJECTS_DIR / f"{slug}.json"
-        with open(proj_file, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2)
-            
-    return merged
+    with _config_lock:
+        if overwrite:
+            merged = dict(DEFAULT_CONFIG)
+            merged.update(cfg)
+        else:
+            merged = load_config()
+            merged.update(cfg)
+
+        CONFIG_FILE.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        slug = merged.get("task_slug")
+        if slug and re.match(r"^[a-z0-9_-]+$", slug):
+            PROJECTS_DIR.mkdir(exist_ok=True)
+            proj_file = PROJECTS_DIR / f"{slug}.json"
+            with open(proj_file, "w", encoding="utf-8") as f:
+                json.dump(merged, f, ensure_ascii=False, indent=2)
+
+        return merged
 
 
 # ── Datasety na disku ───────────────────────────────────────────────────────
@@ -544,7 +559,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
         elif path == "/api/models":
-            self._send_json(orch.model_status(load_config()))
+            try:
+                self._send_json(orch.model_status(load_config()))
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/datasets/local":
             qs = parse_qs(urlparse(self.path).query)
             show_all = (qs.get("all", ["0"])[0] == "1")
@@ -599,21 +617,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "Chybí repo_id."}, status=400)
                 return
             try:
-                cfg = load_config()
-                if step_slug:
-                    steps = cfg.get("steps", [])
-                    step = next((s for s in steps if s.get("slug") == step_slug), None)
-                    if step is None:
-                        self._send_json({"ok": False, "error": f"Krok '{step_slug}' neexistuje."}, status=400)
-                        return
-                    ds_list = step.setdefault("datasets", [])
-                    if repo_id not in ds_list:
-                        ds_list.append(repo_id)
-                else:
-                    ds_list = cfg.setdefault("baseline_datasets", [])
-                    if repo_id not in ds_list:
-                        ds_list.append(repo_id)
-                save_config(cfg)
+                with _config_lock:
+                    cfg = load_config()
+                    if step_slug:
+                        steps = cfg.get("steps", [])
+                        step = next((s for s in steps if s.get("slug") == step_slug), None)
+                        if step is None:
+                            self._send_json({"ok": False, "error": f"Krok '{step_slug}' neexistuje."}, status=400)
+                            return
+                        ds_list = step.setdefault("datasets", [])
+                        if repo_id not in ds_list:
+                            ds_list.append(repo_id)
+                    else:
+                        ds_list = cfg.setdefault("baseline_datasets", [])
+                        if repo_id not in ds_list:
+                            ds_list.append(repo_id)
+                    save_config(cfg)
                 self._send_json({"ok": True, "config": cfg})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=400)
@@ -622,16 +641,17 @@ class Handler(BaseHTTPRequestHandler):
             step_slug = body.get("step_slug")
             repo_id = (body.get("repo_id") or "").strip()
             try:
-                cfg = load_config()
-                if step_slug:
-                    steps = cfg.get("steps", [])
-                    step = next((s for s in steps if s.get("slug") == step_slug), None)
-                    if step and "datasets" in step:
-                        step["datasets"] = [d for d in step["datasets"] if d != repo_id]
-                else:
-                    if "baseline_datasets" in cfg:
-                        cfg["baseline_datasets"] = [d for d in cfg["baseline_datasets"] if d != repo_id]
-                save_config(cfg)
+                with _config_lock:
+                    cfg = load_config()
+                    if step_slug:
+                        steps = cfg.get("steps", [])
+                        step = next((s for s in steps if s.get("slug") == step_slug), None)
+                        if step and "datasets" in step:
+                            step["datasets"] = [d for d in step["datasets"] if d != repo_id]
+                    else:
+                        if "baseline_datasets" in cfg:
+                            cfg["baseline_datasets"] = [d for d in cfg["baseline_datasets"] if d != repo_id]
+                    save_config(cfg)
                 self._send_json({"ok": True, "config": cfg})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=400)
