@@ -220,6 +220,56 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-17
+
+Housekeeping: local `main` was again a detached-`HEAD` situation with a stale
+cached `remotes/origin/main` ref (showing `0ff9fb4`, many commits behind) —
+`git fetch origin main` confirmed `origin/main` was actually already at
+`dd13b92` (yesterday's commit), so the local ref was simply stale, not
+actually behind; reset local `main` to track it. No commits landed since
+yesterday's review, so today was another fresh deep pass rather than picking
+up new history. No data was ever at risk in any of these housekeeping steps
+(recorded here only because it's now a 6-day recurring pattern in this
+environment, not because anything went wrong).
+
+Dispatched a review pass deliberately aimed at angles prior passes covered
+more lightly, rather than re-walking the same files top-to-bottom again:
+`split_dataset.py`/`compute_step_timeouts.py` boundary-arithmetic correctness
+worked out by hand (bisect convention, cut-list construction vs. per-step
+duration), `inference_daemon.py`'s full stdin/stdout command protocol
+cross-checked command-by-command and status-line-by-status-line against
+`orchestrator.py`'s `Daemon` class, `server.py`'s dataset-management
+endpoints (`pin`/`unpin`/`delete`/`delete-episodes`/`local`) traced
+end-to-end against every corresponding `fetch()` in `web/setup.js` (body
+keys, query params, response fields), `web/run.js`'s SSE `handleEvent()`
+cross-checked against every `self.emit(...)` call site and payload shape in
+`orchestrator.py`, and `measure_gripper_current.py`/`reset_homing.py` read
+fresh for correctness bugs in isolation (not just cross-file coupling, as
+prior passes checked).
+
+**No new bugs found.** Every angle above checked out consistent with stated
+intent — no off-by-ones in the boundary/timeout math, no command/param-name
+or payload-shape mismatches in either protocol (daemon stdin/stdout or SSE),
+no endpoint/param drift between `server.py` and `web/setup.js`. One item
+surfaced during the review that isn't reportable as a bug either way and
+isn't logged as an open task: whether `measure_gripper_current.py`'s
+`'o'`→100.0 / `'c'`→0.0 open/closed convention actually matches this
+hardware's real calibration can't be determined from the repo alone (it's a
+physical-calibration question, not a code-logic one) — noting it here only
+so a future pass doesn't waste time re-deriving the same "no evidence either
+way" conclusion.
+
+Did not re-verify all 12 standing open items line-by-line today (the
+dispatched pass targeted new-bug-hunting in specific under-scrutinized areas,
+not re-confirmation of already-logged ones); no commits landed since
+yesterday that could have invalidated any of them, so low risk they've
+silently drifted. Recommend the next pass either re-verify the full list
+once for hygiene or start treating items unchanged for many consecutive days
+as stable unless a related file actually changes.
+
+No code changes today — nothing found met the bar for a safe, narrow,
+mechanical fix.
+
 ## 2026-08-16
 
 Housekeeping: local `main` was again a detached-`HEAD`/stale-ref situation
