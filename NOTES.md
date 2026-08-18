@@ -220,6 +220,105 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-18
+
+Housekeeping: local `main` was again a stale ref behind a detached `HEAD`
+that actually held yesterday's commit (`2804286`); `git fetch origin main`
+confirmed `origin/main` was already at `2804286` too — reset local `main` to
+track it, no data at risk (now a standing daily pattern in this environment,
+noted only for continuity, not because anything went wrong). No commits
+landed since yesterday's review, so today picked up with a fresh-angle pass
+rather than new history.
+
+Dispatched a review pass deliberately aimed at angles not yet covered by the
+7 prior days' passes: Windows path-separator correctness across all `.py`/
+`.js` files, `server.py`'s static-file path-traversal containment check, a
+full key-by-key diff of `server.py` `DEFAULT_CONFIG` vs. `web/config.js`
+`DEFAULTS` vs. `inference_daemon.py` argparse defaults, subprocess/process
+lifecycle handling around `orchestrator.py`'s `Daemon` class, UTF-8/encoding
+correctness across every file I/O and subprocess call given the Czech-text
+UI, and a fresh re-check of dataset-tooling argparse flags against what
+`web/setup.js` generates.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `inference_daemon.py`: `sys.stdout`/`sys.stderr` were reconfigured to UTF-8
+  at startup (with a comment explaining this is needed so Windows doesn't
+  fall back to the console codepage, e.g. cp1250, for the Czech text sent
+  through the pipe) but `sys.stdin` — read by `stdin_reader()`'s
+  `for line in sys.stdin:` loop, which receives `SET_TASK:<step description>`
+  commands from `orchestrator.py` — was never reconfigured, even though
+  `orchestrator.py`'s `Popen(...)` explicitly writes to that pipe with
+  `encoding="utf-8"`. On Windows this is a real encode/decode mismatch: a
+  step/task description with any character outside cp1250 risks a silent
+  `UnicodeDecodeError` inside `stdin_reader()`'s loop (uncaught there, which
+  would kill command intake for the rest of the run), and even in-range
+  Czech diacritics risk silent mojibake in `active_task` and the
+  `TASK_STARTED`/`TASK_DONE` status lines. Added `sys.stdin` to the same
+  reconfigure loop as stdout/stderr — same fix shape already applied there,
+  just the input side that was missed.
+- `server.py`: `delete_dataset_episodes()`'s `subprocess.run(...)` call for
+  `lerobot_edit_dataset` (used by the `/api/datasets/delete-episodes`
+  endpoint) had no `encoding=` argument, unlike the sibling `Popen` in
+  `orchestrator.py` which explicitly passes `encoding="utf-8",
+  errors="replace"`. With `text=True` and no explicit encoding, Python
+  decodes the child's captured stdout/stderr using the platform's default
+  locale encoding — on Windows, not UTF-8 — under strict error handling.
+  `lerobot_edit_dataset`'s video-reindexing step (the function's own
+  docstring notes it can run long) plausibly emits Unicode progress-bar
+  characters, which would raise `UnicodeDecodeError` inside
+  `subprocess.run()` itself, before the function's own `returncode` handling
+  ever runs — surfacing as an opaque codec error to the browser instead of
+  the real delete-episodes outcome. Added `encoding="utf-8",
+  errors="replace"` to match the existing pattern used elsewhere in the
+  codebase for the same class of subprocess call.
+- `orchestrator.py`: `Orchestrator.run()` had two places
+  (~L990-1000, initial-snapshot daemon; ~L1043-1060, per-step retry loop)
+  that abandon `self.daemon` — setting it to `None` after a failure — without
+  ever calling the daemon's own `.stop()` first. `Daemon.stop()` (sends
+  QUIT, waits, kills on timeout) is implemented correctly and *is* called at
+  the end of a normal/aborted run, but neither of these mid-run failure
+  paths reaches it, so the just-spawned `inference_daemon.py` subprocess
+  (which may hold the robot's serial port and camera handles) is left
+  running, unreferenced, forever. The per-step retry loop's own comment
+  literally names "a wedged serial port" as the scenario it's guarding
+  against — meaning the most likely trigger for this path is exactly the
+  case where leaking the old process is most damaging: the freshly-spawned
+  replacement daemon's own hardware `open()` can then fail too, because the
+  abandoned process is still holding the device. Added a `self.daemon.stop()`
+  call at both sites before discarding the reference — pure process hygiene,
+  does not touch protocol thresholds, config defaults, or success/failure
+  accounting.
+- `server.py`: `_serve_static()`'s path-traversal containment check used an
+  unanchored string-prefix comparison (`str(target).startswith(str(WEB_DIR
+  .resolve()))`), which would also accept a sibling directory whose name
+  merely starts with `web` (e.g. a future `web-old/` or, on Windows'
+  case-insensitive filesystem, `WEB2/`) — no such directory exists today so
+  this isn't currently exploitable, but the check itself was doing the wrong
+  thing. Switched to `target.is_relative_to(WEB_DIR.resolve())` (safe here —
+  the project already uses PEP 604 `X | None` syntax elsewhere, so it's
+  already on Python 3.10+, well past `is_relative_to`'s 3.9 floor). No
+  behavior change for any legitimate request; purely correct containment
+  logic for a check that was already intended to do exactly this.
+
+Angles that turned up nothing new (verified fresh rather than assumed):
+Windows path-separator handling (backend is consistently `pathlib`-based,
+and the few forward-slash string paths in `orchestrator.py` are handed to
+either `pathlib.Path()` or CLI tools that also use `pathlib`, so `/` is fine
+on Windows too); full default-value diff across `server.py`/`config.js`/
+`inference_daemon.py` (fully in sync, including everything fixed in prior
+passes — the only non-`DEFAULT_CONFIG`-backed fallback found,
+`cfg.get("task_slug", "task")` vs. the real default `"pick_and_place"`, is
+dead in every real path since `load_config()` always merges
+`DEFAULT_CONFIG` first, and isn't a numeric/threshold value, so not
+reportable the way the previously-fixed 250-vs-280 case was); dataset-
+tooling argparse flags vs. what `web/setup.js` generates (all match, re-
+derived fresh from source rather than trusted from prior notes).
+
+Did not re-verify all 7 standing open items line-by-line today (this pass
+targeted new-bug-hunting on fresh angles, not re-confirmation); no commits
+landed since yesterday that could have invalidated any of them.
+
 ## 2026-08-17
 
 Housekeeping: local `main` was again a detached-`HEAD` situation with a stale
