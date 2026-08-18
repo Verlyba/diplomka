@@ -400,7 +400,9 @@ def delete_dataset_episodes(repo_id: str, indices: list[int], python_exe: str) -
         f"--operation.episode_indices={json.dumps(indices)}",
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1800,
+            encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(
             f"lerobot_edit_dataset neskončil do 30 minut — zkontroluj terminál serveru "
@@ -502,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, path: str) -> None:
         rel = path.lstrip("/") or "index.html"
         target = (WEB_DIR / rel).resolve()
-        if not str(target).startswith(str(WEB_DIR.resolve())) or not target.is_file():
+        if not target.is_relative_to(WEB_DIR.resolve()) or not target.is_file():
             self.send_error(404, "Not found")
             return
         data = target.read_bytes()
