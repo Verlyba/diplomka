@@ -997,6 +997,8 @@ class Orchestrator:
                     self.emit("log", level="WARN",
                               message=f"Výchozí snímek scény se nepodařilo pořídit ({e}) — "
                                       "plánuji bez něj.")
+                    if self.daemon:
+                        self.daemon.stop()
                     self.daemon = None
 
             raw_plan, ceo_reasoning = self._create_plan(
@@ -1057,6 +1059,7 @@ class Orchestrator:
                         self.emit("log", level="ERROR",
                                   message=f"Daemon selhal ({e}) — restartuji a zkouším "
                                           f"krok '{step}' znovu.")
+                        self.daemon.stop()
                         self.daemon = None
                 self.emit("step", index=index, step=step, phase="executed", reason=reason)
 
