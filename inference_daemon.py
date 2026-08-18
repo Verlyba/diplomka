@@ -60,10 +60,12 @@ from typing import Any
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
 
-# Výstup daemonu čte orchestrátor jako UTF-8. Bez tohohle by Python na Windows
-# poslal do roury kódování konzole (cp1250) a české hlášky by v logu na webu
+# Výstup daemonu čte orchestrátor jako UTF-8 a příkazy (SET_TASK: s českým
+# popisem kroku) mu posílá taky jako UTF-8 (viz orchestrator.py Popen(...,
+# encoding="utf-8")). Bez tohohle by Python na Windows použil kódování
+# konzole (cp1250) pro stdout/stderr i stdin a české hlášky/příkazy by
 # dorazily rozsypané — a znak mimo cp1250 by proces rovnou shodil.
-for _stream in (sys.stdout, sys.stderr):
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
