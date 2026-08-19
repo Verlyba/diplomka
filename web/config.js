@@ -91,12 +91,16 @@ async function loadConfig() {
 async function saveConfig(cfg) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
   try {
-    await fetch('/api/config', {
+    const resp = await fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cfg),
     });
-    return true;
+    // A non-2xx response (e.g. server-side write failure) means config.json
+    // was NOT actually written, even though the request itself went
+    // through — checking resp.ok (not just "fetch didn't throw") keeps the
+    // caller's success/fail status accurate for that case too.
+    return resp.ok;
   } catch (_) {
     return false;
   }

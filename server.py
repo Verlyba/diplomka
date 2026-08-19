@@ -56,6 +56,11 @@ def atomic_write_json(path: Path, data: dict) -> None:
     path = Path(path)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
+        # mkstemp() creates the temp file mode 0600 (owner-only); os.replace()
+        # would carry that onto the target, silently making config.json less
+        # readable than a plain open(path, "w") (which follows the umask,
+        # 0644 here) used to leave it. chmod back to that before the swap.
+        os.chmod(tmp_name, 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_name, path)
@@ -164,20 +169,29 @@ class EventBus:
             except queue.Full:
                 pass
 
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self) -> tuple[queue.Queue, list[dict]]:
+        """Register a new subscriber and return the history-so-far in one
+        atomic step, together with the queue.
+
+        Registering and snapshotting history as two separate locked calls
+        (as this used to be) leaves a race: an event published in the gap
+        between them lands in the history snapshot *and* gets pushed onto
+        the now-already-registered queue, so a browser tab reconnecting to
+        /api/events could see that one event replayed twice. Doing both
+        under the same lock as publish()'s own append+snapshot means every
+        event is delivered exactly once, via whichever path is correct for
+        when the subscriber joined.
+        """
         q: queue.Queue = queue.Queue(maxsize=1000)
         with self._lock:
             self._subscribers.append(q)
-        return q
+            snapshot = list(self._history)
+        return q, snapshot
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
             if q in self._subscribers:
                 self._subscribers.remove(q)
-
-    def history(self) -> list[dict]:
-        with self._lock:
-            return list(self._history)
 
     def clear_history(self) -> None:
         with self._lock:
@@ -536,7 +550,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _stream_events(self) -> None:
-        q = bus.subscribe()
+        q, initial_history = bus.subscribe()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -544,7 +558,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             # replay what already happened so a reload does not lose the run
-            for event in bus.history():
+            for event in initial_history:
                 self._write_event(event)
             while True:
                 try:
@@ -569,7 +583,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             self._send_json(load_config())
         elif path == "/api/projects":
-            self._send_json(list_projects())
+            try:
+                self._send_json(list_projects())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/status":
             self._send_json({"running": run_state.running,
                              "instruction": run_state.instruction})
@@ -589,7 +606,10 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             show_all = (qs.get("all", ["0"])[0] == "1")
             task_slug = None if show_all else load_config().get("task_slug")
-            self._send_json(list_local_datasets(task_slug))
+            try:
+                self._send_json(list_local_datasets(task_slug))
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/runs":
             runs_dir = HERE / "runs"
             files = sorted((f.name for f in runs_dir.glob("*.json")), reverse=True) \
@@ -608,7 +628,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/config":
-            self._send_json({"ok": True, "config": save_config(body)})
+            try:
+                self._send_json({"ok": True, "config": save_config(body)})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/projects/select":
             slug = body.get("slug", "")
             try:
