@@ -41,6 +41,8 @@ import argparse
 import json
 import logging
 import math
+import os
+import tempfile
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
@@ -60,6 +62,24 @@ def lerobot_home() -> Path:
     import os
     hf_home = Path(os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface"))
     return Path(os.getenv("HF_LEROBOT_HOME", hf_home / "lerobot"))
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` via a temp-file + os.replace() so a crash or
+    kill mid-write can never leave config.json truncated/corrupt (this writes
+    straight into the user's live config.json under --apply)."""
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def episode_length_s(meta, ep_idx: int, fps: float) -> float:
@@ -175,7 +195,7 @@ def main() -> int:
                 log.info("config.json: %s.timeout_s %s -> %s", slug, old, suggestions[slug])
                 changed = True
     if changed:
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_text(CONFIG_FILE, json.dumps(cfg, indent=2, ensure_ascii=False))
         log.info("Written to %s", CONFIG_FILE)
 
         # server.py's save_config() always mirrors config.json into
@@ -186,7 +206,7 @@ def main() -> int:
         if task_slug:
             proj_file = HERE / "projects" / f"{task_slug}.json"
             if proj_file.exists():
-                proj_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+                atomic_write_text(proj_file, json.dumps(cfg, indent=2, ensure_ascii=False))
                 log.info("Written to %s", proj_file)
     else:
         log.info("config.json already matched the suggestions — nothing changed.")

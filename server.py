@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +44,27 @@ HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
 CONFIG_FILE = HERE / "config.json"
 PROJECTS_DIR = HERE / "projects"
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Write `data` as JSON to `path` without ever leaving a truncated/corrupt
+    file behind if the process dies mid-write (kill -9, power loss, a crash in
+    this long-running robot-control app). Writes to a temp file in the same
+    directory, then does one atomic os.replace() over the target — so any
+    reader always sees either the old file or the fully-written new one, never
+    a half-written one."""
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 # Kam record_with_marks.py / lerobot-record doopravdy ukládá "local/<name>"
 # datasety — LeRobotDataset(repo_id="local/x") vždycky píše sem, bez ohledu
 # na to, odkud server.py běží. Stejná cesta jako derive.datasetRoot() v
@@ -206,8 +229,7 @@ def ensure_projects_dir() -> None:
     if re.match(r"^[a-z0-9_-]+$", slug):
         proj_file = PROJECTS_DIR / f"{slug}.json"
         if not proj_file.exists():
-            with open(proj_file, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            atomic_write_json(proj_file, cfg)
 
 def list_projects() -> list[dict]:
     ensure_projects_dir()
@@ -264,8 +286,7 @@ def create_project(slug: str, description: str) -> dict:
         new_cfg["task_description"] = description
         new_cfg["steps"] = []
 
-        with open(proj_file, "w", encoding="utf-8") as f:
-            json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+        atomic_write_json(proj_file, new_cfg)
 
         return save_config(new_cfg, overwrite=True)
 
@@ -302,14 +323,13 @@ def save_config(cfg: dict, overwrite: bool = False) -> dict:
             merged = load_config()
             merged.update(cfg)
 
-        CONFIG_FILE.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_json(CONFIG_FILE, merged)
 
         slug = merged.get("task_slug")
         if slug and re.match(r"^[a-z0-9_-]+$", slug):
             PROJECTS_DIR.mkdir(exist_ok=True)
             proj_file = PROJECTS_DIR / f"{slug}.json"
-            with open(proj_file, "w", encoding="utf-8") as f:
-                json.dump(merged, f, ensure_ascii=False, indent=2)
+            atomic_write_json(proj_file, merged)
 
         return merged
 
