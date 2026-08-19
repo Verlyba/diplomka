@@ -15,8 +15,10 @@ condition being measured, not application infrastructure.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -30,6 +32,29 @@ HERE = Path(__file__).resolve().parent
 # konstantu — nejde sdílet importem, protože server.py naopak importuje tenhle
 # modul, tak by vznikl cyklus).
 LOCAL_DATASETS_DIR = Path.home() / ".cache" / "huggingface" / "lerobot" / "local"
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` via a temp-file + os.replace() so a crash or
+    kill mid-write can never leave a truncated/corrupt file behind (used for
+    runs/*.json, the raw thesis run data)."""
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        # mkstemp() creates the temp file mode 0600 (owner-only); os.replace()
+        # would carry that onto the target, silently making it less readable
+        # than the plain open(path, "w") it replaces (which follows the umask).
+        os.chmod(tmp_name, 0o644)
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
 
 PLANNER_SYSTEM_PROMPT = (
     "You are the planning layer of a three-layer robotic manipulation system.\n\n"
@@ -1192,8 +1217,7 @@ class Orchestrator:
             payload = dict(summary)
             payload["config"] = {k: v for k, v in self.cfg.items() if k != "steps"}
             payload["catalog"] = step_catalog(self.cfg)
-            (runs / name).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                                     encoding="utf-8")
+            atomic_write_text(runs / name, json.dumps(payload, indent=2, ensure_ascii=False))
             self.emit("log", level="INFO", message=f"Záznam běhu uložen: runs/{name}")
         except Exception as e:
             self.emit("log", level="WARN", message=f"Záznam běhu se nepodařilo uložit: {e}")

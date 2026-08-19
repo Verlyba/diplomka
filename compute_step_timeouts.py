@@ -71,6 +71,10 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
     path = Path(path)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
+        # mkstemp() creates the temp file mode 0600 (owner-only); os.replace()
+        # would carry that onto config.json, silently making it less readable
+        # than the plain open(path, "w") it replaces (which follows the umask).
+        os.chmod(tmp_name, 0o644)
         with os.fdopen(fd, "w", encoding=encoding) as f:
             f.write(text)
         os.replace(tmp_name, path)

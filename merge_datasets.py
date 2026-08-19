@@ -25,8 +25,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("merge")
 
 AUTO_FEATURES = {"timestamp", "frame_index", "episode_index", "index", "task_index"}
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` via a temp-file + os.replace() so a crash or
+    kill mid-write can never leave a truncated/corrupt sidecar behind."""
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        # mkstemp() creates the temp file mode 0600 (owner-only); os.replace()
+        # would carry that onto the target, silently making it less readable
+        # than the plain write_text() it replaces (which follows the umask).
+        os.chmod(tmp_name, 0o644)
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def lerobot_home() -> Path:
@@ -163,7 +186,7 @@ def main() -> int:
     # Sidecar se švy — stejný formát, jaký píše record_with_marks.py, takže
     # split_dataset.py umí dataset rozdělit zpátky na tytéž kroky.
     marks_path = target_dir.parent / f"{target_dir.name}.marks.json"
-    marks_path.write_text(json.dumps({"episodes": marks}, indent=2), encoding="utf-8")
+    atomic_write_text(marks_path, json.dumps({"episodes": marks}, indent=2))
 
     log.info("Hotovo: %s — %d epizod, %d snímků. Hranice uloženy do %s",
              target_repo, episodes, total_frames, marks_path)
