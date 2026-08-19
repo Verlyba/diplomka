@@ -7,7 +7,7 @@ tasks at the top; dated entries below, newest first.
 
 - **[protocol semantics, needs a human decision] Protocol A's "settled" counter
   isn't reset on an observation/inference failure, so it can inflate from
-  stale data instead of a real hold.** `inference_daemon.py` ~L723-746. In the
+  stale data instead of a real hold.** `inference_daemon.py` ~L725-763. In the
   `RUNNING` branch, `predict_and_act()` failing (camera read error, transient
   serial error, etc.) is caught by `except Exception as e: log.warning(...)`
   with no other effect — `joints`/`target` are left exactly as they were on
@@ -39,7 +39,9 @@ tasks at the top; dated entries below, newest first.
   `compute_step_timeouts.py --apply`.** `web/setup.js` loads `cfg` into page
   memory once (`loadConfig()`), never refreshes it, and "Uložit" POSTs the
   whole in-memory object. `server.py` `save_config()`'s non-overwrite path
-  does `merged = load_config(); merged.update(cfg)` — a shallow update, so
+  (now ~L331, merge at L337-338 — drifted only from unrelated insertions
+  earlier in the file; same logic) does `merged = load_config();
+  merged.update(cfg)` — a shallow update, so
   `merged["steps"]` is wholesale replaced by whatever `steps` array the
   browser still has in memory, silently dropping any `timeout_s` (or other
   step field) that was written to `config.json` by another process since
@@ -78,7 +80,8 @@ tasks at the top; dated entries below, newest first.
 
 - **[uncertain, low priority] `create_project()`'s field whitelist may drop
   more settings than intended when starting a new project.**
-  `server.py` `create_project()` ~L240-248: the new project's config starts
+  `server.py` `create_project()` ~L279 (drifted from ~L240 only due to
+  unrelated insertions earlier in the file; same logic): the new project's config starts
   from `dict(DEFAULT_CONFIG)`, then only a fixed whitelist of keys (python,
   device, robot/teleop/camera fields, `fps`, `lm_url`/`llm_model`/`vlm_model`,
   the protocol A/B settings) is copied over from the currently active
@@ -96,8 +99,9 @@ tasks at the top; dated entries below, newest first.
 
 - **[affects success accounting, needs a human decision] A garbage initial
   plan (all step IDs hallucinated) is recorded as a successful run.**
-  `orchestrator.py` `Orchestrator.run()` ~L1008-1016 vs. `_resolve_plan()`
-  ~L858-865. `_resolve_plan()`'s own docstring says the `DONE`/`ABORT`
+  `orchestrator.py` `Orchestrator.run()` ~L1041-1043 vs. `_resolve_plan()`
+  ~L883 (both drifted only from unrelated insertions earlier in the file;
+  same logic). `_resolve_plan()`'s own docstring says the `DONE`/`ABORT`
   sentinels exist specifically so the caller "can tell 'the planner
   deliberately said there is nothing to do / nothing that can be done' apart
   from 'the planner produced garbage'-both of which used to arrive here as an
@@ -110,7 +114,7 @@ tasks at the top; dated entries below, newest first.
   against the code's own stated intent, but fixing it changes what counts as
   "success" for these runs — i.e. it would alter the thesis's success-rate
   data, which is explicitly out of scope for an unattended fix. Note the
-  analogous empty-plan case *after a re-plan* (~L1140-1150) already does the
+  analogous empty-plan case *after a re-plan* (~L1157-1177) already does the
   right thing (falls back to resuming from the failed step, or raises if that
   also fails) — only the *initial* planning call's empty-plan handling has
   this gap.
@@ -140,7 +144,7 @@ tasks at the top; dated entries below, newest first.
 
 - **[risky to mechanically fix] Checkpoint attribution uses unanchored
   substring matching, can attribute a checkpoint to the wrong step.**
-  `orchestrator.py` `list_trained_checkpoints()` ~L618-626. Directory naming
+  `orchestrator.py` `list_trained_checkpoints()` ~L619 (unchanged). Directory naming
   convention is `{task_slug}_{step_slug}_{policy_type}` (see
   `step_output_dir`/`baseline_output_dir`, ~L429-441). The step-lookup branch
   does `dir_name.startswith(f"{task_slug}_{step_slug}")` (no trailing `_`)
@@ -163,9 +167,9 @@ tasks at the top; dated entries below, newest first.
   **2026-08-15 update:** the same root cause (unanchored `task_slug`
   prefix matching) also affects *dataset* visibility, in two more spots —
   not just checkpoint attribution: `server.py` `list_local_datasets()`
-  (`d.name == task_slug or d.name.startswith(f"{task_slug}_")`) and
-  `orchestrator.py` `find_available_datasets()`'s disk-scan branch (same
-  pattern). If one project's `task_slug` is a prefix of another's, the
+  (`d.name == task_slug or d.name.startswith(f"{task_slug}_")`, now L372) and
+  `orchestrator.py` `find_available_datasets()`'s disk-scan branch (now L553,
+  same pattern). If one project's `task_slug` is a prefix of another's, the
   Setup page's dataset overview and the model modal's "available datasets"
   list both leak the other project's dataset dirs into the current
   project's view. Same fix, same risk of breaking an intentional
@@ -178,15 +182,19 @@ tasks at the top; dated entries below, newest first.
   these would be a feature, not a fix.
 
 - **[informational, low priority] Some config keys are config.json-only.**
-  `max_replans`, `llm_timeout_s`, `daemon_start_timeout_s` are read by
-  `orchestrator.py` but have no `data-key` input anywhere in `web/index.html`
-  — only editable by hand-editing `config.json`. Flagging in case that's not
+  `max_replans` (`server.py` `DEFAULT_CONFIG` L128), `llm_timeout_s`
+  (`orchestrator.py` L721), `daemon_start_timeout_s` (`orchestrator.py` L314)
+  are read by `orchestrator.py` but have no `data-key` input anywhere in
+  `web/index.html` — confirmed 2026-08-19 they're genuinely absent from both
+  `DEFAULT_CONFIG` and `web/config.js`'s `DEFAULTS`, not just missing a form
+  field — only editable by hand-editing `config.json`. Flagging in case that's not
   intentional; not changing anything since adding form fields is a UI feature
   decision, not a bug fix.
 
 - **[uncertain, low priority] VLM inspector verdict parsing checks failure
   tags via substring match over the whole reply, before requiring an exact
-  "SUCCESS".** `orchestrator.py` `_read_verdict()` ~L895-906: `FAILURE_TAGS`
+  "SUCCESS".** `orchestrator.py` `_read_verdict()` ~L921 (drifted from ~L895
+  only due to unrelated insertions earlier in the file; same logic): `FAILURE_TAGS`
   are matched with `tag.upper() in upper` against the entire raw reply,
   checked before the strict `upper.strip(...) == "SUCCESS"` branch. If a
   verbose/CoT-style local VLM reply mentions a bracketed tag string while
@@ -198,7 +206,8 @@ tasks at the top; dated entries below, newest first.
 
 - **[uncertain, low priority] No request/response correlation on the
   `Daemon` stdin/stdout protocol.** `orchestrator.py` `Daemon.snapshot()`
-  ~L367-386 and the `_policy_event`/`_task_done` handling in `run_task()`/
+  ~L392 (drifted from ~L367 only due to unrelated insertions earlier in the
+  file; same logic) and the `_policy_event`/`_task_done` handling in `run_task()`/
   `set_policy()` ~L341-365: responses are matched to calls purely by shared
   mutable state (e.g. `_snapshot`/`_snapshot_b64` cleared then awaited), with
   no sequence ID. If a previous call's response arrives late — after that
@@ -207,7 +216,9 @@ tasks at the top; dated entries below, newest first.
   hardware/camera latency; flagging as a latent race, not a confirmed one.
 
 - **[uncertain, low priority] Mark timestamps in `record_with_marks.py` may
-  be systematically ~1 frame late.** `record_with_marks.py` ~L93-94/182-185:
+  be systematically ~1 frame late.** `record_with_marks.py` ~L205 (drifted
+  only because the unrelated atomic-write fix touched `_persist()`'s write
+  mechanics just above it, 2026-08-19; the counter itself is untouched):
   `_STATE["frames"]` is incremented at the *start* of the wrapped
   `add_frame()`, so by the time frame index 0 has been written, the counter
   already reads 1, and a mark taken right then computes `t = 1/fps` rather
@@ -219,6 +230,115 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-19
+
+Housekeeping: `main` was already clean and tracking `origin/main` at
+`31058a1` — no detached-HEAD/stale-ref issue today, unlike every prior day.
+No commits had landed since yesterday's review, so today was another
+fresh-angle pass rather than picking up new history.
+
+Re-verified all 8 standing open items against current code (dispatched
+review). All still present, substance unchanged — a few line numbers
+drifted, but only because today's own fixes below added code earlier in the
+same files, not from any external change; updated the line references
+in-place above rather than duplicating the items here.
+
+Dispatched a review pass aimed at angles not yet covered: crash-safety of
+every JSON write in the repo (write-then-rename vs. direct overwrite),
+numpy-into-`json.dumps()` TypeError risk, SSE event-stream thread-safety
+beyond the already-fixed config-write locking, exception-handling coverage
+across `server.py`'s remaining endpoints, a full fresh re-read of
+`web/style.css`/`web/orchestrace.html`, and a fresh hand re-derivation of
+`compute_step_timeouts.py`/`split_dataset.py`'s boundary arithmetic against
+edge cases (zero-duration step, single-step task, a mark exactly on a frame
+boundary).
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- **No JSON write anywhere in the codebase was crash-safe.** Every
+  JSON-writing call site — `server.py`'s `save_config()` (→ `config.json`
+  and `projects/<slug>.json`), `ensure_projects_dir()`, `create_project()`;
+  `compute_step_timeouts.py --apply`'s two writes; `orchestrator.py`'s
+  `_save_run()` (→ `runs/<timestamp>.json`, the raw thesis data);
+  `record_with_marks.py`'s `_persist()` (→ `<dataset>.marks.json`, called
+  after every keypress during a live recording — its own docstring already
+  claimed "survives a crash mid-recording," a claim the code didn't actually
+  keep); `merge_datasets.py`'s marks-sidecar write — wrote straight to the
+  target path with `write_text()`/`json.dump()`. A crash or kill mid-write on
+  a long-running robot-control app like this could leave any of these
+  truncated/corrupt, most damagingly `config.json`, which every subsequent
+  run reads. Added a small `atomic_write_json`/`atomic_write_text` helper to
+  each of the 5 affected files: write to a temp file in the same directory
+  via `tempfile.mkstemp()`, `chmod` it to `0o644` (mkstemp defaults to
+  owner-only `0600`, which would otherwise have silently made every
+  rewritten file less readable than the plain `open(path, "w")` it
+  replaces — verified empirically against this environment's `022` umask),
+  then swap it in with `os.replace()` (atomic on Windows too, unlike
+  `os.rename()`). Verified all 5 files still parse and did a live
+  write-then-read-back + permission-bits round trip. First half of this fix
+  (`server.py`, `compute_step_timeouts.py`) landed as commit `4cc9764`
+  mid-session (an auto-commit mechanism in this environment persisted it
+  before the full review pass finished, matching the pattern noted in prior
+  days' entries); the rest (`orchestrator.py`, `record_with_marks.py`,
+  `merge_datasets.py`) landed together with this entry. Pure I/O-mechanics
+  change — no data format, default value, or protocol logic touched.
+- `server.py`: **`EventBus`'s SSE subscribe/history sequence had a race that
+  could double-deliver one event to a reconnecting browser tab.**
+  `_stream_events()` called `bus.subscribe()` (register the queue) and,
+  separately, `bus.history()` (snapshot the log so a reload doesn't lose the
+  run) — two independently-locked operations. `publish()` appends-to-history
+  and snapshots-subscribers atomically under one lock; if a `publish()`
+  landed in the gap between `subscribe()` and `history()`, that event ended
+  up in both the history replay *and* the newly-registered queue — a
+  duplicated log/plan/step event in a (re)connecting tab. Merged `subscribe()`
+  into one atomic method that registers the queue and snapshots history
+  under a single lock hold, returning both together; `history()` removed as
+  now-unused. Verified with a standalone test (events published before/after
+  `subscribe()` each land in exactly one of history-snapshot or queue, never
+  both). UI/log-only, same class as the already-fixed 2026-08-12 duplicate-
+  "plan"-event bug — no change to `self.results` or success/failure
+  accounting.
+- `server.py`: **three more endpoints lacked the try/except pattern the
+  2026-08-16 fix established for `/api/models`.** `GET /api/projects`,
+  `GET /api/datasets/local`, and `POST /api/config` (used on every "Uložit"
+  click) had no exception handling, so a failure inside them (e.g. a project
+  file becoming unreadable, or a dataset dir vanishing mid-`iterdir()` from a
+  concurrent delete) would 500 with a raw traceback / reset connection
+  instead of a clean JSON response. Wrapped all three in the same
+  `try/except Exception as e: self._send_json({"ok": False, "error": str(e)},
+  status=500)` pattern already used elsewhere.
+- `web/config.js`: **`saveConfig()` never actually checked whether the save
+  succeeded — needed together with the `/api/config` fix above.** It
+  returned `true` unconditionally once `fetch()` resolved, checking neither
+  `resp.ok` nor the body — before today's fix, a server-side exception in
+  `save_config()` reset the connection with no response at all, which *did*
+  make `fetch()` throw, so the existing "Uloženo do prohlížeče. Server
+  neběží…" fallback happened to fire correctly by accident. Adding the
+  try/except above turns that same failure into a clean HTTP 500 with a JSON
+  body, which `fetch()` does *not* throw on — so wrapping `/api/config` alone
+  would have flipped a real save failure into a falsely-reported "Uloženo do
+  config.json" success message, worse than the raw error it replaced. Fixed
+  by having `saveConfig()` `return resp.ok` instead of unconditional `true`;
+  unchanged on the normal-success path. Landing this together with the
+  `/api/config` try/except is why it's one entry, not two.
+
+Angles that turned up nothing new (verified fresh rather than assumed):
+numpy-into-`json.dumps()` TypeError risk (traced every `json.dumps`/
+`json.dump` call site in `server.py`/`orchestrator.py`/`inference_daemon.py`
+— the first two never import numpy at all, and `inference_daemon.py`'s one
+JSON write only ever holds plain `str`, so no numpy scalar can leak in); a
+full fresh read of `web/style.css` (551 lines) and `web/orchestrace.html`
+(218 lines, including re-checking its Protocol A/B numeric claims against
+current defaults — still accurate); hand re-derivation of
+`compute_step_timeouts.py`/`split_dataset.py`'s boundary arithmetic against
+zero-duration-step, single-step-task, and mark-exactly-on-a-frame-boundary
+cases — all correctly handled, no new off-by-one beyond the already-logged,
+unrelated marks-timestamp item.
+
+Did not turn up any new open task today — everything found either got fixed
+directly (all judged narrow/low-risk/mechanical) or was already covered by
+an existing open item.
 
 ## 2026-08-18
 
