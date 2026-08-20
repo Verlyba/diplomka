@@ -521,19 +521,24 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_body(self) -> dict | None:
-        """Parsed JSON body, or None when it was sent but is not valid JSON.
+        """Parsed JSON body, or None when it was sent but is not valid JSON —
+        or is valid JSON that isn't an object (e.g. a bare array/number/null).
 
         The difference matters: silently treating a broken body as empty would
         start a run with default settings instead of the ones that were asked
-        for — the checkboxes on the run page would look ignored.
+        for — the checkboxes on the run page would look ignored. Every route
+        handler calls body.get(...) unconditionally, so a non-dict body must
+        be rejected here rather than let AttributeError crash the connection
+        in whichever handler runs first.
         """
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            parsed = json.loads(self.rfile.read(length).decode("utf-8"))
         except Exception:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _serve_static(self, path: str) -> None:
         rel = path.lstrip("/") or "index.html"
@@ -717,7 +722,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=400)
         elif path == "/api/run":
-            self._send_json(start_run(body))
+            try:
+                self._send_json(start_run(body))
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/stop":
             self._send_json(stop_run())
         else:
