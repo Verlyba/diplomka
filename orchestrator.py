@@ -313,6 +313,12 @@ class Daemon:
 
         if not self._ready.wait(timeout=float(self.cfg.get("daemon_start_timeout_s", 180))):
             raise RuntimeError("Daemon se nespustil včas (nenahlásil DAEMON_READY).")
+        if self.proc.poll() is not None:
+            # _read_output() also sets _ready on EOF (process exit) so a
+            # daemon that crashes before ever printing DAEMON_READY (e.g. a
+            # broken import) unblocks this wait immediately instead of
+            # silently eating the full daemon_start_timeout_s below.
+            raise RuntimeError("Daemon skončil dřív, než nahlásil DAEMON_READY (viz log výše).")
 
     def _read_output(self) -> None:
         assert self.proc and self.proc.stdout
@@ -355,6 +361,12 @@ class Daemon:
             else:
                 self.emit("log", level="DEBUG", message=f"daemon: {line}")
         self.emit("log", level="WARN", message="Daemon ukončen.")
+        # Unblock start()'s readiness wait immediately if the process exited
+        # (stdout closed) before ever reporting DAEMON_READY, instead of
+        # leaving that wait to run out the full daemon_start_timeout_s.
+        # start() itself checks proc.poll() right after to tell this apart
+        # from a real ready signal and raise a clear error either way.
+        self._ready.set()
 
     def _send(self, command: str) -> None:
         if not self.proc or self.proc.poll() is not None or not self.proc.stdin:
@@ -1078,7 +1090,14 @@ class Orchestrator:
                             self.daemon.set_policy(policy_path)
                         reason = self.daemon.run_task(step, step_timeout, is_grasp)
                         break
-                    except RuntimeError as e:
+                    except (RuntimeError, OSError) as e:
+                        # OSError (e.g. BrokenPipeError from _send()'s
+                        # stdin.write()) is a real daemon-communication
+                        # failure of the exact same "wedged serial port"
+                        # shape as the RuntimeError this loop was built to
+                        # retry — just raised by a different code path (the
+                        # process dying between _send()'s liveness poll and
+                        # the write itself) — so it needs the same retry.
                         if attempt == 2:
                             raise
                         self.emit("log", level="ERROR",
