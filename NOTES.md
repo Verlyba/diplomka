@@ -231,6 +231,165 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-20
+
+Housekeeping: `HEAD` was detached at `832fa7f` (yesterday's commit) with
+local `main` stale at `31058a1`; `git fetch origin main` confirmed
+`origin/main` was already at `832fa7f` too — checked out `main` and
+fast-forwarded it to match, no data at risk (same recurring pattern as every
+prior day). No commits had landed since yesterday's review, so today was
+another fresh-angle pass rather than picking up new history.
+
+Ran the test suite (`tests/test_split.py`, `test_merge.py`, `test_marks.py`)
+for the first time in this routine's history — all three currently fail to
+even import in this container (`ModuleNotFoundError: lerobot`/`numpy`,
+`numpy` installable but `lerobot` is not, being LeRobot itself). This is a
+sandbox-dependency gap, not a repo bug — noting it only so a future run
+doesn't re-discover the same "can't run tests here" result from scratch;
+the real target machine (with the conda env from `DEFAULT_CONFIG.python`)
+presumably has both installed.
+
+Re-verified all 8 standing open items are still present in current code —
+no drift beyond what's already noted. Dispatched two parallel fresh-angle
+review passes deliberately split by file group to cover more ground:
+(1) `orchestrator.py` + `inference_daemon.py` — re-plan/step bookkeeping,
+`_verify()`'s retry loop, `Daemon` process-lifecycle edge cases beyond what
+prior days already fixed, Protocol A/B numeric-comparison edge cases;
+(2) `server.py` + all of `web/` — request-body validation gaps, response-
+shape↔fetch() parity, DOM-id wiring, numeric-input edge cases in `setup.js`.
+Also independently traced the `_config_lock`/`atomic_write_json` interaction
+added over the last two days for correctness (all 5 atomic-write call sites
+compose correctly with the locking; no new issue) and confirmed the
+`EventBus.subscribe()` race fix from yesterday is correct by re-deriving the
+happens-before argument by hand.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact — each
+verified with a live repro before and after):
+
+- `inference_daemon.py`: **`QUIT` used `os._exit(0)` from a background
+  thread, which skips the `finally: robot.disconnect()` cleanup in
+  `__main__` entirely** (~L579, ~L792-799). `os._exit()` terminates the
+  process at the OS level without unwinding any thread's call stack,
+  including the main thread running `main()`'s `while True:` loop — which
+  has no other exit path. Since `Daemon.stop()` (`orchestrator.py`) sends
+  `QUIT` as the *normal* end of every run (success, failure, or user-stop),
+  this meant `robot.disconnect()` was skipped on essentially every
+  orchestrated run, not just crashes — whatever LeRobot's `disconnect()`
+  does beyond closing the OS file descriptor (releasing a lock, disabling
+  torque) never ran. Replaced the direct `os._exit(0)` with a
+  `threading.Event` (`_quit_requested`) that `stdin_reader()` sets and
+  `main()`'s loop checks at the top of every tick, `return`ing normally so
+  `__main__`'s `finally` actually executes. Verified live: spawned the
+  daemon in simulated mode, sent `QUIT` over stdin, confirmed clean exit
+  (rc=0) in ~0.16s — well inside `Daemon.stop()`'s existing 5s
+  `proc.wait(timeout=5)`, so no user-visible behavior change beyond the
+  cleanup now actually running. Pure process-shutdown-hygiene fix, same
+  class as the already-landed `Daemon.stop()`-before-abandoning fix
+  (2026-08-18) — does not touch protocol thresholds, timing, or any
+  in-`RUNNING`-state logic.
+- `orchestrator.py`: **`Daemon.start()` could block for the full
+  `daemon_start_timeout_s` (default 180s) even when the subprocess crashed
+  instantly** (`start()` ~L314, `_read_output()` ~L317-357). `_read_output()`
+  only sets `self._ready` on a `DAEMON_READY` status line; if
+  `inference_daemon.py` dies before ever printing it (e.g. a broken
+  import — plausible given the file's own unguarded `import numpy as np`
+  at module top, unlike the guarded `torch`/`lerobot` imports beside it),
+  the `for line in self.proc.stdout:` loop just ends and logs "Daemon
+  ukončen." with no effect on the `_ready.wait()` blocking `start()` — so a
+  failure that's apparent in milliseconds could take the full timeout to
+  surface, up to 3× per run (once for the initial-snapshot daemon, twice
+  more in the per-step retry loop). Made `_read_output()` also set
+  `_ready` when its loop ends (stdout EOF = process exited), and added a
+  `self.proc.poll()` check right after `start()`'s wait returns to tell a
+  real ready-signal apart from this early-exit case and raise a clear error
+  immediately either way. Verified live: pointed `cfg["python"]` at a binary
+  that exits instantly with no stdout — `start()` now raises in ~0ms instead
+  of hanging for the configured timeout. Pure fail-fast robustness; the
+  normal-startup path (`DAEMON_READY` printed, process still running) is
+  unaffected.
+- `orchestrator.py`: **the per-step daemon retry loop only caught
+  `RuntimeError`, missing `BrokenPipeError`/`OSError` from the exact same
+  failure class it was built to retry** (~L1082-1099). The loop's own
+  comment says it exists so "a single hardware hiccup [a wedged serial
+  port] shouldn't zero out an otherwise fine trial," and `Daemon._send()`
+  does raise `RuntimeError` when its own liveness check
+  (`self.proc.poll()`) finds the process already dead — but if the process
+  dies in the gap between that check and the following
+  `self.proc.stdin.write(...)`, `write()` raises `BrokenPipeError`
+  (an `OSError` subclass) instead, which fell through the `except
+  RuntimeError:` entirely and killed the whole run instead of getting the
+  intended one-shot restart-and-retry. Widened the catch to
+  `except (RuntimeError, OSError)`. Narrow timing race, not reproduced
+  against a live hardware failure, but the fix is a direct, low-risk
+  widening of an existing retry's exception coverage to match its own
+  stated purpose — doesn't change retry count, timeout, or Protocol A/B
+  semantics.
+- `server.py`: **any POST body that was valid JSON but not a JSON object
+  (a bare array, number, string, or `null`) crashed the connection instead
+  of getting a clean error.** `_read_body()` (~L523-536) only rejected
+  unparseable JSON; every POST route handler then does `body.get(...)`
+  unconditionally, so e.g. posting `[1,2,3]` to `/api/projects/select`
+  raised `AttributeError: 'list' object has no attribute 'get'` *outside*
+  that route's own `try/except`, which `ThreadingHTTPServer` surfaces as a
+  server-side traceback and a dropped connection (`RemoteDisconnected` on
+  the client) rather than a JSON error response — the same failure class
+  the 2026-08-19 entry fixed for three GET endpoints, but these seven POST
+  routes weren't covered since the crash happens before their own
+  try/except is even reached. Not reachable through normal use of
+  `web/setup.js` (always sends real objects), so a robustness/defense gap
+  rather than a currently-visible UI bug. Fixed at the single source —
+  `_read_body()` now returns `None` (→ the existing clean 400 path) for any
+  parsed-but-non-dict JSON, protecting all current and future POST routes
+  at once instead of patching each call site. Verified live: POSTing
+  `[1,2,3]` now returns a clean `400 {"ok": false, "error": "Tělo
+  požadavku není platný JSON."}` instead of a reset connection.
+- `server.py`: **`POST /api/run` had no exception handling**, unlike every
+  other POST route (~L719-725, before the fix). `start_run()` itself has no
+  try/except and does two unguarded `body.get(...)` calls — same
+  `AttributeError` mechanism as above — and could also raise from
+  `orch.Orchestrator(cfg, bus.publish)` construction; any of that crashed
+  the connection instead of the `{"ok": false, "error": ...}` shape
+  `web/run.js`'s start handler already expects (`run.js` does correctly
+  re-enable the start button on a hard `fetch()` failure too, so this
+  wasn't a stuck-UI bug, just a misleading "server neběží" message for a
+  real error). Wrapped in the same `try/except Exception as e:
+  self._send_json({"ok": False, "error": str(e)}, status=500)` pattern used
+  everywhere else.
+- `web/setup.js`: **clearing any top-level numeric config field silently
+  saved it as `0`.** `readForm()` (~L68-74) ran `Number(el.value)` for every
+  `type="number"` input on every `input`/`change` event, and
+  `Number('') === 0` in JS — so momentarily blanking a field like
+  `episode_time_s`, `train_steps`, `batch_size`, or either camera's
+  width/height/fps while retyping it (or leaving it blank by accident, then
+  clicking "Uložit" or tabbing away) wrote `0` into that field of `cfg`,
+  which then flowed straight into the generated shell commands
+  (`--batch_size=0`, etc.) and, if saved, into `config.json` with no
+  validation on either side. Notably, the sibling per-step "Kroků tréninku"
+  field already handles this correctly by `delete`ing the key on empty
+  input (~L125-130) instead of defaulting to 0 — proving the failure mode
+  was already known for that one field but the shared `readForm()` path was
+  missed. A concrete downstream effect: `orchestrator.py`'s
+  `model_status()` computes `int(cfg.get("train_steps") or 0) or None` —
+  once `train_steps` is saved as `0`, every checkpoint's done/not-done (✓/✗)
+  badge in the Setup UI stops reflecting real training progress. Fixed by
+  skipping the assignment entirely when the field is blank (keeping the
+  last known-good value in `cfg` instead of clobbering it with `0`) —
+  simpler and lower-risk here than the per-step field's delete-key approach,
+  since these top-level fields don't have a "no override, fall back to
+  something else" semantics for an absent key the way the per-step field
+  does.
+
+All six fixes verified independently: `ast.parse`/`node --check` on every
+touched file, plus a live repro-before/confirm-after for each of the five
+that have one (the sixth, the retry-loop `OSError` widening, is a timing
+race not independently reproducible without real hardware — verified by
+code tracing only, per its own entry above).
+
+Did not turn up any new open task today — the six findings above all met
+the bar for a safe, narrow, mechanical fix and were applied directly;
+nothing surfaced that needed a design/protocol-semantics call left
+unresolved.
+
 ## 2026-08-19
 
 Housekeeping: `main` was already clean and tracking `origin/main` at
