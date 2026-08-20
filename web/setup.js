@@ -68,7 +68,10 @@ function fillForm() {
 function readForm() {
   document.querySelectorAll('[data-key]').forEach((el) => {
     if (el.type === 'checkbox') cfg[el.dataset.key] = el.checked;
-    else if (el.type === 'number') cfg[el.dataset.key] = Number(el.value);
+    // Number('') is 0 — momentarily clearing the field while retyping a
+    // value (or leaving it blank by accident) must not silently save 0 for
+    // a required numeric setting. Keep the last known-good value instead.
+    else if (el.type === 'number') { if (el.value !== '') cfg[el.dataset.key] = Number(el.value); }
     else cfg[el.dataset.key] = el.value;
   });
 }
