@@ -205,6 +205,11 @@ hold_action: dict | None = None  # last commanded position, re-sent while WAITIN
 # the baseline upward.
 idle_load_baseline: float | None = None
 _any_task_started = False
+# Set by stdin_reader() on QUIT, checked by main()'s loop. Not os._exit()'d
+# directly from that thread: this lets main() return normally so the
+# `finally: robot.disconnect()` in __main__ actually runs instead of being
+# skipped by an immediate process-level exit.
+_quit_requested = threading.Event()
 
 _frame_lock = threading.Lock()
 last_frames: dict[str, np.ndarray] = {}
@@ -571,7 +576,8 @@ def stdin_reader(max_seconds: float) -> None:
 
         elif line == "QUIT":
             log.info("QUIT received.")
-            os._exit(0)
+            _quit_requested.set()
+            return
 
 
 # ── Main loop ───────────────────────────────────────────────────────────────
@@ -694,6 +700,8 @@ def main() -> None:
     print(f"[STATUS] DAEMON_READY: mode={mode}", flush=True)
 
     while True:
+        if _quit_requested.is_set():
+            return
         tick = time.time()
         load = 0.0
 
