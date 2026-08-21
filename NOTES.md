@@ -215,6 +215,22 @@ tasks at the top; dated entries below, newest first.
   own. Whether this is reachable depends on daemon responsiveness under real
   hardware/camera latency; flagging as a latent race, not a confirmed one.
 
+- **[informational, low priority] `tests/test_split.py` has zero assertions —
+  it's a fixture generator, not a real test.** It builds a fixture dataset +
+  marks sidecar and only `print()`s stats; it never calls `split_dataset.py`
+  at all (no `subprocess.run`), unlike `test_merge.py` which subprocess-calls
+  both `merge_datasets.py` and `split_dataset.py` and asserts frame/boundary
+  counts. `split_dataset.py`'s actual behavior is exercised indirectly via
+  `test_merge.py`'s round-trip, so this isn't a coverage gap on the
+  underlying app logic — but the file's name promises a dedicated test that
+  doesn't exist. Writing real assertions means first deciding what
+  `test_split.py` is supposed to check that `test_merge.py` doesn't (e.g.
+  `split_dataset.py`'s fixed-`--boundaries` mode, which `test_merge.py`
+  doesn't exercise) — a test-design call, not a mechanical fix, so left
+  alone. (Companion issue in the same file, `test_marks.py`'s missing
+  `assert ok`, was narrow enough to fix directly today — see 2026-08-21
+  entry below.)
+
 - **[uncertain, low priority] Mark timestamps in `record_with_marks.py` may
   be systematically ~1 frame late.** `record_with_marks.py` ~L205 (drifted
   only because the unrelated atomic-write fix touched `_persist()`'s write
@@ -230,6 +246,64 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-21
+
+Housekeeping: this container's local `main` was detached HEAD, sitting 9
+commits ahead of local `main`'s stale ref (yesterday's 2026-08-19 and
+2026-08-20 work, which local `main`/`origin/main` hadn't picked up in this
+checkout). `git fetch origin main` confirmed `origin/main` was already at
+the same commit as the detached HEAD (`28c6594`) — the previous runs' pushes
+had genuinely succeeded, this was purely a stale local branch ref in this
+container, not lost work. Fast-forwarded local `main` to match, pushed
+(no-op, already in sync). No commits had landed on top of `28c6594` since
+yesterday's review.
+
+Dispatched one fresh-angle review pass: read `tests/*.py` statically
+(they still fail to import in this sandbox — `lerobot` unavailable, same gap
+noted 2026-08-20) and cross-checked their fixtures/assertions against the
+real implementations in `split_dataset.py`, `merge_datasets.py`, and
+`record_with_marks.py`; also spot-checked 3 of the 10 standing open items
+against current code as a drift check rather than a full 10-item
+re-verification.
+
+Found and fixed (narrow, mechanical, test-only — no app/protocol logic
+touched):
+
+- `tests/test_marks.py`: L83 computed `ok = data["episodes"] == {...}` and
+  only `print()`d "OK"/"CHYBA" — there was no `assert ok`, so the script
+  exits 0 even if `record_with_marks.py` regresses and produces wrong mark
+  timestamps. Hand-traced the full episode0/1/2 key-press sequence
+  (mark/undo/redo/drop-episode) against current `record_with_marks.py`
+  logic and confirmed the expected values are exactly what the code
+  currently produces — so this was a test-infra gap, not evidence of a
+  hidden bug. Added `assert ok, f"neocekavane znacky: {data['episodes']}"`
+  right after the existing print, so a future regression actually fails the
+  script instead of silently printing "CHYBA" and exiting 0. Verified with
+  `python3 -m py_compile`.
+
+Found but not fixed — logged as a new open task above: `tests/test_split.py`
+has zero assertions (prints only, never even calls `split_dataset.py`) —
+`split_dataset.py`'s behavior is exercised indirectly via `test_merge.py`'s
+round-trip, so not an app-behavior gap, but deciding what dedicated
+assertions `test_split.py` should add (e.g. covering the fixed-`--boundaries`
+mode `test_merge.py` doesn't touch) is a test-design call, not a mechanical
+fix.
+
+Spot-checked 3 standing open items (Protocol A settled-counter-on-failure
+asymmetry, VLM verdict substring-before-exact-match, unanchored
+`task_slug` prefix matching across `list_local_datasets`/
+`find_available_datasets`/`list_trained_checkpoints`) — all three confirmed
+present verbatim in current code, only line numbers drifted from earlier
+unrelated insertions. Did not re-verify the other 7 today; no commits
+landed since 2026-08-20 that could have invalidated them.
+
+`test_merge.py`'s assertions (frame counts, boundary values, round-trip
+split counts) were independently hand-verified against
+`merge_datasets.py`'s boundary-append logic and `split_dataset.py`'s
+`bisect.bisect_right` segment assignment — correct, no mismatch. No
+fixture/signature drift found between `test_marks.py`'s fakes and current
+`record_with_marks.py` signatures.
 
 ## 2026-08-20
 
