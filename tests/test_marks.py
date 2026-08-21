@@ -82,3 +82,4 @@ data = json.loads(marks_file.read_text(encoding="utf-8"))
 print("\nznacky:", json.dumps(data, indent=2))
 ok = data["episodes"] == {"0": [4.0, 7.0], "1": [3.0, 8.0], "2": [5.0]}
 print("\nOCEKAVANO {'0': [4.0, 7.0], '1': [3.0, 8.0], '2': [5.0]} ->", "OK" if ok else "CHYBA")
+assert ok, f"neocekavane znacky: {data['episodes']}"
