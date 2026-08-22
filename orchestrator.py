@@ -942,7 +942,7 @@ class Orchestrator:
             return True, "SUCCESS"
         return False, "[unknown_failure]"
 
-    def _verify(self, step_slug: str, images_b64: list[str], plan: list[str] | None = None, step_index: int = 0) -> tuple[bool, str]:
+    def _verify(self, step_slug: str, images_b64: list[str], plan: list[str] | None = None, step_index: int = 0) -> tuple[bool, str, list[str]]:
         cfg = self.cfg
         catalog = step_catalog(cfg)
         step_cfg = next((s for s in catalog if s["slug"] == step_slug), {})
@@ -1008,7 +1008,7 @@ class Orchestrator:
                 break
             images_b64 = fresh
             self.emit("snapshot", images=fresh, step=step_slug)
-        return success, tag
+        return success, tag, images_b64
 
     # -- the loop ----------------------------------------------------------
     def run(self, instruction: str) -> dict:
@@ -1143,7 +1143,7 @@ class Orchestrator:
                               message="Inspektor vypnutý (skip_inspector) — krok "
                                       "považován za úspěšný bez ověření.")
                 elif images:
-                    success, tag = self._verify(step, images, plan=plan, step_index=index)
+                    success, tag, images = self._verify(step, images, plan=plan, step_index=index)
                 else:
                     # Missing camera frame is a genuine failure, not a free pass
                     success, tag = False, "[no_image]"
