@@ -5,6 +5,53 @@ tasks at the top; dated entries below, newest first.
 
 ## Open tasks
 
+- **[design decision needed] SSE reconnect replays up to 500 history events
+  with no de-duplication, which can double-count steps in the live run
+  summary after a network blip.** `server.py` `EventBus.subscribe()`
+  (~L153-201) always hands a newly-(re)connecting client the full capped
+  history (max 500 events) plus live events after that — correct for a
+  genuine first page load, but nothing distinguishes that from a browser's
+  `EventSource` auto-reconnecting after a dropped connection. No event
+  carries an `id:` field and the server doesn't support `Last-Event-ID`, so
+  a reconnect always gets the same history slice replayed, and
+  `web/run.js`'s `handleEvent()` (~L94-182) has no de-dup — a replayed
+  `'log'` event re-appends a duplicate line, a replayed `'step'` event
+  re-pushes into `executedAttempts`, which feeds `renderProgressSummary()`'s
+  step counter and `showSummary()`'s "N pokusů" count. The one event that
+  would reset the client's state cleanly is `'run_started'`
+  (clears `executedAttempts`+log), but at ~5 telemetry events/sec while
+  `RUNNING` (`inference_daemon.py`'s main loop), a single step running
+  ~100s already fills the 500-event cap and evicts `run_started` from
+  history — so a reconnect after that point replays a stale slice into an
+  already-populated UI with no reset. A correct fix (event IDs +
+  `Last-Event-ID` catch-up, idempotent client-side replay handling, or
+  detecting/suppressing replay on reconnect) is a protocol/design choice
+  between several real options, not a mechanical patch, so left for a
+  deliberate decision. Trigger: any dropped SSE connection (network blip,
+  laptop sleep/wake, tab backgrounding) mid-run, especially once a step has
+  been `RUNNING` long enough to evict `run_started` from the 500-event
+  history window. Not reproduced against a real dropped connection —
+  flagging the mechanism, found by fresh-angle static review.
+
+- **[UX completeness, low priority] `max_replans` has no Setup-page UI
+  control at all — it's not just a config-only *field* like the others
+  already logged below, it's a load-bearing value with zero way to view or
+  change it short of hand-editing `config.json`.** `server.py`
+  `DEFAULT_CONFIG` (L128) and `web/config.js` `DEFAULTS` (L58) both define
+  it and agree (5); `orchestrator.py`'s `Orchestrator.run()` reads it
+  (`max_replans = int(cfg.get("max_replans", 5))`, ~L1016) and it directly
+  bounds how many re-plans a run gets before raising a hard failure. Grepped
+  both `web/index.html` and `web/orchestrace.html` for any
+  `data-key="max_replans"` or "replan" mention — none exists. Distinct from
+  the existing "config-only fields" open item below (that one is about
+  values that are merely undiscoverable in the UI; this one is the same
+  gap but for a field that meaningfully shapes every run's failure
+  handling, so it seemed worth calling out on its own rather than folding
+  into that item silently). Not fixed since adding a form field is a UI
+  feature decision, and it's possible this is deliberately fixed for the
+  thesis's experiments rather than an oversight — flagging for a call on
+  intent.
+
 - **[protocol semantics, needs a human decision] Protocol A's "settled" counter
   isn't reset on an observation/inference failure, so it can inflate from
   stale data instead of a real hold.** `inference_daemon.py` ~L725-763. In the
@@ -246,6 +293,94 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-22
+
+Housekeeping: this container's local `main` was detached HEAD (at `0ef0472`,
+yesterday's commit) with local `main`'s cached ref stale further behind at
+`31058a1` — same recurring pattern as every prior day. `git fetch origin
+main` confirmed `origin/main` was already at `0ef0472`, i.e. no data at
+risk, just a stale ref in this container; reset local `main` to match.
+No commits had landed since yesterday's review.
+
+Dispatched one fresh-angle review pass (general-purpose agent, explicitly
+told to skip the 8 standing open items and dig into: LLM planner/inspector
+context-data plumbing, `EventBus` history growth, SSE reconnect behavior
+after the 2026-08-19 atomic-subscribe fix, `checkpoint_status()`/
+`model_status()` arithmetic, dataset-tooling edge cases, the two standalone
+hardware scripts, and one more config-default cross-check). Verified its
+one actionable finding by hand before touching anything.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `orchestrator.py`: **the re-plan call could hand the CEO planner a stale
+  photo that predates the one its own failure tag was actually derived
+  from.** `_verify()` (~L945-1011) takes a *fresh* snapshot internally when
+  the VLM's first reply is `[unclear]` and re-asks with it — but that only
+  rebound `_verify()`'s own local `images_b64` parameter; the caller's
+  `images` in `run()` (set once at L1112, right after the step executes)
+  was never updated. `run()` then reused that same stale `images` for the
+  re-plan's `_create_plan(context, images_b64=images or None)` (~L1175),
+  whose own docstring explicitly asserts these are "the same snapshots the
+  inspector just judged." Concretely: a grasp step finishes → snapshot A
+  taken → VLM says `[unclear]` on snapshot A → `_verify()` grabs fresh
+  snapshot B and gets `[object_slipped]` from *that* → step fails, tagged
+  from B → re-plan fires and the planner is shown snapshot A, not B, while
+  being told about a failure derived from B. Traced the exact variable
+  scoping (Python rebinding a local doesn't mutate the caller's list) to
+  confirm this isn't just a hypothetical — it's the actual behavior on
+  every `[unclear]`-then-fail path. Fixed by having `_verify()` return the
+  images it actually ended up using (`tuple[bool, str, list[str]]` now,
+  was `tuple[bool, str]`) and having `run()`'s call site adopt them
+  (`success, tag, images = self._verify(...)`) — checked there's exactly
+  one call site and that `images` isn't read anywhere between the old
+  snapshot-emit (L1112-1114, unaffected — that's the raw post-execution
+  snapshot, not the verify outcome) and the re-plan use (L1174-1175, the
+  actual fix target). Doesn't touch protocol A/B thresholds, VLM prompt
+  wording, or success/failure accounting — purely fixes which photo bytes
+  get sent on an already-existing code path. Verified with
+  `python3 -m py_compile` and an AST parse.
+
+Found but not fixed — logged as two new open tasks above:
+
+- SSE reconnect (`EventSource` auto-reconnect after a dropped connection)
+  replays the full capped 500-event history with no de-duplication on
+  either side (`server.py`'s `EventBus`, `web/run.js`'s `handleEvent()`),
+  which can double-count steps in the run summary if a step has been
+  running long enough to evict `run_started` from history before the
+  reconnect happens. Real fix needs an event-ID/`Last-Event-ID` scheme or
+  equivalent — a protocol choice among several options, not a one-line
+  patch.
+- `max_replans` — a load-bearing config field that bounds every run's
+  re-plan budget — has no Setup-page UI control at all (confirmed absent
+  from both `index.html` and `orchestrace.html`), unlike the already-logged
+  "config-only fields" item which is about lower-stakes values. Called out
+  as its own item since this one shapes failure-handling behavior on every
+  run, not just a nice-to-have knob.
+
+Angles the dispatched pass checked and found clean (recording so a future
+pass doesn't re-derive the same result): `EventBus` history is hard-capped
+at 500 via `del self._history[:-self._max_history]` on every publish, so no
+unbounded memory growth over a long run (this cap is exactly what makes the
+SSE-reconnect item above possible, though); `checkpoint_status()`/
+`model_status()` arithmetic re-derived by hand, no off-by-one beyond the
+already-logged substring-matching item; dataset-tooling zero-episode/
+single-frame/duplicate-mark-timestamp edge cases traced by hand, all
+either explicitly guarded or low-severity/low-likelihood (a duplicate mark
+timestamp within one recorded frame would silently zero out one step's
+segment for that episode, but it's visible in `split_dataset.py`'s own
+stats output, not fully silent); `measure_gripper_current.py`/
+`reset_homing.py` re-read fresh, nothing new; one more config-default
+cross-check (`DEFAULT_CONFIG` vs `config.js` `DEFAULTS` vs `index.html`
+data-keys vs daemon argparse) — all values agree, the only gap found was
+the `max_replans` missing-UI item above (a reachability gap, not a value
+mismatch).
+
+Did not re-verify the 8 standing open items against current code today
+(no commits had landed since 2026-08-21 that could invalidate them, and
+this pass was deliberately scoped to new-angle bug-hunting rather than
+re-confirmation) — recommend a future pass do a full re-verification sweep
+for hygiene, per the same recommendation logged back on 2026-08-17.
 
 ## 2026-08-21
 
