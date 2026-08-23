@@ -146,7 +146,8 @@ class LMStudio:
             "model": model, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens,
         })
-        msg = data.get("choices", [{}])[0].get("message", {})
+        choices = data.get("choices") or [{}]
+        msg = choices[0].get("message", {})
         content = msg.get("content") or ""
         reasoning = msg.get("reasoning_content") or ""
         if not content.strip() and reasoning.strip():
