@@ -157,6 +157,10 @@ def main() -> int:
             dur = end - start
             if dur > 0:
                 durations[slug].append(dur)
+            else:
+                log.warning("Episode %d: non-positive duration for step '%s' "
+                            "(mark at %.3fs, segment end %.3fs) — sample dropped",
+                            ep_idx, slug, start, end)
 
     if skipped:
         log.warning("Skipped episodes without exactly %d marks or unknown length: %s",
