@@ -294,6 +294,87 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-23
+
+Housekeeping: this container's local `main` was detached HEAD (at `9f0385e`,
+yesterday's commit) with local `main`'s cached ref stale further behind at
+`31058a1` — same recurring pattern as every prior day. `git fetch origin
+main` confirmed `origin/main` was already at `9f0385e`, i.e. no data at
+risk, just a stale ref in this container; fast-forwarded local `main` to
+match (no-op push, already in sync). No commits had landed since
+yesterday's review.
+
+Dispatched one fresh-angle review pass (general-purpose agent, explicitly
+told to read the full open-tasks list and last ~10 dated entries first so it
+wouldn't re-derive known-clean results, and pointed at four specific
+under-scrutinized angles: the LLM/VLM HTTP client code in `orchestrator.py`
+(request/response handling, timeout/retry coverage), `record_with_marks.py`'s
+mark/undo/episode-boundary state machine, `compute_step_timeouts.py`'s own
+timeout-derivation arithmetic, and any `server.py` endpoint not already
+cross-checked in a prior pass). Verified both of its findings by hand
+(reading the real code, then a live repro) before touching anything.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `orchestrator.py`: **`LMStudio.chat()` crashed with an uncaught
+  `IndexError` if the configured OpenAI-compatible backend ever returned a
+  200 response with `"choices": []`** (~L149, `data.get("choices", [{}])[0]`).
+  The `[{}]` default only applies when the `"choices"` key is *absent*
+  entirely — when it's present but an empty list (a real response shape from
+  some backends: content-filtered replies, `n=0`/warmup edge cases, certain
+  proxy error-shims), `.get()` returns `[]` unmodified and `[0]` raises.
+  Since this is the single call site behind both `_create_plan()` (the CEO
+  planner) and `_verify()` (the VLM inspector, via `chat_with_images()` →
+  `chat()`), and `_verify()` in particular has no exception handling around
+  its `chat_with_images` call, this could crash an entire run with an opaque
+  traceback instead of the clean `RuntimeError`/failure-tag handling the rest
+  of the code is built around. Fixed by treating a present-but-empty
+  `choices` the same as an absent one:
+  `choices = data.get("choices") or [{}]`. Verified live with a fake client
+  returning `{"choices": []}` — `chat()` now returns `""` instead of raising.
+  Pure defensive-parsing fix; doesn't touch prompts, protocol semantics, or
+  success/failure accounting.
+- `compute_step_timeouts.py`: **a non-positive computed segment duration was
+  silently dropped with no log line, unlike every other skip condition in
+  the same function.** ~L155-159: the per-step duration loop's
+  `if dur > 0: durations[slug].append(dur)` has no `else`, while the
+  function's two sibling skip conditions (`len(boundaries) != n_boundaries`
+  and `ep_len <= 0`, just above) both append to a `skipped` list and get
+  logged via `log.warning(...)`. Under normal frame-counted marking this
+  branch is only ever hit by a legitimate zero-length duplicate-mark segment
+  (already covered by an existing NOTES item), but `record_with_marks.py`
+  has an explicit wall-clock-timing fallback for when frame-counter
+  installation fails, whose own docstring warns it can drift from the
+  frame-derived episode length if the control loop runs slower than the
+  configured fps — in that combination a boundary can land after `ep_len`
+  and produce a *negative* duration, which this branch silently drops. The
+  result: that step's sample count/mean/median/max table row is quietly
+  computed from fewer samples than the episode count, with nothing telling
+  the user why, unlike the two sibling skip paths that already do. Added a
+  `log.warning(...)` in the missing `else`, naming the episode, step slug,
+  and the two boundary timestamps involved. Pure visibility fix — doesn't
+  change which duration samples are used or which timeout value gets
+  computed/written; verified with `python3 -m py_compile`.
+
+Found but not fixed — nothing new; the dispatched pass's other three angles
+(the `record_with_marks.py` mark/undo/episode-boundary state machine,
+`server.py`'s remaining not-yet-cross-checked endpoints, and the LLM/VLM
+timeout/retry logic beyond the fix above) all came back clean on fresh
+hand-tracing, and it explicitly confirmed there is no "redo" feature in
+`record_with_marks.py` at all (the state machine only has mark/undo/
+drop-episode) — noting that so a future pass doesn't go looking for one.
+`GET /api/lmstudio`'s own unguarded `load_config()` call (would crash on a
+corrupt `config.json`) is the same already-fixed-elsewhere crash class but
+the endpoint itself is unreachable from any `web/*.js` file and is already
+covered by the standing "Dead API endpoints" open item, so not logged as a
+new one.
+
+Did not re-verify the 9 standing open items against current code today (no
+commits had landed since 2026-08-22 that could invalidate them, and this
+pass was deliberately scoped to new-angle bug-hunting) — the
+recommendation from 2026-08-17/08-22 to do a full re-verification sweep for
+hygiene still stands for a future pass.
+
 ## 2026-08-22
 
 Housekeeping: this container's local `main` was detached HEAD (at `0ef0472`,
