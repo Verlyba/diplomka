@@ -494,7 +494,7 @@ def start_run(body: dict) -> dict:
 
 def stop_run() -> dict:
     with run_state.lock:
-        if run_state.orchestrator:
+        if run_state.running:
             run_state.orchestrator.stop()
             bus.publish("log", level="WARN", message="Zastavuji běh…")
             return {"ok": True}
@@ -727,7 +727,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/stop":
-            self._send_json(stop_run())
+            try:
+                self._send_json(stop_run())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         else:
             self.send_error(404, "Not found")
 
