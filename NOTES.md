@@ -294,6 +294,70 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-24
+
+Housekeeping: this container's local `main` was again detached HEAD (at
+`c98efa0`, yesterday's commit) with local `main`'s cached ref stale further
+behind at `31058a1` — same recurring pattern as every prior day. `git fetch
+origin main` confirmed `origin/main` was already at `c98efa0`, i.e. no data
+at risk, just a stale ref in this container; checked out and reset local
+`main` to match. No commits had landed since yesterday's review.
+
+Skipped re-verifying the 10 standing open items against current code today —
+nothing landed since 2026-08-23 that could have invalidated them, so there
+was nothing to re-check. Dispatched one fresh-angle review pass
+(general-purpose agent, given the full open-tasks list and told not to
+re-derive anything already logged), aimed at three angles that hadn't had a
+dedicated full pass in 8-10+ days: `web/index.html` vs. `setup.js`/`config.js`
+DOM/data-key wiring, a fresh full read of `split_dataset.py`/
+`merge_datasets.py` beyond the boundary arithmetic (already confirmed
+correct in prior entries), and `server.py`'s `RunState`/`/api/run`/`/api/stop`
+lifecycle beyond the config-write locking fixed 2026-08-16. Verified its one
+finding by hand (read the real code, then a live repro) before fixing.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `server.py`: **`POST /api/stop` could never actually report "nothing is
+  running" once any run had ever been started in the server's lifetime.**
+  `stop_run()` (~L495-501) checked `if run_state.orchestrator:` — but
+  `run_state.orchestrator` is assigned exactly once, in `start_run()`
+  (~L481), and no code path anywhere resets it back to `None` afterwards.
+  `RunState.running` (~L459-461) is the property that actually derives
+  "is a run active" from `self.thread.is_alive()`, and is used correctly for
+  this exact purpose by `GET /api/status` (~L596) — but `stop_run()` used the
+  wrong check, so its `{"ok": False, "error": "Nic neběží."}` branch was
+  effectively dead code after the very first run: every later `/api/stop`
+  call, including ones sent long after every run had finished, took the
+  "success" branch, called `.stop()` on a stale finished orchestrator
+  (harmless no-op — `Orchestrator.run()`'s own `finally` already clears
+  `self.daemon`), and unconditionally published a misleading
+  `"Zastavuji běh…"` ("Stopping the run…") WARN log line into the SSE
+  bus/log even though nothing was running. Not reachable through the normal
+  single-tab UI flow (the Stop button starts `disabled` and is only enabled
+  by a genuine `RUNNING`-family SSE state), but reachable via a second/stale
+  browser tab, a page reload racing the run's end, or a direct API call.
+  Fixed by checking `run_state.running` instead of `run_state.orchestrator`'s
+  truthiness, matching the already-correct pattern used at `/api/status` in
+  the same file. Also wrapped the `/api/stop` dispatch in the same
+  `try/except Exception as e: self._send_json({"ok": False, "error": str(e)},
+  status=500)` pattern every sibling POST route already has (it was the one
+  route still missing it, alongside `/api/run` right above it) — no live
+  repro of this second half triggering today (`Orchestrator.stop()` and
+  `EventBus.publish()` both fully guard their own bodies), just closing the
+  parity gap the dispatched pass flagged alongside the main fix. Verified
+  live: a standalone repro (isolated `RunState`+`stop_run` logic, no real
+  server) confirmed the old check returned `{"ok": True}` after the run's
+  thread had already finished, and the new check correctly returns
+  `{"ok": False, "error": "Nic neběží."}` in the same scenario. Pure
+  state-check correction — no protocol semantics, config defaults, or
+  success/failure accounting touched.
+
+The dispatched pass's other two angles (`web/index.html` DOM/data-key wiring,
+`split_dataset.py`/`merge_datasets.py` fresh read) came back clean — no new
+mismatches or bugs found, consistent with (and re-confirming) the
+already-logged conclusions from the 2026-08-11/12/13/14 passes over the same
+files.
+
 ## 2026-08-23
 
 Housekeeping: this container's local `main` was detached HEAD (at `9f0385e`,
