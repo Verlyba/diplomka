@@ -294,6 +294,61 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-25
+
+Housekeeping: same recurring pattern as every prior day — this container's
+local `main` was detached HEAD (at `ac534e8`, yesterday's commit) with local
+`main`'s cached ref stale further behind at `31058a1`. `git fetch origin
+main` confirmed `origin/main` was already at `ac534e8`, i.e. no data at
+risk, just a stale ref in this container; checked out and reset local `main`
+to match. No commits had landed since yesterday's review.
+
+Given 15 consecutive days of full, multi-angle manual review of this ~6400-
+line codebase (every file read in full at least twice, most endpoint/field/
+protocol cross-checks repeated from several angles) with the last few days
+turning up only narrow timing/exception-edge-case bugs, today deliberately
+used a different *technique* rather than another manual read-through, to
+check for a class of bug manual review is bad at spotting:
+
+- Ran `python3 -m pyflakes` (not previously used in this routine) across all
+  9 top-level `.py` files. Three flags, all confirmed non-issues: (1) the 10
+  `from lerobot.robots import (...)` submodule imports in
+  `inference_daemon.py` (~L114-124) are flagged "imported but unused" — but
+  the code has its own adjacent comment explaining these are
+  side-effect-only imports needed to trigger `@RobotConfig.register_subclass`
+  decorators (confirmed the comment's claim is architecturally sound: without
+  them `get_choice_class` would `KeyError` and silently fall back to
+  simulated mode — this exact fallback is also correctly documented in this
+  file's own "Bez hardwaru" section); (2) `cache_frame()`'s `global
+  last_frames` (~L306) is genuinely redundant (the function only calls
+  `.update()` on the dict, never rebinds the name, so the `global` statement
+  does nothing) but harmless — not a correctness bug, a no-op declaration,
+  and removing it would be a pure style nit outside today's scope; (3)
+  `server.py`'s startup banner `print(f"\n  Diplomka — orchestrační
+  schéma")` (~L749) has an `f` prefix with no placeholders — cosmetic only,
+  zero behavior difference. `python3 -m py_compile` on all 9 files: clean.
+- Read `README.md` (151 lines) and `.gitignore` in full for the first time in
+  this routine's history (every prior pass scoped to the 6 `.py` entry points
+  + `web/`) and cross-checked their factual claims against current code:
+  `.gitignore`'s comments naming `config.json`/`projects/`/`runs/*.json`/
+  `outputs/`/`local/` as user/generated data match exactly the "never touch"
+  scope this routine itself operates under; README's claim that
+  `--dataset.root` is auto-filled by `derive.datasetRoot()` in
+  `web/config.js` checked out against the real function (~L124-127, present
+  and matches the described `$HOME/.cache/huggingface/lerobot/...` path
+  convention). No inaccuracies found. `poznamky/DENIK.md` is the thesis
+  author's own personal diary/notes, not app code or user-facing docs — left
+  unread as out of this routine's scope.
+- Did not attempt the test suite again — same `ModuleNotFoundError: lerobot`
+  (and now also bare `numpy`) as every prior attempt since 2026-08-20; this
+  sandbox's Python still has neither installed, unchanged from before.
+
+No new bugs found, no code changes today. Did not re-verify the 15 standing
+open items against current code — no commits landed since 2026-08-24 that
+could possibly have invalidated any of them (the code today is byte-identical
+to what was already checked), so a line-by-line re-check would have been
+pure repetition rather than real verification.
+
 ## 2026-08-24
 
 Housekeeping: this container's local `main` was again detached HEAD (at
