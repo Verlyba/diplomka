@@ -294,6 +294,75 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-26
+
+Housekeeping: local `main` was clean and already up to date with
+`origin/main` at `dc46173` (yesterday's commit) — no detached-HEAD/stale-ref
+issue today. No commits had landed since yesterday's review.
+
+Dispatched one fresh-angle review pass (general-purpose agent, given the
+full NOTES.md history and open-tasks list, told not to re-derive anything
+already logged). Pointed at angles the 16-day history showed as least
+covered: a dedicated deep pass on `reset_homing.py`/
+`measure_gripper_current.py` (previously only spot-checked in passing), the
+`/api/run` concurrent-start guard, daemon stdin/stdout pipe deadlock
+potential, LLM/VLM prompt-string construction for injection-style breakage,
+JS-float-into-Python-int coercion mismatches, and a fresh full re-read of
+`stop_run()`/`LMStudio.chat()` (the two most recently-touched fixes, 2026-08-
+23/24) for a missed sibling case. Verified its one finding by hand (read the
+real code, then a live repro) before fixing.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `measure_gripper_current.py`: **pressing `q` to quit used `os._exit(0)`
+  from the background stdin-reader thread, which skips the main thread's
+  `finally` cleanup entirely** (~L49-50, ~L93-127) — the exact same bug
+  class already found and fixed in `inference_daemon.py` on 2026-08-20
+  (`QUIT` via `os._exit(0)` skipping `finally: robot.disconnect()`), just in
+  this sibling standalone hardware script, which was the one remaining
+  `os._exit()` call left in the repo (confirmed via `grep -rn "os._exit"`
+  after the fix — zero hits). The skipped `finally` block here specifically
+  releases the gripper (`send_action({action_key: 100.0})`) before calling
+  `robot.disconnect()`, with a comment explaining *why*: a gripper left
+  clamped on an object can make the servo refuse the `Torque_Enable=0` write
+  during disconnect (Feetech raises "Overload error!"). So the one
+  documented, normal way to quit this tool (`q`, per its own docstring) is
+  exactly the path that skips the cleanup its own comment says exists for
+  this scenario — if the operator quits with `q` while the gripper is
+  clamped on an object (the exact use case this script exists for), the
+  servo is left under active torque indefinitely and `disconnect()` never
+  runs. Fixed by mirroring the already-applied `inference_daemon.py` fix:
+  added a module-level `threading.Event` (`_quit`), `stdin_commands()` now
+  sets it and returns instead of calling `os._exit(0)`, and `main()`'s loop
+  condition changed from `while True:` to `while not _quit.is_set():` so the
+  `try/finally` unwinds normally. Removed the now-unused `import os`.
+  Verified with `python3 -m py_compile` and a standalone repro (isolated
+  `threading.Event`-set-from-background-thread test confirming the main
+  thread's `finally` now actually runs, where it didn't with `os._exit()`).
+  Pure process-shutdown-hygiene fix isolated to a hand-run diagnostic
+  script — no coupling to `inference_daemon.py`/`orchestrator.py`'s control
+  loop, no protocol A/B semantics, no run-success accounting.
+
+Found but not fixed — nothing new; the dispatched pass's other angles all
+came back clean on fresh hand-tracing: the `/api/run` start guard (check +
+thread spawn both under the same `run_state.lock`, no race); daemon
+stdin/stdout pipe deadlock potential (dedicated draining thread, no
+unbounded buffering, short stdin commands well under any OS pipe-buffer
+limit); LLM/VLM prompt construction (all f-strings/`"\n".join()`, never
+`.format()`/`%` on user-supplied text, so no injection/KeyError risk beyond
+the already-logged PowerShell `$`-expansion item); JS-float-into-Python-int
+coercion (no strict `isinstance(x, int)` checks anywhere, every numeric cfg
+field needing an int is explicitly `int(cfg.get(...))`-cast); `stop_run()`/
+`LMStudio.chat()` and their surrounding code (both correctly structured,
+matching their already-fixed patterns, no missed sibling case); a fresh
+full read of `reset_homing.py` (straightforward, per-motor try/except
+correctly wraps both write and read, no bug — its hardcoded `COM3` vs.
+`measure_gripper_current.py`'s `--robot.port` flag is an ergonomics
+inconsistency, not a bug, not worth logging).
+
+Did not re-verify the 15 standing open items against current code — no
+commits had landed since 2026-08-25 that could invalidate any of them.
+
 ## 2026-08-25
 
 Housekeeping: same recurring pattern as every prior day — this container's
