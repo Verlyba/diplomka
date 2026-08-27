@@ -427,7 +427,7 @@ let isFormDirty = false;
   document.getElementById('save').addEventListener('click', async () => {
     readForm();
     const ok = await saveConfig(cfg);
-    isFormDirty = false;
+    isFormDirty = !ok;
     const status = document.getElementById('save-status');
     status.textContent = ok
       ? 'Uloženo do prohlížeče i do config.json.'
@@ -1171,13 +1171,26 @@ function renderModalCheckpoints(checkpoints, stepSlug) {
       document.querySelectorAll('#modal-ckpt-list .ckpt-card').forEach(c => c.classList.remove('selected'));
       card.classList.add('selected');
 
+      const prevPath = stepSlug
+        ? (cfg.steps || []).find(s => s.slug === stepSlug)?.policy_path
+        : cfg.baseline_policy_path;
+
       if (stepSlug) {
         const stepObj = (cfg.steps || []).find(s => s.slug === stepSlug);
         if (stepObj) stepObj.policy_path = ckpt.path;
       } else {
         cfg.baseline_policy_path = ckpt.path;
       }
-      await saveConfig(cfg);
+      const ok = await saveConfig(cfg);
+      if (!ok) {
+        if (stepSlug) {
+          const stepObj = (cfg.steps || []).find(s => s.slug === stepSlug);
+          if (stepObj) stepObj.policy_path = prevPath;
+        } else {
+          cfg.baseline_policy_path = prevPath;
+        }
+        alert('Uložení checkpointu selhalo: server neběží, config.json se nezapsal.');
+      }
       renderSteps();
     };
 
