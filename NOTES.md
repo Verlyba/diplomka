@@ -294,6 +294,86 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-27
+
+Housekeeping: today's container's local `main` was detached HEAD at `642c8c1`
+(yesterday's commit), with local `main`'s cached ref stale further behind at
+`dc46173` (2026-08-25) — same recurring pattern as every prior day, but this
+time `git fetch origin main` confirmed `origin/main` was already at
+`642c8c1`, so yesterday's push had genuinely succeeded; fast-forwarded local
+`main` to match (no-op push, already in sync). No commits had landed since
+yesterday's review.
+
+Dispatched one fresh-angle review pass (general-purpose agent, given the
+full NOTES.md history — 15 open items + 26 dated entries — and told not to
+re-derive anything already logged or known-clean). Pointed at angles with
+the least prior dedicated coverage: numeric/percentage/ETA arithmetic in
+`web/run.js`/`web/orchestrace.html` (neither turned out to have any — no
+progress-bar or ETA math exists in either file), a name-by-name audit of
+every function in `orchestrator.py`/`inference_daemon.py` against what
+NOTES.md has explicitly named (to catch a function no prior pass's stated
+scope actually covered), `server.py`'s full route table cross-checked
+against every `web/setup.js` `fetch()` call site with a focus on *error*-path
+response shapes rather than the already-checked happy path, `compute_step_timeouts.py`'s
+CLI-arg/file-I/O edges, and a repo-wide TODO/FIXME/XXX grep. Verified its
+finding by hand (read the real code, traced the concrete failure scenario)
+before fixing.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `web/setup.js`: **the 2026-08-19 fix that made `saveConfig()`'s return
+  value meaningful (`resp.ok` instead of "didn't throw") was never actually
+  honored by either of its two callers**, undermining the exact protections
+  that fix was for. Two call sites, one root cause:
+  1. Main "Uložit" button handler (~L427-436): `const ok = await
+     saveConfig(cfg); isFormDirty = false;` — cleared the unsaved-changes
+     dirty flag unconditionally, even when `ok` is `false` (server down,
+     disk error, locked `config.json`). `isFormDirty` exists specifically to
+     make the project-switch `<select>` handler (~L634) confirm before
+     discarding unsaved edits; with it wrongly cleared, a failed save leaves
+     the in-memory-only edit one silent project-switch away from being
+     discarded with no further warning, even though the status line already
+     correctly says "Server neběží, config.json se nezapsal." Fixed:
+     `isFormDirty = !ok`.
+  2. Model modal's checkpoint-activation radio handler
+     (`renderModalCheckpoints()`'s `selectHandler`, ~L1168-1182): mutates
+     `stepObj.policy_path`/`cfg.baseline_policy_path` in memory, calls
+     `await saveConfig(cfg)` with the return value **discarded entirely** —
+     no error surfaced anywhere — then calls `renderSteps()`, which renders
+     purely from the now-already-mutated in-memory `cfg`. On a failed save
+     the modal's "[AKTIVNÍ PRO ORCHESTRACI]" badge and the step row's
+     checkpoint indicator both confidently show the new checkpoint as active
+     immediately, with zero indication anything went wrong — but an
+     orchestration run always reads `policy_path` fresh from `config.json`
+     via a new `load_config()` call, so a run started after this silent
+     failure would use the *old* checkpoint while the Setup UI insists the
+     new one is active. A genuine backend/frontend divergence that can make
+     a run silently use the wrong model. Fixed by capturing the previous
+     path before mutating, checking `saveConfig()`'s result, and on failure
+     reverting the in-memory mutation and `alert()`-ing the user (matching
+     the existing `alert('...selhalo: ' + ...)` pattern used by every other
+     failure path in this same file, e.g. dataset/episode deletion, project
+     switch/create/delete). Verified with `node --check web/setup.js`; both
+     fixes are pure client-side state-consistency corrections — no server
+     API, config default, or protocol semantics touched.
+
+Found but not fixed — nothing new; the dispatched pass's other angles (
+`web/run.js`/`orchestrace.html` numeric math, the full orchestrator.py/
+inference_daemon.py function audit, `server.py` error-response-shape vs.
+`setup.js` parsing, `compute_step_timeouts.py` CLI/file-I/O edges,
+TODO/FIXME/XXX grep, `tests/` for new/changed files) all came back clean —
+explicitly confirmed no progress-bar/ETA arithmetic exists in either web
+file to have a bug in; every previously-unnamed function in
+`orchestrator.py`/`inference_daemon.py` read in full (`parse_json_array`,
+`parse_reasoning_sentence`, `cameras_json`, `_dataset_stats`, `_finish`,
+`_gripper_note`, `_build_initial_context`/`_build_replan_context`,
+`freeze_robot`, `extract_gripper_load`) with nothing new found; no route's
+response dict carries its own conflicting `"ok"` key that a caller could
+misparse; no TODO/FIXME/XXX left anywhere; no new/changed test files.
+
+Did not re-verify the 15 standing open items against current code — no
+commits had landed since 2026-08-26 that could invalidate any of them.
+
 ## 2026-08-26
 
 Housekeeping: local `main` was clean and already up to date with
