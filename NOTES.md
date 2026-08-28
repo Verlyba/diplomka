@@ -294,6 +294,73 @@ tasks at the top; dated entries below, newest first.
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
 
+## 2026-08-28
+
+Housekeeping: this container's local `main` was detached HEAD at `027d7db`
+(yesterday's commit) with local `main`'s cached ref stale further behind at
+`dc46173` (2026-08-25) — same recurring pattern as every prior day. `git
+fetch origin main` confirmed `origin/main` was already at `027d7db`, i.e. no
+data at risk, just a stale ref in this container; checked out and reset
+local `main` to match. No commits had landed since yesterday's review.
+
+Dispatched one fresh-angle review pass (general-purpose agent, given the
+full NOTES.md history — 15 open items + 27 dated entries — and told not to
+re-derive anything already logged or known-clean). Pointed at the angle
+with the least prior dedicated coverage: `web/orchestrace.html` itself
+(previously only `run.js`/`index.html` had dedicated passes), the project
+create/delete/switch lifecycle vs. a run in progress, and SSE/EventBus
+event handling specifically as consumed by `orchestrace.html`. Verified its
+finding by hand (read the real code, traced the concrete failure scenario)
+before fixing.
+
+Found and fixed (narrow, mechanical, no protocol/scoring impact):
+
+- `web/run.js`: **`connectEvents()` — the only call site that ever opens the
+  `/api/events` `EventSource` — was gated inside the same `try` block as a
+  one-shot `/api/status` probe on page load, so if the server wasn't
+  reachable yet when `orchestrace.html` was opened, the page never
+  subscribed to the live event stream at all**, `init()` IIFE ~L228-234.
+  Concretely: open the bookmarked orchestration page, *then* run
+  `python server.py` (a very plausible sequence — the page's own warning
+  text literally tells the user to do exactly this) — the initial
+  `fetch('/api/status')` throws, the `catch` logs a warning and returns, and
+  `connectEvents()` is simply never reached; nothing else in the file calls
+  it. `setState()` (the only thing that (re)toggles `#start`/`#stop`
+  `disabled`) is likewise never invoked on this path, so the page is stuck
+  showing its raw HTML default: `#start` enabled, `#stop` disabled (confirmed
+  in `orchestrace.html` ~L178-179). If the user then clicks "Spustit
+  orchestraci" once the server actually is up, `POST /api/run` succeeds
+  server-side (the robot starts moving) and `el('start').disabled = true` is
+  set — but since `setState`/`connectEvents` were never called, `#stop`
+  stays `disabled` too: the tab now has **no way to stop the run** and shows
+  no log/state/telemetry updates at all, with the only recovery being an
+  unprompted manual page reload. Fixed by unconditionally calling
+  `connectEvents()` after the `/api/status` try/catch instead of only on its
+  success path — `EventSource` already auto-reconnects natively and
+  `connectEvents()`'s own `onerror` already logs a retry message, and a
+  reconnect after the server comes up correctly replays state via the
+  existing `EventBus` history, so this only changes *when* the client starts
+  listening, not any event payload, protocol, or backend behavior. Verified
+  with `node --check web/run.js`.
+
+Found but not fixed — nothing new; the dispatched pass's other two angles
+came back clean: project create/delete/switch (`server.py`, all four
+config-mutating functions already serialized under the existing
+`_config_lock`) traced against a running orchestration and found safe as an
+emergent property — `Orchestrator` captures `cfg` once at construction and
+never calls `load_config()` again (confirmed zero `load_config` call sites
+in `orchestrator.py` outside `__init__`/module load), so switching/
+creating/deleting the active project from another tab mid-run can't corrupt
+or affect that in-flight run, only what the *next* run picks up; and
+`orchestrace.html`'s event handling itself (no inline script, purely
+`config.js`+`run.js`, every DOM id cross-checked both directions, every
+`orchestrator.py`/`server.py` emitted event type matched against `run.js`'s
+`handleEvent()` switch) reconfirms rather than newly finds the same
+conclusion the 2026-08-17/19 passes already logged as clean.
+
+Did not re-verify the 15 standing open items against current code — no
+commits had landed since 2026-08-27 that could invalidate any of them.
+
 ## 2026-08-27
 
 Housekeeping: today's container's local `main` was detached HEAD at `642c8c1`
