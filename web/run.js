@@ -228,8 +228,8 @@ function summarizeConfig() {
   try {
     const status = await (await fetch('/api/status')).json();
     if (status.running) setState('EXECUTING');
-    connectEvents();
   } catch (_) {
     logLine('WARN', 'Server neběží. Stránka je jen popis schématu — běh spustíš po `python server.py`.');
   }
+  connectEvents();
 })();
