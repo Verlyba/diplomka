@@ -79,6 +79,55 @@ tasks at the top; dated entries below, newest first.
   step is `RUNNING`, with the arm already near its target when the failures
   start. Not confirmed against a real hardware failure log — flagging the
   code-level asymmetry, not a reproduced incident.
+  **2026-08-29 update:** still applies after the physical/visual-evidence
+  fusion rewrite (`inference_daemon.py` main loop, now further down the
+  file). `joints` is still left frozen on a failed tick, and it's now used
+  for velocity-based settling on `|reset`/`|grasp` steps too
+  (`deltas = np.abs(joints[:n_pos] - prev_joints[:n_pos])`) — a frozen
+  `joints` against last tick's `prev_joints` reads as *exactly* zero
+  velocity, which is an even more direct false "settled" signal than the
+  old target-tracking distance was. Same fix call, same reason for leaving
+  it alone.
+
+- **[protocol semantics, needs a human decision] Protocol B can never fire
+  in simulated mode (no `--robot.port`), which regresses the simulated
+  ablation path the fusion rewrite's own comment says should stay
+  exercisable.** `inference_daemon.py` main loop: `idle_load_baseline`/
+  `_baseline_samples` are only ever updated inside
+  `if not simulated and robot is not None:` (the `WAITING`-state hardware
+  read). The new `baseline_ready = idle_load_baseline is not None and
+  _baseline_samples >= MIN_BASELINE_SAMPLES` gate that now guards
+  `over_limit` is therefore always `False` in simulated mode, so a grasp
+  step's simulated Protocol B path (`load = 280.0 if (joints.size >= 6 and
+  joints[5] > 0.8) else 40.0`, deliberately crafted to exercise Protocol B —
+  see the comment "the whole orchestration loop … is testable") can never
+  actually terminate a step anymore; it always falls through to the step
+  timeout instead. Before this commit `baseline` simply defaulted to `0.0`
+  when `idle_load_baseline` was `None`, so simulated Protocol B worked.
+  Fixing this means deciding how simulated mode should seed a baseline
+  (treat `simulated` as trivially "ready" with baseline 0.0, or seed
+  `_baseline_samples`/`idle_load_baseline` immediately on start) — a
+  judgment call about the dev/test path's intended behavior, not a
+  mechanical default sync, so left for a deliberate decision rather than
+  picked unilaterally. Found by a dispatched review pass, verified by hand
+  against the current code; not run against a live simulated session.
+
+- **[protocol semantics, needs a human decision] `MIN_BASELINE_SAMPLES` is a
+  one-shot gate tied to the daemon's very first `WAITING` period, not to
+  each step.** `inference_daemon.py`: baseline sampling only happens
+  `if not _any_task_started:` (inside the same hardware-read block as
+  above), and `_any_task_started` latches `True` forever after the first
+  `SET_TASK:` of the daemon's life (the daemon persists across all of a
+  run's steps via `SET_POLICY` hot-swaps). So `_baseline_samples` only ever
+  climbs during the gap between `DAEMON_READY` and the *first* step of the
+  whole run — if that gap is shorter than ~0.5s (15 ticks @ 30fps; e.g. a
+  fast/cached local LLM response, or `planner_vision`/`planner_reasoning`
+  off), `baseline_ready` never becomes `True` and Protocol B is silently
+  disabled for the *entire run*, not just the first step. Plausible in
+  practice depends on real LLM planning latency, which this review didn't
+  measure — flagging the mechanism (a human should judge whether the gate
+  needs to reset/retry per-step rather than latch once) rather than guessing
+  at a fix, since it changes exactly when Protocol B is trusted.
 
 - **[design decision needed] Setup page's "Uložit" can silently revert
   config.json edits made outside that browser tab — e.g. the still-open
@@ -165,29 +214,6 @@ tasks at the top; dated entries below, newest first.
   right thing (falls back to resuming from the failed step, or raises if that
   also fails) — only the *initial* planning call's empty-plan handling has
   this gap.
-
-- **[protocol semantics, needs a human decision] Protocol A can preempt
-  Protocol B on grasp steps before contact is ever detected.**
-  `inference_daemon.py` ~L744-763: Protocol A's "settled" check
-  (`elif use_triggers and use_protocol_a and settled >= PROTOCOL_A_PATIENCE`)
-  is *not* gated on `active_is_grasp`, unlike Protocol B
-  (`use_protocol_b and active_is_grasp and rise > PROTOCOL_B_LOAD_LIMIT`).
-  The gripper joint is explicitly excluded from the Protocol A delta
-  (`n_pos = max(joints.size - 1, 1)`), so on a grasp step the arm can be
-  judged "settled" (5 consecutive frames ≈ 167ms @ 30fps by default) while
-  the gripper is still mid-close and has not yet made contact — Protocol A
-  fires first and the step ends before Protocol B ever gets a chance.
-  In `orchestrator.py` the mandatory grasp check
-  (`protocol_b_ok = not grasp_check_applies or ("Protokol B" in (reason or ""))`)
-  then hard-fails the step as `[object_missed]` without asking the VLM
-  inspector — regardless of whether the grasp was actually succeeding. This
-  could systematically doom grasp steps and burn the re-plan budget on
-  trials that never got a fair chance to trip Protocol B. Whether Protocol A
-  should be suppressed while `active_is_grasp`, given a longer patience for
-  grasp steps, or left as-is (maybe it's an intentional timeout-of-last-resort)
-  is a call for the thesis author to make deliberately — not something to
-  silently patch, per the "never change protocol A/B thresholds/semantics on
-  a guess" rule.
 
 - **[risky to mechanically fix] Checkpoint attribution uses unanchored
   substring matching, can attribute a checkpoint to the wrong step.**
@@ -293,6 +319,162 @@ tasks at the top; dated entries below, newest first.
   precision at a segment edge. Small enough and touches recorded-data timing
   closely enough that I didn't want to change it without the thesis author
   confirming the intended semantics.
+
+## 2026-08-29
+
+Housekeeping: this container's `main` started detached HEAD, similar to the
+recurring pattern from every prior day, but today it was mid-race with a
+genuine push — the repo's own author (not this routine) had just landed
+three commits directly on `main` a couple minutes before this session
+started (`a2c74c5`/`ac658ad`/`9cb7291`, authored "Verlyba"), and `git fetch`
+initially still showed `origin/main` behind the detached HEAD. Before
+assuming anything, created a local safety-net branch pointing at the
+detached commit (in case the container's `main` ref and `origin/main` never
+reconciled) and pushed it to `origin` so the work couldn't be lost to
+container reclamation either way. A follow-up `git fetch` then showed
+`origin/main` had itself advanced to the same commit — the author's push had
+simply landed concurrently — so fast-forwarded local `main` to match and
+deleted the now-redundant local safety-net branch (its remote copy,
+`preserve/manual-fusion-2026-08-29`, is harmless to leave and can be deleted
+manually; this session's git credentials couldn't delete a remote branch —
+403 from the push proxy). No data was ever at risk; noting the mechanism
+since it looked alarming for the first few minutes.
+
+The author's own commits (`a2c74c5` "Fúze fyzických a vizuálních důkazů,
+ladění ukončovacích protokolů" + two follow-ups) are a substantial, clearly
+deliberate rework of step-termination logic: Protocol A now measures
+tick-to-tick joint *velocity* instead of distance-to-predicted-target for
+`|reset`/`|grasp` steps (extensively justified with real telemetry
+observations in code comments), Protocol B now requires a sustained,
+plateaued rise (`PROTOCOL_B_PATIENCE`/`PROTOCOL_B_STABILITY_SLOPE`) after a
+grace period (`PROTOCOL_B_GRACE_S`) instead of a single-tick threshold
+crossing, and `orchestrator.py` now fuses physical (Protocol A/B) and visual
+(VLM inspector) evidence via a new `fuse_evidence()` truth table instead of
+letting a missed Protocol B hard-fail a grasp step outright. This is new,
+unreviewed, not-yet-run code (the author's own commit message says the
+daily routine's stranded fixes were "incorporated manually" alongside it),
+so today's review focused there instead of the usual fresh-angle sweep —
+new code is exactly where an unattended pass earns its keep most.
+
+Dispatched one deep review pass (general-purpose agent, given the full diff
+and told to trace every new config field/CLI flag end-to-end across
+`inference_daemon.py`/`orchestrator.py`/`server.py`/`web/`, run
+`tests/test_fusion.py`, and separate genuine bugs from intentional design).
+Verified every finding by hand (read the real code, traced the concrete
+scenario) before fixing.
+
+Found and fixed (narrow, mechanical, no protocol-threshold/semantics
+change — every value below was already established elsewhere in the same
+commit, this is a sync, not a guess):
+
+- `inference_daemon.py`: **`settle_patience` is referenced in the ~5x/s
+  telemetry block (stdout print + `_log_telemetry`) but is only ever
+  assigned inside the `RUNNING`-state branch**, and the telemetry block runs
+  unconditionally every tick regardless of state. On daemon startup the
+  first tick(s) are `WAITING` (before the orchestrator's first `SET_TASK:`,
+  which depends on LLM planning latency and is essentially never
+  instantaneous) — the very first telemetry tick hits `NameError:
+  settle_patience` and crashes the daemon before a single step can run.
+  Initialized `settle_patience = PROTOCOL_A_PATIENCE` alongside `settled = 0`
+  before the main loop and reset it alongside `settled = 0` on entering
+  `WAITING`, so it's always defined and (as a side benefit) telemetry during
+  `WAITING` no longer shows a stale grasp-extended patience value left over
+  from the previous step.
+- `inference_daemon.py`: the same telemetry block's displayed denominator
+  used the bare `PROTOCOL_A_PATIENCE` constant instead of the actual
+  patience in effect (`settle_patience = PROTOCOL_A_PATIENCE +
+  PROTOCOL_A_GRASP_PATIENCE_EXTRA` for grasp steps) — both the `[TELEMETRY]`
+  stdout line and the JSONL `tick` event. A grasp step's true patience is
+  10 frames by default, but telemetry showed e.g. `settle:7/5`, i.e.
+  already-exceeded, while the step was still legitimately running to its
+  real threshold — misleading exactly when someone tunes these values from
+  the telemetry log, which is the log's stated purpose. Now uses
+  `settle_patience` in both places.
+- `inference_daemon.py`: **`_log_telemetry()`'s file `write()`+`flush()`
+  had no lock**, but it's called from both the main loop (every tick,
+  `task_done`) and the `stdin_reader` background thread (`task_started` on
+  every `SET_TASK:`) — a `SET_TASK:` arriving right as the main thread
+  writes its own `task_done` line (a very plausible interleaving: the
+  orchestrator sends the next task immediately after seeing `TASK_DONE`) can
+  interleave two threads' writes on the same file object and corrupt a JSONL
+  line in the structured telemetry log this commit introduced specifically
+  for offline analysis. Added a `threading.Lock()` around the write+flush.
+- `orchestrator.py` `Daemon.start()`: **two of the six new Protocol A/B CLI
+  flags this commit added to `inference_daemon.py` were never actually
+  passed when launching the daemon** — `--protocol-a.grasp-patience-extra`
+  and `--protocol-b.stability` had zero references anywhere outside
+  `inference_daemon.py` (confirmed by grep), so every real run silently used
+  the daemon's hardcoded defaults for both, with no way to tune either via
+  config or the Setup UI even though their four sibling tunables
+  (threshold/patience/limit/patience/grace) were fully wired. Added both
+  `cmd.append(...)` lines, reading from `cfg` with the daemon's own defaults
+  as fallback, matching the existing pattern.
+- `orchestrator.py` `Daemon.start()`: the inline fallback for
+  `protocol_a_threshold_rad` (used only when the key is absent from `cfg`)
+  was still the pre-rewrite `0.005`, while the daemon's own tuned default
+  became `0.5` in this same commit (extensively justified — the old value is
+  two orders of magnitude below the native-unit noise floor and would leave
+  Protocol A never settling on `|reset`/`|grasp` steps). Same dead-fallback
+  shape as several previous days' fixes to this file — `cfg` always comes
+  from `load_config()`, which always merges `DEFAULT_CONFIG`, so this
+  literal is dead in every real path today, but a latent trap for future
+  standalone use. Aligned to `0.5`.
+- `server.py` `DEFAULT_CONFIG` / `web/config.js` `DEFAULTS`: **three protocol
+  values were stale relative to values this same commit already updated
+  elsewhere** — `protocol_a_threshold_rad` (`server.py` still had `0.005`;
+  `web/config.js` already had the correct `0.5`), `protocol_b_limit_ma`
+  (`server.py`/`web/config.js` both still `280`; the daemon's own default and
+  `orchestrator.py`'s own inline fallback both already moved to `250`, per
+  this commit's telemetry analysis — false triggers at 72/139 mA bracketing
+  a real grasp at 108 mA), and `holding_limit_ma` (`server.py`/`web/config.js`
+  both still `50`; `orchestrator.py`'s own `_gripper_note()` fallback is
+  `20`). Since `load_config()` seeds every project from `DEFAULT_CONFIG`,
+  this meant a fresh project (or the Setup page's displayed default) would
+  silently disagree with the values the commit's own tuning work settled on.
+  Synced all three to match the values already established elsewhere in the
+  same commit — not a new guess.
+- `server.py` `DEFAULT_CONFIG` / `create_project()`: **`protocol_b_patience`,
+  `protocol_b_grace_s`, `protocol_b_deadband_frac` (already in
+  `web/config.js`'s `DEFAULTS`), plus the two newly-wired
+  `protocol_a_grasp_patience_extra`/`protocol_b_stability_slope`, were
+  entirely missing from `server.py`'s `DEFAULT_CONFIG`** and from
+  `create_project()`'s hardware-key carry-over list — a fresh project
+  creation would silently drop them (falling back to `orchestrator.py`'s own
+  inline defaults, which happen to already match, so no behavior change
+  today, but the field would vanish from `config.json` and thus from
+  anything reading it directly). Added all five, matching the values already
+  used elsewhere.
+- `web/index.html`: added the two Setup-page inputs
+  (`protocol_a_grasp_patience_extra`, `protocol_b_stability_slope`) needed
+  to make the two newly-wired flags above actually reachable from the UI —
+  the generic `[data-key]` fill/collect mechanism in `web/setup.js` needed no
+  changes.
+
+Verified with `python3 -m py_compile` on the three changed `.py` files,
+`node --check` on the changed `.js` files, and a fresh run of
+`tests/test_fusion.py` (all 18 truth-table cases still pass — the fusion
+logic itself wasn't touched, just its wiring).
+
+Found but NOT fixed — logged as two new open tasks above, both protocol-
+semantics judgment calls: simulated mode can no longer ever trigger Protocol
+B (the new `baseline_ready` gate only advances on real hardware reads,
+regressing the simulated ablation path), and `MIN_BASELINE_SAMPLES` is
+latched to only the daemon's very first `WAITING` period rather than
+resetting per step, so a fast first LLM response could silently disable
+Protocol B for an entire run. Also removed one now-stale open item
+("Protocol A can preempt Protocol B on grasp steps before contact is ever
+detected") — the fusion rewrite addresses it by construction: grasp steps
+now include the gripper joint in the settle check with extra patience, and
+a missed Protocol B no longer hard-fails the step outright since
+`fuse_evidence()` always still asks the VLM inspector. Appended a short
+update to the standing "Protocol A settled counter not reset on failure"
+item — still applies post-rewrite, and now more directly (a frozen `joints`
+on a failed tick reads as exactly-zero velocity for the new
+`|reset`/`|grasp` settle check).
+
+Did not re-verify the other standing open items against current code beyond
+what's noted above — this review's whole budget went to the new fusion
+commit, which was the far higher-value target today.
 
 ## 2026-08-28
 
