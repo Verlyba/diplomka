@@ -86,9 +86,6 @@ function fillForm() {
     if (el.type === 'checkbox') el.checked = Boolean(value);
     else el.value = value;
   });
-  document.getElementById('boundaries').placeholder =
-    Array.from({ length: Math.max(derive.steps(cfg).length - 1, 1) },
-      (_, i) => (4 + i * 5).toFixed(1)).join(',');
   renderSteps();
   render();
   isFormDirty = false;
@@ -97,7 +94,10 @@ function fillForm() {
 function readForm() {
   document.querySelectorAll('[data-key]').forEach((el) => {
     if (el.type === 'checkbox') cfg[el.dataset.key] = el.checked;
-    else if (el.type === 'number') cfg[el.dataset.key] = Number(el.value);
+    // Number('') is 0 — momentarily clearing the field while retyping a
+    // value (or leaving it blank by accident) must not silently save 0 for
+    // a required numeric setting. Keep the last known-good value instead.
+    else if (el.type === 'number') { if (el.value !== '') cfg[el.dataset.key] = Number(el.value); }
     else cfg[el.dataset.key] = el.value;
   });
 }
@@ -258,6 +258,13 @@ function render() {
   const steps = derive.steps(c);
   const cameras = derive.camerasArg(c);
   applyStrategy();
+
+  // Patří sem, ne do fillForm(): počet hranic se odvíjí od počtu kroků, a ty
+  // se dají přidávat/mazat kdykoli — ve fillForm() se placeholder spočítal
+  // jen jednou při načtení a pak zůstal viset na starém počtu.
+  document.getElementById('boundaries').placeholder =
+    Array.from({ length: Math.max(steps.length - 1, 1) },
+      (_, i) => (4 + i * 5).toFixed(1)).join(',');
 
   // 1) instalace
   fill('cmds-install', [
@@ -471,10 +478,19 @@ let isFormDirty = false;
     isFormDirty = true;
   });
 
+  // Tlačítko „Vrátit výchozí" v index.html dosud nemělo žádný handler, takže
+  // bylo mrtvé — kliknutí neudělalo vůbec nic.
+  document.getElementById('reset').addEventListener('click', () => {
+    cfg = JSON.parse(JSON.stringify(DEFAULTS));
+    fillForm();
+    isFormDirty = true;
+  });
+
   document.getElementById('save').addEventListener('click', async () => {
     readForm();
     const ok = await saveConfig(cfg);
-    isFormDirty = false;
+    // Když zápis selhal, formulář pořád obsahuje neuložené změny.
+    isFormDirty = !ok;
     const status = document.getElementById('save-status');
     status.textContent = ok
       ? 'Uloženo do prohlížeče i do config.json.'
@@ -1088,7 +1104,11 @@ async function openModelModal(stepSlug) {
   if (checkpoints && checkpoints.length > 0) {
     checkpoints.forEach(ckpt => {
       const opt = document.createElement('option');
-      opt.value = ckpt.path;
+      // ckpt.path je holý output_dir tréninku (viz list_trained_checkpoints
+      // v orchestrator.py); lerobot_train's --policy.path na rozdíl od
+      // inference_daemon.py's resolve_policy_dir() netoleruje obě varianty,
+      // takže je potřeba vždy vnořená cesta k pretrained_model.
+      opt.value = `${ckpt.path}/checkpoints/last/pretrained_model`;
       opt.textContent = `${ckpt.name} (${ckpt.steps || 0} kroků)`;
       finetuneBaseSelect.appendChild(opt);
     });
@@ -1253,13 +1273,28 @@ function renderModalCheckpoints(checkpoints, stepSlug) {
       document.querySelectorAll('#modal-ckpt-list .ckpt-card').forEach(c => c.classList.remove('selected'));
       card.classList.add('selected');
 
+      // Připnutí checkpointu se ukládá rovnou na server; když zápis selže,
+      // vrať to zpátky, ať UI neukazuje volbu, která nikde není uložená.
+      const prevPath = stepSlug
+        ? (cfg.steps || []).find(s => s.slug === stepSlug)?.policy_path
+        : cfg.baseline_policy_path;
+
       if (stepSlug) {
         const stepObj = (cfg.steps || []).find(s => s.slug === stepSlug);
         if (stepObj) stepObj.policy_path = ckpt.path;
       } else {
         cfg.baseline_policy_path = ckpt.path;
       }
-      await saveConfig(cfg);
+      const ok = await saveConfig(cfg);
+      if (!ok) {
+        if (stepSlug) {
+          const stepObj = (cfg.steps || []).find(s => s.slug === stepSlug);
+          if (stepObj) stepObj.policy_path = prevPath;
+        } else {
+          cfg.baseline_policy_path = prevPath;
+        }
+        alert('Uložení checkpointu selhalo: server neběží, config.json se nezapsal.');
+      }
       renderSteps();
     };
 
