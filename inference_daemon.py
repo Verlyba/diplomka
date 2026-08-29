@@ -315,6 +315,10 @@ _load_history: list[float] = []
 # One file per daemon process (i.e. per orchestration run, since one daemon
 # stays alive across all of a run's steps via SET_POLICY hot-swaps).
 _telemetry_log_fh = None  # opened in main(), closed on QUIT
+# Guards writes to _telemetry_log_fh: called from both the main loop and the
+# stdin_reader thread (on SET_TASK), and a bare write()+flush() from two
+# threads can interleave and corrupt a JSONL line.
+_telemetry_lock = threading.Lock()
 
 
 def _log_telemetry(**fields) -> None:
@@ -322,8 +326,10 @@ def _log_telemetry(**fields) -> None:
         return
     try:
         fields.setdefault("t", time.time())
-        _telemetry_log_fh.write(json.dumps(fields, ensure_ascii=False) + "\n")
-        _telemetry_log_fh.flush()
+        line = json.dumps(fields, ensure_ascii=False) + "\n"
+        with _telemetry_lock:
+            _telemetry_log_fh.write(line)
+            _telemetry_log_fh.flush()
     except Exception:
         pass
 
@@ -858,6 +864,7 @@ def main() -> None:
 
     period = 1.0 / max(args.fps, 1)
     settled = 0
+    settle_patience = PROTOCOL_A_PATIENCE
     grasp_hold = 0
     load_slope = 0.0
     load_trend = 0.0
@@ -873,6 +880,7 @@ def main() -> None:
 
         if state == "WAITING":
             settled = 0
+            settle_patience = PROTOCOL_A_PATIENCE
             grasp_hold = 0
             prev_joints = None
             _load_history.clear()
@@ -1040,7 +1048,7 @@ def main() -> None:
                 f"target:{','.join(f'{x:.3f}' for x in target)} | "
                 f"load:{load:.0f} | "
                 f"baseline:{(idle_load_baseline if idle_load_baseline is not None else 0.0):.0f} | "
-                f"settle:{settled}/{PROTOCOL_A_PATIENCE} (vel {velocity_max:.4f}, target_err {target_error_max:.3f}) | "
+                f"settle:{settled}/{settle_patience} (vel {velocity_max:.4f}, target_err {target_error_max:.3f}) | "
                 f"grasp_hold:{grasp_hold}/{PROTOCOL_B_PATIENCE} | "
                 f"slope:{(load_slope if state == 'RUNNING' else 0.0):.0f} | "
                 f"trend:{(load_trend if state == 'RUNNING' else 0.0):.0f}",
@@ -1048,7 +1056,7 @@ def main() -> None:
             _log_telemetry(event="tick", state=state, task=active_task, is_grasp=active_is_grasp, is_reset=active_is_reset,
                            load=load, baseline=(idle_load_baseline if idle_load_baseline is not None else None),
                            rise=(load - idle_load_baseline) if idle_load_baseline is not None else None,
-                           settled=settled, protocol_a_patience=PROTOCOL_A_PATIENCE,
+                           settled=settled, protocol_a_patience=settle_patience,
                            joint_velocity=velocity_max, target_error=target_error_max,
                            grasp_hold=grasp_hold, protocol_b_patience=PROTOCOL_B_PATIENCE,
                            slope=(load_slope if state == "RUNNING" else 0.0),
