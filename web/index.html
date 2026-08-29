@@ -231,6 +231,9 @@
           <label class="field">Počet snímků v klidu
             <input data-key="protocol_a_patience" type="number" step="1" min="1">
           </label>
+          <label class="field" title="Přidá se k počtu snímků v klidu jen u kroků označených jako úchop — sevření obvykle ještě chvíli drncá i po dosednutí ramene">Úchop: navíc snímků v klidu
+            <input data-key="protocol_a_grasp_patience_extra" type="number" step="1" min="0">
+          </label>
         </div>
         <div class="note"><b>Protokol A</b> ukončí krok, když se všechny klouby (kromě gripperu)
           mezi dvěma po sobě jdoucími snímky pohnou o míň než uvedený práh, a vydrží tak zadaný
@@ -256,6 +259,9 @@
           </label>
           <label class="field">Nárůst zátěže nad klid — práh „něco drží" (0-1000)
             <input data-key="holding_limit_ma" type="number" step="5" min="0">
+          </label>
+          <label class="field" title="Nárůst zátěže se musí ustálit (|sklon| pod touto hodnotou), než se počítá jako držení — odliší plató po sevření od proudu, který ještě prudce stoupá">Max. sklon nárůstu zátěže pro „ustáleno"
+            <input data-key="protocol_b_stability_slope" type="number" step="5" min="0">
           </label>
           <label class="checkline" title="Hodnotu zátěže dostane plánovač jako informaci, jestli robot něco drží">
             <input data-key="gripper_state_in_context" type="checkbox"> Hlásit stav gripperu plánovači

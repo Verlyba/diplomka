@@ -131,11 +131,16 @@ DEFAULT_CONFIG: dict = {
     "planner_reasoning": True,
     # step termination protocols — task- and hardware-specific, hence togglable
     "protocol_a_enabled": True,
-    "protocol_a_threshold_rad": 0.005,
+    "protocol_a_threshold_rad": 0.5,
     "protocol_a_patience": 5,
+    "protocol_a_grasp_patience_extra": 5,
     "protocol_b_enabled": True,
-    "protocol_b_limit_ma": 280,
-    "holding_limit_ma": 50,
+    "protocol_b_limit_ma": 250,
+    "protocol_b_patience": 3,
+    "protocol_b_grace_s": 0.75,
+    "protocol_b_deadband_frac": 0.25,
+    "protocol_b_stability_slope": 30.0,
+    "holding_limit_ma": 20,
     "gripper_state_in_context": True,
 }
 
@@ -292,7 +297,10 @@ def create_project(slug: str, description: str) -> dict:
                        "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
                        "fps", "lm_url", "llm_model", "vlm_model",
                        "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
-                       "protocol_b_enabled", "protocol_b_limit_ma", "holding_limit_ma"):
+                       "protocol_a_grasp_patience_extra",
+                       "protocol_b_enabled", "protocol_b_limit_ma", "protocol_b_patience",
+                       "protocol_b_grace_s", "protocol_b_deadband_frac", "protocol_b_stability_slope",
+                       "holding_limit_ma"):
             if hw_key in current_cfg:
                 new_cfg[hw_key] = current_cfg[hw_key]
 

@@ -435,11 +435,13 @@ class Daemon:
             cmd.append("--no-protocol-a")
         if not cfg.get("protocol_b_enabled", True):
             cmd.append("--no-protocol-b")
-        cmd.append(f"--protocol-a.threshold={float(cfg.get('protocol_a_threshold_rad', 0.005))}")
+        cmd.append(f"--protocol-a.threshold={float(cfg.get('protocol_a_threshold_rad', 0.5))}")
         cmd.append(f"--protocol-a.patience={int(cfg.get('protocol_a_patience', 5))}")
+        cmd.append(f"--protocol-a.grasp-patience-extra={int(cfg.get('protocol_a_grasp_patience_extra', 5))}")
         cmd.append(f"--protocol-b.limit={float(cfg.get('protocol_b_limit_ma', 250))}")
         cmd.append(f"--protocol-b.patience={int(cfg.get('protocol_b_patience', 3))}")
         cmd.append(f"--protocol-b.grace={float(cfg.get('protocol_b_grace_s', 0.75))}")
+        cmd.append(f"--protocol-b.stability={float(cfg.get('protocol_b_stability_slope', 30.0))}")
 
         self.emit("log", level="INFO", message="Spouštím inferenční daemon: " + " ".join(cmd))
         self.proc = subprocess.Popen(

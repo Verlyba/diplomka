@@ -67,12 +67,14 @@ const DEFAULTS = {
   protocol_a_enabled: true,
   protocol_a_threshold_rad: 0.5,
   protocol_a_patience: 5,
+  protocol_a_grasp_patience_extra: 5,
   protocol_b_enabled: true,
-  protocol_b_limit_ma: 280,
+  protocol_b_limit_ma: 250,
   protocol_b_patience: 3,
   protocol_b_grace_s: 0.75,
   protocol_b_deadband_frac: 0.25,
-  holding_limit_ma: 50,
+  protocol_b_stability_slope: 30.0,
+  holding_limit_ma: 20,
   gripper_state_in_context: true,
 };
 
