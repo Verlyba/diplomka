@@ -25,7 +25,6 @@ Keys (press then Enter):
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import threading
 import time
@@ -40,6 +39,7 @@ import inference_daemon as daemon
 # reason (see hold_action / freeze_robot() in inference_daemon.py) — without
 # that continuous re-assertion, current never sustains long enough to read.
 gripper_target: float | None = None
+_quit = threading.Event()
 
 
 def stdin_commands(action_key: str | None) -> None:
@@ -47,7 +47,8 @@ def stdin_commands(action_key: str | None) -> None:
     for line in sys.stdin:
         cmd = line.strip().lower()
         if cmd == "q":
-            os._exit(0)
+            _quit.set()
+            return
         elif action_key is None:
             continue
         elif cmd == "o":
@@ -91,7 +92,7 @@ def main() -> None:
     extra_regs = ["Present_Voltage", "Present_Temperature"]
 
     try:
-        while True:
+        while not _quit.is_set():
             if action_key is not None and gripper_target is not None:
                 daemon.robot.send_action({action_key: gripper_target})
             obs = daemon.robot.get_observation()

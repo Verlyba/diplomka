@@ -65,10 +65,13 @@ const DEFAULTS = {
   // (jiný gripper, jiný předmět, úloha bez úchopu), proto jsou obě metody
   // vypínatelné a jejich prahy konfigurovatelné.
   protocol_a_enabled: true,
-  protocol_a_threshold_rad: 0.005,
+  protocol_a_threshold_rad: 0.5,
   protocol_a_patience: 5,
   protocol_b_enabled: true,
   protocol_b_limit_ma: 280,
+  protocol_b_patience: 3,
+  protocol_b_grace_s: 0.75,
+  protocol_b_deadband_frac: 0.25,
   holding_limit_ma: 50,
   gripper_state_in_context: true,
 };
@@ -91,12 +94,16 @@ async function loadConfig() {
 async function saveConfig(cfg) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
   try {
-    await fetch('/api/config', {
+    const resp = await fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cfg),
     });
-    return true;
+    // A non-2xx response (e.g. server-side write failure) means config.json
+    // was NOT actually written, even though the request itself went
+    // through — checking resp.ok (not just "fetch didn't throw") keeps the
+    // caller's success/fail status accurate for that case too.
+    return resp.ok;
   } catch (_) {
     return false;
   }
@@ -113,28 +120,38 @@ const derive = {
    *  Jen jedno lomítko — Hugging Face hub validuje repo_id jako
    *  `namespace/název`, takže `local/uloha/krok` by neprošlo. */
   stepRepo: (c, slug) => `local/${c.task_slug}_${slug}`,
-  /** Výstupní adresář tréninku baseline modelu. Nový trénink vždy jde sem,
-   *  podle konvence názvu — i když je pro orchestraci připnutý jiný
-   *  checkpoint (viz baselineLoadPath), aby ho trénink omylem nepřepsal. */
-  baselineOut: (c) => `${c.output_root}/${c.task_slug}_${c.policy_type}`,
+  /** Výstupní adresář tréninku baseline modelu — sufixovaný aktuálním počtem
+   *  epizod datasetu (`_<N>ep`), když je známý (viz `episodes` parametr,
+   *  spočtený voláním v setup.js z `/api/models`). Díky tomu nahrání dalších
+   *  epizod do stejného repo_id a nový trénink nekoliduje s checkpointem
+   *  natrénovaným na menším datasetu (lerobot_train odmítne přepsat existující
+   *  --output_dir bez --resume) — každá velikost datasetu má svou vlastní
+   *  složku. Stejnou konvenci (i stejný fallback na starou plochou cestu, když
+   *  počet epizod není znám) používá baseline_output_dir() v orchestrator.py —
+   *  ať appka nehledá jiný model, než jaký setup natrénoval. Pro orchestraci
+   *  může být pořád připnutý jiný checkpoint (viz baselineLoadPath). */
+  baselineOut: (c, episodes) =>
+    `${c.output_root}/${c.task_slug}${episodes ? `_${episodes}ep` : ''}_${c.policy_type}`,
   /** Kde na disku doopravdy leží dataset — LeRobotDataset.resume() to
    *  potřebuje explicitně, jinak by mu psaní do sdílené cache mohlo
    *  poškodit revizní snapshoty ostatních datasetů. */
   datasetRoot: (c) => `$HOME/.cache/huggingface/lerobot/${derive.baselineRepo(c)}`,
   /** Výstupní adresář tréninku modelu jednoho kroku. Stejná poznámka jako
-   *  u baselineOut platí i tady. */
-  stepOut: (c, slug) => `${c.output_root}/${c.task_slug}_${slug}_${c.policy_type}`,
+   *  u baselineOut platí i tady (`episodes` = aktuální počet epizod
+   *  dílčího datasetu toho kroku, ne celé úlohy). */
+  stepOut: (c, slug, episodes) =>
+    `${c.output_root}/${c.task_slug}_${slug}${episodes ? `_${episodes}ep` : ''}_${c.policy_type}`,
   /** Odkud se baseline model doopravdy NAČÍTÁ ke spuštění — respektuje ruční
    *  připnutí checkpointu z modálky "Správa modelů" (cfg.baseline_policy_path),
    *  stejně jako baseline_output_dir() v orchestrator.py. Bez tohohle by ruční
    *  příkaz "Baseline stejným daemonem" tiše ignoroval připnutý checkpoint a
    *  vždycky sáhl po tom podle konvence názvu. */
-  baselineLoadPath: (c) => c.baseline_policy_path || derive.baselineOut(c),
+  baselineLoadPath: (c, episodes) => c.baseline_policy_path || derive.baselineOut(c, episodes),
   /** Odkud se model kroku doopravdy NAČÍTÁ — respektuje ruční připnutí
    *  (steps[i].policy_path), stejně jako step_output_dir() v orchestrator.py. */
-  stepLoadPath: (c, slug) => {
+  stepLoadPath: (c, slug, episodes) => {
     const step = (c.steps || []).find((s) => s.slug === slug);
-    return (step && step.policy_path) || derive.stepOut(c, slug);
+    return (step && step.policy_path) || derive.stepOut(c, slug, episodes);
   },
   /** Draccus zápis kamer pro lerobot CLI — jedna nebo dvě, podle vyplnění. */
   camerasArg: (c) => {

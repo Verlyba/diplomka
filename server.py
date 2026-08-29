@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +44,32 @@ HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
 CONFIG_FILE = HERE / "config.json"
 PROJECTS_DIR = HERE / "projects"
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Write `data` as JSON to `path` without ever leaving a truncated/corrupt
+    file behind if the process dies mid-write (kill -9, power loss, a crash in
+    this long-running robot-control app). Writes to a temp file in the same
+    directory, then does one atomic os.replace() over the target — so any
+    reader always sees either the old file or the fully-written new one, never
+    a half-written one."""
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        # mkstemp() creates the temp file mode 0600 (owner-only); os.replace()
+        # would carry that onto the target, silently making config.json less
+        # readable than a plain open(path, "w") (which follows the umask,
+        # 0644 here) used to leave it. chmod back to that before the swap.
+        os.chmod(tmp_name, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 # Kam record_with_marks.py / lerobot-record doopravdy ukládá "local/<name>"
 # datasety — LeRobotDataset(repo_id="local/x") vždycky píše sem, bez ohledu
 # na to, odkud server.py běží. Stejná cesta jako derive.datasetRoot() v
@@ -141,20 +169,29 @@ class EventBus:
             except queue.Full:
                 pass
 
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self) -> tuple[queue.Queue, list[dict]]:
+        """Register a new subscriber and return the history-so-far in one
+        atomic step, together with the queue.
+
+        Registering and snapshotting history as two separate locked calls
+        (as this used to be) leaves a race: an event published in the gap
+        between them lands in the history snapshot *and* gets pushed onto
+        the now-already-registered queue, so a browser tab reconnecting to
+        /api/events could see that one event replayed twice. Doing both
+        under the same lock as publish()'s own append+snapshot means every
+        event is delivered exactly once, via whichever path is correct for
+        when the subscriber joined.
+        """
         q: queue.Queue = queue.Queue(maxsize=1000)
         with self._lock:
             self._subscribers.append(q)
-        return q
+            snapshot = list(self._history)
+        return q, snapshot
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
             if q in self._subscribers:
                 self._subscribers.remove(q)
-
-    def history(self) -> list[dict]:
-        with self._lock:
-            return list(self._history)
 
     def clear_history(self) -> None:
         with self._lock:
@@ -165,6 +202,17 @@ bus = EventBus()
 
 
 # ── Configuration ───────────────────────────────────────────────────────────
+
+# Guards every config.json / projects/<slug>.json read-modify-write sequence.
+# ThreadingHTTPServer runs each request in its own thread, and several routes
+# (dataset pin/unpin, project select/create/delete) do load_config() -> mutate
+# -> save_config() with no other synchronization; without this lock two
+# concurrent requests can interleave and the second save silently discards
+# the first's change (lost update). RLock so save_config() can be called
+# from within another locked function (select_project() etc.) without
+# deadlocking.
+_config_lock = threading.RLock()
+
 
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
@@ -195,8 +243,7 @@ def ensure_projects_dir() -> None:
     if re.match(r"^[a-z0-9_-]+$", slug):
         proj_file = PROJECTS_DIR / f"{slug}.json"
         if not proj_file.exists():
-            with open(proj_file, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            atomic_write_json(proj_file, cfg)
 
 def list_projects() -> list[dict]:
     ensure_projects_dir()
@@ -219,84 +266,86 @@ def list_projects() -> list[dict]:
     return res
 
 def select_project(slug: str) -> dict:
-    ensure_projects_dir()
-    slug = validate_slug(slug)
-    proj_file = PROJECTS_DIR / f"{slug}.json"
-    if not proj_file.exists():
-        raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
-    with open(proj_file, "r", encoding="utf-8") as f:
-        pdata = json.load(f)
-    return save_config(pdata, overwrite=True)
+    with _config_lock:
+        ensure_projects_dir()
+        slug = validate_slug(slug)
+        proj_file = PROJECTS_DIR / f"{slug}.json"
+        if not proj_file.exists():
+            raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
+        with open(proj_file, "r", encoding="utf-8") as f:
+            pdata = json.load(f)
+        return save_config(pdata, overwrite=True)
 
 def create_project(slug: str, description: str) -> dict:
-    ensure_projects_dir()
-    slug = validate_slug(slug)
-    proj_file = PROJECTS_DIR / f"{slug}.json"
-    if proj_file.exists():
-        raise ValueError(f"Projekt s názvem '{slug}' již existuje.")
-        
-    current_cfg = load_config()
-    new_cfg = dict(DEFAULT_CONFIG)
-    for hw_key in ("python", "device", "robot_type", "robot_port", "robot_id", 
-                   "teleop_type", "teleop_port", "teleop_id", 
-                   "camera_name", "camera_index", "camera_width", "camera_height", "camera_fps",
-                   "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
-                   "fps", "lm_url", "llm_model", "vlm_model", 
-                   "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
-                   "protocol_b_enabled", "protocol_b_limit_ma", "holding_limit_ma"):
-        if hw_key in current_cfg:
-            new_cfg[hw_key] = current_cfg[hw_key]
+    with _config_lock:
+        ensure_projects_dir()
+        slug = validate_slug(slug)
+        proj_file = PROJECTS_DIR / f"{slug}.json"
+        if proj_file.exists():
+            raise ValueError(f"Projekt s názvem '{slug}' již existuje.")
 
-    new_cfg["task_slug"] = slug
-    new_cfg["task_description"] = description
-    new_cfg["steps"] = []
-    
-    with open(proj_file, "w", encoding="utf-8") as f:
-        json.dump(new_cfg, f, ensure_ascii=False, indent=2)
-        
-    return save_config(new_cfg, overwrite=True)
+        current_cfg = load_config()
+        new_cfg = dict(DEFAULT_CONFIG)
+        for hw_key in ("python", "device", "robot_type", "robot_port", "robot_id",
+                       "teleop_type", "teleop_port", "teleop_id",
+                       "camera_name", "camera_index", "camera_width", "camera_height", "camera_fps",
+                       "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
+                       "fps", "lm_url", "llm_model", "vlm_model",
+                       "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
+                       "protocol_b_enabled", "protocol_b_limit_ma", "holding_limit_ma"):
+            if hw_key in current_cfg:
+                new_cfg[hw_key] = current_cfg[hw_key]
+
+        new_cfg["task_slug"] = slug
+        new_cfg["task_description"] = description
+        new_cfg["steps"] = []
+
+        atomic_write_json(proj_file, new_cfg)
+
+        return save_config(new_cfg, overwrite=True)
 
 def delete_project(slug: str) -> dict:
-    ensure_projects_dir()
-    slug = validate_slug(slug)
-    proj_file = PROJECTS_DIR / f"{slug}.json"
-    if not proj_file.exists():
-        raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
-        
-    curr_cfg = load_config()
-    is_active = (slug == curr_cfg.get("task_slug"))
-    
-    proj_file.unlink()
-    
-    if is_active:
-        remaining = list(PROJECTS_DIR.glob("*.json"))
-        if remaining:
-            with open(remaining[0], "r", encoding="utf-8") as f:
-                new_active_cfg = json.load(f)
-        else:
-            new_active_cfg = dict(DEFAULT_CONFIG)
-        save_config(new_active_cfg, overwrite=True)
-        
-    return {"deleted": slug, "active_changed": is_active, "config": load_config()}
+    with _config_lock:
+        ensure_projects_dir()
+        slug = validate_slug(slug)
+        proj_file = PROJECTS_DIR / f"{slug}.json"
+        if not proj_file.exists():
+            raise FileNotFoundError(f"Projekt '{slug}' neexistuje.")
+
+        curr_cfg = load_config()
+        is_active = (slug == curr_cfg.get("task_slug"))
+
+        proj_file.unlink()
+
+        if is_active:
+            remaining = sorted(PROJECTS_DIR.glob("*.json"))
+            if remaining:
+                with open(remaining[0], "r", encoding="utf-8") as f:
+                    new_active_cfg = json.load(f)
+            else:
+                new_active_cfg = dict(DEFAULT_CONFIG)
+            save_config(new_active_cfg, overwrite=True)
+
+        return {"deleted": slug, "active_changed": is_active, "config": load_config()}
 
 def save_config(cfg: dict, overwrite: bool = False) -> dict:
-    if overwrite:
-        merged = dict(DEFAULT_CONFIG)
-        merged.update(cfg)
-    else:
-        merged = load_config()
-        merged.update(cfg)
-        
-    CONFIG_FILE.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-    
-    slug = merged.get("task_slug")
-    if slug and re.match(r"^[a-z0-9_-]+$", slug):
-        PROJECTS_DIR.mkdir(exist_ok=True)
-        proj_file = PROJECTS_DIR / f"{slug}.json"
-        with open(proj_file, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2)
-            
-    return merged
+    with _config_lock:
+        if overwrite:
+            merged = dict(DEFAULT_CONFIG)
+            merged.update(cfg)
+        else:
+            merged = load_config()
+            merged.update(cfg)
+
+        atomic_write_json(CONFIG_FILE, merged)
+
+        slug = merged.get("task_slug")
+        if slug and re.match(r"^[a-z0-9_-]+$", slug):
+            PROJECTS_DIR.mkdir(exist_ok=True)
+            proj_file = PROJECTS_DIR / f"{slug}.json"
+            atomic_write_json(proj_file, merged)
+
+        return merged
 
 
 # ── Datasety na disku ───────────────────────────────────────────────────────
@@ -385,7 +434,9 @@ def delete_dataset_episodes(repo_id: str, indices: list[int], python_exe: str) -
         f"--operation.episode_indices={json.dumps(indices)}",
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1800,
+            encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(
             f"lerobot_edit_dataset neskončil do 30 minut — zkontroluj terminál serveru "
@@ -394,6 +445,36 @@ def delete_dataset_episodes(repo_id: str, indices: list[int], python_exe: str) -
         tail = (proc.stderr or proc.stdout or "").strip()[-2000:]
         raise RuntimeError(f"lerobot_edit_dataset selhal (exit {proc.returncode}): {tail}")
     return {"stdout": (proc.stdout or "").strip()[-2000:]}
+
+
+def run_compute_step_timeouts(cfg: dict) -> dict:
+    """Spustí compute_step_timeouts.py pro aktuální projekt a rovnou vrátí
+    přepočtenou konfiguraci — tenhle skript píše timeout_s přímo do
+    config.json, mimo save_config()/merge, takže bez ručního znovunačtení by
+    appka ukazovala staré hodnoty a projects/<slug>.json by se s nimi
+    rozešel (viz save_config — ten synchronizaci dělá jen při volání skrz
+    /api/config)."""
+    steps = [s.get("slug") for s in cfg.get("steps", []) if s.get("slug")]
+    if not steps:
+        raise ValueError("Úloha nemá žádné kroky — není co počítat.")
+    task_slug = cfg.get("task_slug", "task")
+    python_exe = cfg.get("python") or "python"
+    cmd = [
+        python_exe, str(HERE / "compute_step_timeouts.py"),
+        f"--repo-id=local/{task_slug}", f"--steps={','.join(steps)}", "--apply",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(HERE))
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"compute_step_timeouts.py neskončil do 2 minut. ({e})")
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip()[-2000:]
+        raise RuntimeError(f"compute_step_timeouts.py selhal (exit {proc.returncode}): {tail}")
+    # Skript zapsal přímo do config.json — načti to, co doopravdy napsal, a
+    # protlač to i do souboru aktivního projektu (jinak by přepnutí projektu
+    # tam a zpátky tyhle timeouty tiše smazalo).
+    fresh = save_config(load_config(), overwrite=True)
+    return {"stdout": (proc.stdout or proc.stderr or "").strip()[-2000:], "config": fresh}
 
 
 # ── Run state ───────────────────────────────────────────────────────────────
@@ -443,7 +524,7 @@ def start_run(body: dict) -> dict:
 
 def stop_run() -> dict:
     with run_state.lock:
-        if run_state.orchestrator:
+        if run_state.running:
             run_state.orchestrator.stop()
             bus.publish("log", level="WARN", message="Zastavuji běh…")
             return {"ok": True}
@@ -470,24 +551,29 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_body(self) -> dict | None:
-        """Parsed JSON body, or None when it was sent but is not valid JSON.
+        """Parsed JSON body, or None when it was sent but is not valid JSON —
+        or is valid JSON that isn't an object (e.g. a bare array/number/null).
 
         The difference matters: silently treating a broken body as empty would
         start a run with default settings instead of the ones that were asked
-        for — the checkboxes on the run page would look ignored.
+        for — the checkboxes on the run page would look ignored. Every route
+        handler calls body.get(...) unconditionally, so a non-dict body must
+        be rejected here rather than let AttributeError crash the connection
+        in whichever handler runs first.
         """
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            parsed = json.loads(self.rfile.read(length).decode("utf-8"))
         except Exception:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _serve_static(self, path: str) -> None:
         rel = path.lstrip("/") or "index.html"
         target = (WEB_DIR / rel).resolve()
-        if not str(target).startswith(str(WEB_DIR.resolve())) or not target.is_file():
+        if not target.is_relative_to(WEB_DIR.resolve()) or not target.is_file():
             self.send_error(404, "Not found")
             return
         data = target.read_bytes()
@@ -499,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _stream_events(self) -> None:
-        q = bus.subscribe()
+        q, initial_history = bus.subscribe()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -507,7 +593,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             # replay what already happened so a reload does not lose the run
-            for event in bus.history():
+            for event in initial_history:
                 self._write_event(event)
             while True:
                 try:
@@ -532,7 +618,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             self._send_json(load_config())
         elif path == "/api/projects":
-            self._send_json(list_projects())
+            try:
+                self._send_json(list_projects())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/status":
             self._send_json({"running": run_state.running,
                              "instruction": run_state.instruction})
@@ -544,12 +633,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)})
         elif path == "/api/models":
-            self._send_json(orch.model_status(load_config()))
+            try:
+                self._send_json(orch.model_status(load_config()))
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/datasets/local":
             qs = parse_qs(urlparse(self.path).query)
             show_all = (qs.get("all", ["0"])[0] == "1")
             task_slug = None if show_all else load_config().get("task_slug")
-            self._send_json(list_local_datasets(task_slug))
+            try:
+                self._send_json(list_local_datasets(task_slug))
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/runs":
             runs_dir = HERE / "runs"
             files = sorted((f.name for f in runs_dir.glob("*.json")), reverse=True) \
@@ -568,7 +663,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/config":
-            self._send_json({"ok": True, "config": save_config(body)})
+            try:
+                self._send_json({"ok": True, "config": save_config(body)})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/projects/select":
             slug = body.get("slug", "")
             try:
@@ -599,21 +697,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "Chybí repo_id."}, status=400)
                 return
             try:
-                cfg = load_config()
-                if step_slug:
-                    steps = cfg.get("steps", [])
-                    step = next((s for s in steps if s.get("slug") == step_slug), None)
-                    if step is None:
-                        self._send_json({"ok": False, "error": f"Krok '{step_slug}' neexistuje."}, status=400)
-                        return
-                    ds_list = step.setdefault("datasets", [])
-                    if repo_id not in ds_list:
-                        ds_list.append(repo_id)
-                else:
-                    ds_list = cfg.setdefault("baseline_datasets", [])
-                    if repo_id not in ds_list:
-                        ds_list.append(repo_id)
-                save_config(cfg)
+                with _config_lock:
+                    cfg = load_config()
+                    if step_slug:
+                        steps = cfg.get("steps", [])
+                        step = next((s for s in steps if s.get("slug") == step_slug), None)
+                        if step is None:
+                            self._send_json({"ok": False, "error": f"Krok '{step_slug}' neexistuje."}, status=400)
+                            return
+                        ds_list = step.setdefault("datasets", [])
+                        if repo_id not in ds_list:
+                            ds_list.append(repo_id)
+                    else:
+                        ds_list = cfg.setdefault("baseline_datasets", [])
+                        if repo_id not in ds_list:
+                            ds_list.append(repo_id)
+                    save_config(cfg)
                 self._send_json({"ok": True, "config": cfg})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=400)
@@ -622,16 +721,17 @@ class Handler(BaseHTTPRequestHandler):
             step_slug = body.get("step_slug")
             repo_id = (body.get("repo_id") or "").strip()
             try:
-                cfg = load_config()
-                if step_slug:
-                    steps = cfg.get("steps", [])
-                    step = next((s for s in steps if s.get("slug") == step_slug), None)
-                    if step and "datasets" in step:
-                        step["datasets"] = [d for d in step["datasets"] if d != repo_id]
-                else:
-                    if "baseline_datasets" in cfg:
-                        cfg["baseline_datasets"] = [d for d in cfg["baseline_datasets"] if d != repo_id]
-                save_config(cfg)
+                with _config_lock:
+                    cfg = load_config()
+                    if step_slug:
+                        steps = cfg.get("steps", [])
+                        step = next((s for s in steps if s.get("slug") == step_slug), None)
+                        if step and "datasets" in step:
+                            step["datasets"] = [d for d in step["datasets"] if d != repo_id]
+                    else:
+                        if "baseline_datasets" in cfg:
+                            cfg["baseline_datasets"] = [d for d in cfg["baseline_datasets"] if d != repo_id]
+                    save_config(cfg)
                 self._send_json({"ok": True, "config": cfg})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=400)
@@ -651,10 +751,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, **res})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=400)
+        elif path == "/api/timeouts/compute":
+            try:
+                res = run_compute_step_timeouts(load_config())
+                self._send_json({"ok": True, **res})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=400)
         elif path == "/api/run":
-            self._send_json(start_run(body))
+            try:
+                self._send_json(start_run(body))
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/stop":
-            self._send_json(stop_run())
+            try:
+                self._send_json(stop_run())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         else:
             self.send_error(404, "Not found")
 

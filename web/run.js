@@ -60,7 +60,12 @@ function renderProgressSummary() {
   let html = '<div class="summary-list">';
   let stepCounter = 1;
   executedAttempts.forEach((item) => {
-    if (item.isReplan) {
+    if (item.isPlan) {
+      html += `<div class="summary-replan">
+        <b>🧭 Počáteční plán</b>
+        ${item.reasoning ? `<div style="margin-top:2px"><i>CEO: „${escapeAttr(item.reasoning)}“</i></div>` : ''}
+      </div>`;
+    } else if (item.isReplan) {
       html += `<div class="summary-replan">
         <b>↳ Re-plán #${item.num}</b>
         ${item.reasoning ? `<div style="margin-top:2px"><i>CEO: „${escapeAttr(item.reasoning)}“</i></div>` : ''}
@@ -69,8 +74,16 @@ function renderProgressSummary() {
       const ok = item.success;
       const mark = ok ? '<span style="color:var(--green)">✓ SUCCESS</span>' : `<span style="color:var(--red)">✗ FAILED ${item.tag}</span>`;
       const reasonStr = item.reason ? ` <span style="color:var(--muted)">(${item.reason})</span>` : '';
+      const inspStr = item.inspReason ? `<div style="margin-top:2px"><i>Inspektor: „${escapeAttr(item.inspReason)}“</i></div>` : '';
+      // Rozpor mezi fyzickým čidlem a kamerou je to nejinformativnější, co
+      // u kroku může nastat (viz fuse_evidence v orchestrator.py) — ať je
+      // vidět přímo u kroku, ne jen v logu, kam se musí rolovat.
+      const conflictStr = item.conflict
+        ? `<div style="margin-top:2px;color:var(--yellow)"><b>⚠ Rozpor důkazů:</b> ${escapeAttr(item.conflict)}</div>`
+        : '';
       html += `<div class="summary-entry">
         ${stepCounter++}. <code class="inline">${item.step}</code> → ${mark}${reasonStr}
+        ${inspStr}${conflictStr}
       </div>`;
     }
   });
@@ -115,8 +128,14 @@ function handleEvent(event) {
           reasoning: event.reasoning || '',
         });
         renderProgressSummary();
-      } else if (event.reasoning) {
-        logLine('INFO', `Odůvodnění CEO: „${event.reasoning}“`);
+      } else {
+        // Počáteční plán — dřív se odůvodnění jen krátce mihlo v logu a
+        // zmizelo; teď zůstává v souhrnu vidět stejně jako u re-plánů.
+        executedAttempts.push({
+          isPlan: true,
+          reasoning: event.reasoning || '',
+        });
+        renderProgressSummary();
       }
       renderPlan(stepMarks);
       logLine('EVENT', `Plán${event.replan ? ` (re-plán ${event.replan})` : ''}: [${planSteps.join(', ')}]`);
@@ -135,6 +154,8 @@ function handleEvent(event) {
           success: event.success,
           tag: event.tag,
           reason: event.reason,
+          inspReason: event.insp_reason || '',
+          conflict: event.conflict || '',
         });
         renderProgressSummary();
         logLine(event.success ? 'SUCCESS' : 'WARN',
@@ -228,8 +249,11 @@ function summarizeConfig() {
   try {
     const status = await (await fetch('/api/status')).json();
     if (status.running) setState('EXECUTING');
-    connectEvents();
   } catch (_) {
     logLine('WARN', 'Server neběží. Stránka je jen popis schématu — běh spustíš po `python server.py`.');
   }
+  // Mimo try: kdyby probe na /api/status selhal (server startuje, výpadek
+  // sítě), dřív se SSE proud nepřipojil vůbec a stránka zůstala hluchá až
+  // do ručního reloadu, i když server mezitím naběhl.
+  connectEvents();
 })();

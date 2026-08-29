@@ -154,6 +154,10 @@
             příkazu pro tenhle krok níže (sekce 7). Nepovinné, prázdné pole použije globální
             „Kroků tréninku". Podle tohohle čísla appka pozná, jestli checkpoint fajfku zaslouží.</li>
         </ul>
+        <div class="note">Doporučení: přidej do katalogu i krok, který vrátí rameno do
+          neutrální/bezpečné pozice z <b>libovolného</b> stavu (typicky „homing"). CEO plánovač
+          takový krok pozná podle popisu a umí ho sám naplánovat i jako zotavovací akci uprostřed
+          běhu — víc na <a href="orchestrace.html">stránce Orchestrační schéma</a>.</div>
         <div id="steps-editor"></div>
         <div id="model-status-legend" class="note" style="display:none">
           <b>✓</b> = checkpoint na disku má aspoň tolik kroků, kolik je teď nastaveno v „Kroků
@@ -221,23 +225,34 @@
           <label class="checkline" title="Krok skončí, když se klouby přestanou hýbat">
             <input data-key="protocol_a_enabled" type="checkbox"> Protokol A — dosednutí kloubů
           </label>
-          <label class="field">Práh dosednutí (rad)
-            <input data-key="protocol_a_threshold_rad" type="number" step="0.001" min="0">
+          <label class="field" title="Jednotka je nativní jednotka polohy robota (u tohoto projektu stupně, ne radiány — název pole je jen historický)">Práh pohybu mezi snímky
+            <input data-key="protocol_a_threshold_rad" type="number" step="0.05" min="0">
           </label>
           <label class="field">Počet snímků v klidu
             <input data-key="protocol_a_patience" type="number" step="1" min="1">
           </label>
         </div>
         <div class="note"><b>Protokol A</b> ukončí krok, když se všechny klouby (kromě gripperu)
-          přiblíží k předpovídanému cíli blíž než uvedený práh, a vydrží tak zadaný počet snímků
-          po sobě. Znamená to, že pohyb dojel a dál už se nic neděje. Funguje pro libovolný krok
-          bez ohledu na to, jestli se něco uchopuje.</div>
+          mezi dvěma po sobě jdoucími snímky pohnou o míň než uvedený práh, a vydrží tak zadaný
+          počet snímků po sobě. Znamená to, že se rameno fyzicky přestalo hýbat — schválně NE
+          "je blízko toho, co teď predikuje model": ta predikce může mít trvalý odstup i několik
+          stupňů od skutečné pozice, i když je rameno už dávno v klidu (ověřeno na reálné
+          telemetrii). Funguje pro libovolný krok bez ohledu na to, jestli se něco uchopuje.</div>
         <div class="grid" style="margin-top:12px">
           <label class="checkline" title="Krok skončí, když zátěž gripperu (Present_Load 0-1000) vzroste nad klidovou hodnotu o víc než tento limit">
             <input data-key="protocol_b_enabled" type="checkbox"> Protokol B — zátěž gripperu (Present_Load)
           </label>
           <label class="field">Nárůst zátěže nad klid — ukončení kroku (0-1000)
             <input data-key="protocol_b_limit_ma" type="number" step="10" min="0">
+          </label>
+          <label class="field" title="Kolik snímků po sobě musí nárůst zátěže zůstat nad limitem, než se krok ukončí — filtruje krátký proudový špičku ze samotného pohybu čelistí od skutečného drženého sevření">Nárůst zátěže — počet snímků nad limitem
+            <input data-key="protocol_b_patience" type="number" step="1" min="1">
+          </label>
+          <label class="field" title="Prvních N sekund po startu kroku se Protokol B vůbec nekontroluje — počáteční přesun ramene do výchozí polohy trajektorie krátce zvedne proud gripperu nezávisle na jakémkoliv kontaktu s předmětem">Ochranná doba po startu kroku (s)
+            <input data-key="protocol_b_grace_s" type="number" step="0.1" min="0">
+          </label>
+          <label class="field" title="Podíl prahu (0.25 = 25 %), o který smí zátěž zůstat pod limitem a přesto se nepovažuje za vyvrácený úchop — místo toho se výsledek označí za fyzicky neprůkazný a rozhodne inspektor ze snímku">Pásmo nejistoty pod prahem (podíl)
+            <input data-key="protocol_b_deadband_frac" type="number" step="0.05" min="0" max="1">
           </label>
           <label class="field">Nárůst zátěže nad klid — práh „něco drží" (0-1000)
             <input data-key="holding_limit_ma" type="number" step="5" min="0">
@@ -250,7 +265,13 @@
           čelisti sevřou předmět, servo se zatíží a jeho proud vyskočí — překročení limitu je proto
           spolehlivá známka, že robot něco drží, a krok se ukončí, aby politika předmět dál
           nemačkala. Limit závisí na gripperu a předmětu: měkký nebo lehký předmět potřebuje nižší
-          hodnotu, tuhý vyšší. <b>Úloha bez úchopu protokol B nepotřebuje</b> — pak ho vypni.</div>
+          hodnotu, tuhý vyšší. <b>Úloha bez úchopu protokol B nepotřebuje</b> — pak ho vypni.
+          Samotné zavírání čelistí (i bez předmětu mezi nimi) krátce vytáhne proud nahoru stejně
+          jako držení — <b>počet snímků nad limitem</b> to odliší: krátká špička z pohybu limit
+          překročí jen na chvíli, skutečné držení ho drží déle. Podobně hned na startu kroku,
+          než se rameno vůbec stihne přesunout k předmětu, může krátce vyskočit proud jen z
+          počátečního přesunu do výchozí polohy trajektorie — <b>ochranná doba po startu kroku</b>
+          po tuhle chvíli Protokol B úplně vypne, ať se to nepočítá jako úchop.</div>
         <div class="note">Zaškrtnuté <b>„Hlásit stav gripperu plánovači“</b> přidá do zadání pro
           plánovač jednu větu s naměřeným proudem a tím, jestli robot podle něj něco drží. Je to
           výrazně spolehlivější údaj než odhad z fotky shora, kde je malý předmět v čelistech sotva
@@ -466,6 +487,10 @@
           každý krok při orchestraci stejný plochý limit — a ten kratší kroky zbytečně natahuje,
           delší naopak systematicky uřezává, než stihnou doběhnout.</p>
         <div id="cmds-timeouts"></div>
+        <div style="margin-top:10px; display:flex; align-items:center; gap:10px">
+          <button type="button" id="btn-run-timeouts" style="padding:6px 14px; background:var(--accent); color:#1a1207; font-weight:600; border:none; border-radius:var(--radius); cursor:pointer">▶ Spustit teď</button>
+          <span id="timeouts-run-status" style="font-size:13px; color:var(--muted)"></span>
+        </div>
       </div>
 
       <div data-only="merge">
@@ -519,9 +544,8 @@
         <button type="button" class="btn-doc" id="btn-baseline-modal" title="Správa modelů a datasetů pro baseline" style="margin-left:8px">📄 Správa baseline modelů</button>
       </p>
       <div id="cmds-baseline-run"></div>
-      <div class="note">Daemon čte příkazy ze standardního vstupu. Po hlášce
-        <code class="inline">[STATUS] DAEMON_READY</code> napiš
-        <code class="inline">SET_TASK:&lt;popis úlohy&gt;</code> a potvrď Enterem;
+      <div class="note">Daemon čte příkazy ze standardního vstupu — bez druhého příkazu výše
+        (<code class="inline">SET_TASK:...</code>) zůstane jen ve WAITING a robotem vůbec nehne.
         <code class="inline">STOP</code> zastaví, <code class="inline">QUIT</code> ukončí.</div>
     </div>
   </section>

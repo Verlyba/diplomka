@@ -36,7 +36,9 @@ Formát výstupu (sekundy od začátku epizody):
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -74,13 +76,32 @@ def _say(message: str) -> None:
 # ── Zápis sidecar souboru ───────────────────────────────────────────────────
 
 def _persist() -> None:
-    """Uloží značky po každé změně — přežijí i pád nahrávání uprostřed."""
+    """Uloží značky po každé změně — přežijí i pád nahrávání uprostřed.
+
+    Zápis je atomický (temp soubor + os.replace()): kdyby proces spadl/byl
+    zabit přesně během zápisu, starý sidecar zůstane celý místo useknutého
+    JSONu, který by split_dataset.py odmítl načíst."""
     path = _STATE["path"]
     if not path:
         return
     payload = {"episodes": {ep: sorted(times) for ep, times in _STATE["marks"].items() if times}}
+    target = Path(path)
     try:
-        Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp")
+        try:
+            # mkstemp() creates the temp file mode 0600 (owner-only); os.replace()
+            # would carry that onto the sidecar, silently making it less readable
+            # than the plain write_text() it replaces (which follows the umask).
+            os.chmod(tmp_name, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, indent=2))
+            os.replace(tmp_name, target)
+        except OSError:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     except OSError as e:
         _say(f"soubor se značkami se nepodařilo zapsat: {e}")
 

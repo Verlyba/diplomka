@@ -43,10 +43,17 @@
         <div class="role">
           <div class="n">vrstva 3</div>
           <h4>VLM inspektor</h4>
-          <p>Po každém kroku dostane snímek scény a otázku, jestli krok dopadl. Vrací verdikt
-            a značku chyby, která řídí přeplánování.</p>
+          <p>Po každém kroku dostane snímek scény a otázku, jestli krok dopadl. Vrací verdikt,
+            značku chyby, která řídí přeplánování, a jednovětné odůvodnění, co na snímku vidí —
+            to jde do souhrnu běhu i zpátky plánovači při re-plánu.</p>
         </div>
       </div>
+      <div class="note">Doporučení pro návrh kroků: do katalogu dovedností každé úlohy přidej i
+        krok, který vrátí rameno do neutrální/bezpečné pozice z <b>libovolného</b> stavu (typicky
+        „homing"). CEO plánovač ho pozná podle popisu a umí ho sám naplánovat i uprostřed běhu jako
+        zotavovací akci — když neví, co se děje, cíl nevidí, nebo se stejný krok opakovaně nedaří —
+        ne jen na konci úlohy. Bez takového kroku v katalogu tahle možnost prostě odpadá, nic se
+        nerozbije.</div>
     </div>
   </section>
 
@@ -97,7 +104,7 @@
           </div>
           <div class="branch">
             <div class="ok">✓ úspěch → další krok plánu</div>
-            <div class="fail">✗ neúspěch → nový plán s kontextem chyby (max 3×)</div>
+            <div class="fail">✗ neúspěch → nový plán s kontextem chyby (do limitu re-plánů z Setupu)</div>
           </div>
         </div>
         <div class="arrow">▼</div>
@@ -145,8 +152,9 @@
         </tr>
         <tr>
           <td>Re-plán</td>
-          <td>Po neúspěšné verifikaci dostane plánovač kontext selhání („krok X selhal kvůli Y")
-            a sestaví nový plán. Po třech neúspěších běh končí chybou.</td>
+          <td>Po neúspěšné verifikaci dostane plánovač kontext selhání — postup dosavadního běhu,
+            značku chyby a odůvodnění inspektora ke každému kroku — a sestaví nový plán. Po
+            vyčerpání limitu re-plánů běh končí chybou.</td>
         </tr>
       </table>
     </div>

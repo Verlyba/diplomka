@@ -135,10 +135,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
    (přesně pod „Časový limit", stejná šířka sloupce) */
 .step-row .hint { grid-column: 2 / 5; font-size: 13px; }
 .step-row .train-steps { grid-column: 5 / 6; font-size: 13px; }
+.step-row .timeout { grid-column: 6 / 8; font-size: 13px; }
 .model-badge { font-size: 14px; font-weight: 600; text-align: center; padding: 3px 0; border-radius: var(--radius); white-space: nowrap; color: var(--muted); }
 .model-badge.ok { color: var(--green); border: 1px solid var(--green); }
 .model-badge.warn { color: var(--yellow); border: 1px solid var(--yellow); }
 .step-row .checkline { white-space: nowrap; }
+.step-flags { display: flex; flex-direction: column; gap: 3px; }
 .step-row .idx { color: var(--accent); font-family: var(--mono); font-size: 13px; text-align: center; }
 
 /* ── Příkazy ──────────────────────────────────────────────────────────── */

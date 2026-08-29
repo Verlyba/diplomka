@@ -8,8 +8,14 @@ __pycache__/
 config.json
 projects/
 
+# Lokální nastavení nástrojů (obsahuje absolutní cesty k tomuhle stroji)
+.claude/
+
 # Záznamy běhů orchestrace
 runs/*.json
+
+# Strukturovaná telemetrie z inference_daemon.py (load/slope/trend za tik)
+telemetry/
 
 # LeRobot datasety a checkpointy, kdyby vznikly uvnitř projektu
 outputs/

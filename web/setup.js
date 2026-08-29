@@ -6,30 +6,51 @@
 let cfg = null;
 let modelStatus = null; // { baseline: {trained, steps, path}, steps: {slug: {...}} } — z /api/models
 
+/** Aktuální počet epizod daného repo_id, jak ho naposledy vrátil /api/models
+ *  (modelStatus.baseline.datasets / modelStatus.steps[slug].datasets — obojí
+ *  obsahuje i dataset celé úlohy a dataset každého kroku, viz
+ *  find_available_datasets() v orchestrator.py). Null, dokud se modelStatus
+ *  nenačte, nebo když dataset ještě neexistuje / nemá žádnou epizodu —
+ *  derive.baselineOut/stepOut na null spadnou zpátky na starou plochou cestu
+ *  bez _<N>ep sufixu. */
+function datasetEpisodes(repoId) {
+  if (!modelStatus) return null;
+  const pools = [modelStatus.baseline && modelStatus.baseline.datasets,
+    ...Object.values(modelStatus.steps || {}).map((s) => s.datasets)].filter(Boolean);
+  for (const list of pools) {
+    const found = list.find((d) => d.repo_id === repoId);
+    if (found && found.episodes) return found.episodes;
+  }
+  return null;
+}
+
 /** Nastaví text/třídu/title existujícího <span class="model-badge"> podle
  *  stavu checkpointu — mutace na místě, ne vkládání nového <span> přes
  *  innerHTML (to by ho vnořilo do sebe sama). Stejná cesta, co by načetl
  *  daemon (viz orchestrator.checkpoint_status) — appka a live běh se tu
  *  nemůžou rozejít.
  *
- *  Fajfka = natrénováno na (aspoň) aktuálně nastavený cíl. Křížek = buď
- *  žádný checkpoint, nebo existuje, ale má míň kroků, než je teď v poli
- *  „Kroků tréninku" — zvýšil jsi cíl a ještě jsi to nedotrénoval. */
+ *  Fajfka/křížek = natrénováno / nenatrénováno — existuje checkpoint, který
+ *  daemon doopravdy nahraje (bez ohledu na to, kolik kroků má nastaveno
+ *  aktuální cíl „Kroků tréninku" — to je jen doplňková informace v title,
+ *  dřív rozhodovalo o barvě a natrénovaný, ale pod cílem model kvůli tomu
+ *  vypadal jako "netrénováno", což mátlo). 📌 = ručně vybraný (připnutý)
+ *  checkpoint v modálu „Správa modelů", ne jen ten podle konvence názvu. */
 function applyStatusBadge(el, info) {
   if (!info) {
     el.textContent = '…'; el.className = 'model-badge'; el.title = 'Stav se zjišťuje…';
     return;
   }
   const target = info.target_steps != null ? ` / cíl ${info.target_steps}` : '';
-  if (info.sufficient) {
-    el.textContent = '✓'; el.className = 'model-badge ok';
-    el.title = `${info.path}\nnatrénováno: ${info.steps} kroků${target}`;
-  } else if (info.trained) {
-    el.textContent = '✗'; el.className = 'model-badge warn';
-    el.title = `${info.path}\nnatrénováno jen ${info.steps} kroků${target} — dotrénovat`;
+  const pin = info.pinned ? '📌' : '';
+  const pinNote = info.pinned ? '\n📌 ručně vybraný checkpoint (ne výchozí podle názvu)' : '';
+  if (info.trained) {
+    el.textContent = `${pin}✓`; el.className = 'model-badge ok';
+    const under = info.sufficient ? '' : ` (pod cílem${target})`;
+    el.title = `${info.path}\nnatrénováno: ${info.steps} kroků${target}${under}${pinNote}`;
   } else {
-    el.textContent = '✗'; el.className = 'model-badge warn';
-    el.title = `${info.path}\nnetrénováno${target}`;
+    el.textContent = `${pin}✗`; el.className = 'model-badge warn';
+    el.title = `${info.path}\nnetrénováno${target}${pinNote}`;
   }
 }
 
@@ -49,6 +70,11 @@ async function refreshModelStatus() {
   });
   const legend = document.getElementById('model-status-legend');
   if (legend) legend.style.display = '';
+  // Trénovací příkazy (sekce 7/8) používají počet epizod z modelStatus pro
+  // --output_dir/--policy.path (viz derive.baselineOut/stepOut) — dokud se
+  // /api/models poprvé nenačte, generují se bez _<N>ep sufixu; jakmile
+  // dorazí, přepočítej je, ať odkazují na správnou (aktuální) složku.
+  if (cfg) render();
 }
 
 /* ── Formulář ──────────────────────────────────────────────────────────── */
@@ -94,9 +120,14 @@ function renderSteps() {
         title="Anotace datasetu a popis dovednosti pro LLM plánovače. Záložní text pro VLM
 inspektora, pokud níže nevyplníš cílový stav."
         value="${escapeAttr(step.description || '')}">
-      <label class="checkline" title="→ LLM plánovač (popis dovednosti) a daemon (protokol B — proud gripperu)">
-        <input class="grasp" type="checkbox" ${step.grasp ? 'checked' : ''}> úchop
-      </label>
+      <div class="step-flags">
+        <label class="checkline" title="→ LLM plánovač (popis dovednosti) a daemon (protokol B — proud gripperu)">
+          <input class="grasp" type="checkbox" ${step.grasp ? 'checked' : ''}> úchop
+        </label>
+        <label class="checkline" title="Krok vrací rameno do known/bezpečné pozice zvenčí libovolného stavu. Dokončení se pak ověřuje fyzicky — klouby se přestanou hýbat (Protokol A) — místo aby o tom rozhodovala jen fotka pro VLM, která u 'je rameno doma?' často neumí rozhodnout.">
+          <input class="reset" type="checkbox" ${step.reset ? 'checked' : ''}> reset
+        </label>
+      </div>
       <span class="model-badge" data-badge-for="${escapeAttr(step.slug || '')}" title="Stav se zjišťuje…">…</span>
       <button type="button" class="btn-doc btn-step-modal ${docBtnClass}" title="${escapeAttr(docBtnTitle)}">📄</button>
       <button type="button" class="btn-remove-step" title="Odebrat krok">✕</button>
@@ -109,7 +140,12 @@ potřebuje pozorovatelný VÝSLEDEK („gripper je přímo nad kostkou, čelisti
         title="Kroků tréninku pro tento krok — prázdné = použije se globální „Kroků tréninku" níže.
 Podle tohohle čísla se i pozná, jestli je checkpoint hotový (fajfka), nebo jen částečně
 natrénovaný (křížek) — appka porovnává, kolik kroků checkpoint skutečně má."
-        value="${step.train_steps != null ? step.train_steps : ''}">`;
+        value="${step.train_steps != null ? step.train_steps : ''}">
+      <input class="timeout" type="number" min="1" step="0.5" placeholder="výchozí"
+        title="Časový limit kroku (s) — jde jen daemonu jako horní hranice délky kroku. Prázdné =
+použije se globální „Timeout kroku" (episode_time_s) níže. Vyplní se sám tlačítkem „▶ Spustit teď"
+u compute_step_timeouts.py v sekci 5, nebo si ho tady přepiš ručně."
+        value="${step.timeout_s != null ? step.timeout_s : ''}">`;
     row.querySelector('.slug').addEventListener('input', (e) => {
       cfg.steps[i].slug = e.target.value.trim(); render(); isFormDirty = true;
     });
@@ -118,6 +154,9 @@ natrénovaný (křížek) — appka porovnává, kolik kroků checkpoint skuteč
     });
     row.querySelector('.grasp').addEventListener('change', (e) => {
       cfg.steps[i].grasp = e.target.checked; isFormDirty = true;
+    });
+    row.querySelector('.reset').addEventListener('change', (e) => {
+      cfg.steps[i].reset = e.target.checked; isFormDirty = true;
     });
     row.querySelector('.hint').addEventListener('input', (e) => {
       const v = e.target.value.trim();
@@ -130,6 +169,12 @@ natrénovaný (křížek) — appka porovnává, kolik kroků checkpoint skuteč
       if (v === '') delete cfg.steps[i].train_steps;
       else cfg.steps[i].train_steps = Number(v);
       render(); isFormDirty = true;
+    });
+    row.querySelector('.timeout').addEventListener('input', (e) => {
+      const v = e.target.value.trim();
+      if (v === '') delete cfg.steps[i].timeout_s;
+      else cfg.steps[i].timeout_s = Number(v);
+      isFormDirty = true;
     });
     row.querySelector('.btn-step-modal').addEventListener('click', () => {
       openModelModal(cfg.steps[i].slug);
@@ -343,21 +388,27 @@ function render() {
       arg('output_dir', out), '--policy.push_to_hub=false'].join(' ');
   };
 
+  const baselineEpisodes = datasetEpisodes(derive.baselineRepo(c));
+  const baselineOut = derive.baselineOut(c, baselineEpisodes);
   fill('cmds-train-baseline', [
-    [`Baseline ${c.policy_type.toUpperCase()}`, `celý dataset → ${derive.baselineOut(c)}`,
-      trainFlags(derive.baselineRepo(c), c.task_slug, derive.baselineOut(c))],
+    [`Baseline ${c.policy_type.toUpperCase()}`, `celý dataset (${baselineEpisodes || c.episodes} epizod) → ${baselineOut}`,
+      trainFlags(derive.baselineRepo(c), c.task_slug, baselineOut)],
   ]);
 
-  fill('cmds-train-steps', steps.map((s, i) => [
-    `Krok ${i + 1}: ${s.slug}` + (s.train_steps ? ` (${s.train_steps} kroků)` : ''),
-    `${derive.stepRepo(c, s.slug)} → ${derive.stepOut(c, s.slug)}`,
-    trainFlags(derive.stepRepo(c, s.slug), `${c.task_slug}_${s.slug}`, derive.stepOut(c, s.slug), s.train_steps),
-  ]));
+  fill('cmds-train-steps', steps.map((s, i) => {
+    const stepEpisodes = datasetEpisodes(derive.stepRepo(c, s.slug));
+    const stepOut = derive.stepOut(c, s.slug, stepEpisodes);
+    return [
+      `Krok ${i + 1}: ${s.slug}` + (s.train_steps ? ` (${s.train_steps} kroků)` : ''),
+      `${derive.stepRepo(c, s.slug)}${stepEpisodes ? ` (${stepEpisodes} epizod)` : ''} → ${stepOut}`,
+      trainFlags(derive.stepRepo(c, s.slug), `${c.task_slug}_${s.slug}`, stepOut, s.train_steps),
+    ];
+  }));
 
   // 7) baseline běh
   const baseline = [`${py} inference_daemon.py`,
     arg('robot.type', c.robot_type), arg('robot.port', c.robot_port), arg('robot.id', c.robot_id),
-    arg('policy.path', derive.baselineLoadPath(c)),
+    arg('policy.path', derive.baselineLoadPath(c, baselineEpisodes)),
     arg('device', c.device), arg('fps', c.fps),
     '--no-triggers', arg('max-seconds', 60)];
   // inference_daemon.py má vlastní argparse, ne draccus — --robot.cameras tam
@@ -377,6 +428,12 @@ function render() {
   fill('cmds-baseline-run', [
     ['Baseline inference_daemon.py', 'daemon čeká na stdin po „DAEMON_READY"',
       baseline.join(' ')],
+    // Bez týhle druhé karty daemon jen visí ve WAITING a nic nedělá — je to
+    // prosté napsat prózou pod příkazem a přehlédnout to (přesně se stalo),
+    // tak ať jde zkopírovat stejně snadno jako příkaz nad ní, s doslovným
+    // popisem úlohy místo placeholderu.
+    ['Po „DAEMON_READY": nastav úlohu', 'napiš do TÉHOŽ terminálu a potvrď Enterem — bez tohohle daemon jen čeká ve WAITING a robotem vůbec nehne',
+      `SET_TASK:${c.task_description}`],
   ]);
 
   // 8) serve
@@ -409,7 +466,7 @@ let isFormDirty = false;
 
   document.getElementById('add-step').addEventListener('click', () => {
     cfg.steps = cfg.steps || [];
-    cfg.steps.push({ slug: '', description: '', grasp: false });
+    cfg.steps.push({ slug: '', description: '', grasp: false, reset: false });
     renderSteps(); render();
     isFormDirty = true;
   });
@@ -424,6 +481,33 @@ let isFormDirty = false;
       : 'Uloženo do prohlížeče. Server neběží, config.json se nezapsal.';
     setTimeout(() => { status.textContent = ''; }, 4000);
   });
+
+  const runTimeoutsBtn = document.getElementById('btn-run-timeouts');
+  if (runTimeoutsBtn) {
+    runTimeoutsBtn.addEventListener('click', async () => {
+      const status = document.getElementById('timeouts-run-status');
+      runTimeoutsBtn.disabled = true;
+      status.textContent = 'Počítám z marks.json…';
+      status.style.color = 'var(--muted)';
+      try {
+        const resp = await fetch('/api/timeouts/compute', { method: 'POST' });
+        const res = await resp.json();
+        if (res.ok) {
+          if (res.config) { cfg = res.config; fillForm(); }
+          status.textContent = '✓ Hotovo — timeout_s zapsán do config.json (viz pole "Časový limit" u kroků výše).';
+          status.style.color = 'var(--green)';
+        } else {
+          status.textContent = '✗ ' + (res.error || 'Neznámá chyba');
+          status.style.color = 'var(--red)';
+        }
+      } catch (err) {
+        status.textContent = '✗ ' + err;
+        status.style.color = 'var(--red)';
+      } finally {
+        runTimeoutsBtn.disabled = false;
+      }
+    });
+  }
 
   setupModalEvents();
   await fetchProjects();
@@ -1070,13 +1154,22 @@ function updateModalCmdPreview() {
   // v sekci 2 na jiný krok dál generovalo output_dir podle původního kroku a
   // trénink by tichě přepisoval (nebo, jako tady, narazil na FileExistsError)
   // cizí checkpoint.
+  // _<N>ep = aktuální počet epizod vybraného datasetu (viz datasetEpisodes) —
+  // stejná konvence jako derive.baselineOut/stepOut a
+  // baseline_output_dir()/step_output_dir() v orchestrator.py. Bez tohohle by
+  // se sem vracelo pořád stejné jméno bez ohledu na to, kolik epizod dataset
+  // mezitím přibylo přes --resume, a druhý trénink na tomtéž repo_id by
+  // narazil na "output directory already exists" (nebo tiše přepsal checkpoint
+  // natrénovaný na menším datasetu).
+  const dsEpisodes = datasetEpisodes(ds);
+  const sizeSuffix = dsEpisodes ? `_${dsEpisodes}ep` : '';
   let outDirName;
   if (ds.startsWith('local/')) {
-    outDirName = `${ds.slice('local/'.length)}_${pol}`;
+    outDirName = `${ds.slice('local/'.length)}${sizeSuffix}_${pol}`;
   } else if (activeModalTarget) {
-    outDirName = `${cfg.task_slug || 'task'}_${activeModalTarget}_${pol}`;
+    outDirName = `${cfg.task_slug || 'task'}_${activeModalTarget}${sizeSuffix}_${pol}`;
   } else {
-    outDirName = `${cfg.task_slug || 'task'}_${pol}`;
+    outDirName = `${cfg.task_slug || 'task'}${sizeSuffix}_${pol}`;
   }
   if (isFinetune) {
     outDirName += '_ft';
@@ -1122,24 +1215,27 @@ function renderModalCheckpoints(checkpoints, stepSlug) {
 
   checkpoints.forEach((ckpt) => {
     const card = document.createElement('div');
-    const isSufficient = ckpt.trained && (ckpt.steps || 0) >= targetSteps;
-    const badgeClass = isSufficient ? 'ok' : 'warn';
-    const badgeChar = isSufficient ? '✓' : '✗';
+    // ✓/✗ = natrénováno/nenatrénováno (existuje checkpoint), ne "nad/pod
+    // cílem" — to je jen doplňkové info v title. [AKTIVNÍ PRO ORCHESTRACI]
+    // níž je samostatně "vybráno/nevybráno" (ckpt.active).
+    const badgeClass = ckpt.trained ? 'ok' : 'warn';
+    const badgeChar = ckpt.trained ? '✓' : '✗';
+    const sufficient = ckpt.trained && (ckpt.steps || 0) >= targetSteps;
 
     card.className = `ckpt-card ${ckpt.active ? 'selected' : ''}`;
 
     const stepsText = ckpt.steps != null ? `${ckpt.steps} / cíl ${targetSteps} kroků` : 'netrénováno';
     const activeChecked = ckpt.active ? 'checked' : '';
-    const titleText = isSufficient
-      ? `${ckpt.path}\nnatrénováno: ${ckpt.steps} kroků / cíl ${targetSteps}`
-      : `${ckpt.path}\nnatrénováno jen ${ckpt.steps || 0} kroků / cíl ${targetSteps} — dotrénovat`;
+    const titleText = ckpt.trained
+      ? `${ckpt.path}\nnatrénováno: ${ckpt.steps} kroků / cíl ${targetSteps}${sufficient ? '' : ' (pod cílem)'}`
+      : `${ckpt.path}\nnetrénováno`;
 
     card.innerHTML = `
       <div class="radio-col">
         <input type="radio" name="active_ckpt_radio" value="${escapeAttr(ckpt.path)}" ${activeChecked}>
       </div>
       <div class="info-col">
-        <div class="title">${escapeAttr(ckpt.name)} ${ckpt.active ? '<span style="color:var(--accent); font-size:11px; margin-left:6px;">[AKTIVNÍ PRO ORCHESTRACI]</span>' : ''}</div>
+        <div class="title">${escapeAttr(ckpt.name)} ${ckpt.active ? '<span style="color:var(--accent); font-size:11px; margin-left:6px;">[VYBRÁNO PRO ORCHESTRACI]</span>' : ''}</div>
         <div class="meta">
           <span><b>Dataset:</b> ${escapeAttr(ckpt.dataset)}</span>
           <span><b>Architektura:</b> ${escapeAttr(ckpt.policy_type)}</span>

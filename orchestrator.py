@@ -15,8 +15,10 @@ condition being measured, not application infrastructure.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -30,6 +32,28 @@ HERE = Path(__file__).resolve().parent
 # konstantu — nejde sdílet importem, protože server.py naopak importuje tenhle
 # modul, tak by vznikl cyklus).
 LOCAL_DATASETS_DIR = Path.home() / ".cache" / "huggingface" / "lerobot" / "local"
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` via a temp-file + os.replace() so a crash or
+    kill mid-write can never leave a truncated/corrupt file behind (used for
+    runs/*.json, the raw thesis run data)."""
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        # mkstemp() creates the temp file mode 0600 (owner-only); os.replace()
+        # would carry that onto the target, silently making it less readable
+        # than the plain open(path, "w") it replaces (which follows the umask).
+        os.chmod(tmp_name, 0o644)
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 PLANNER_SYSTEM_PROMPT = (
     "You are the planning layer of a three-layer robotic manipulation system.\n\n"
@@ -49,7 +73,15 @@ PLANNER_SYSTEM_PROMPT = (
     "already held) can disrupt the environment.\n"
     "- 4. CONTINUATION FROM PROGRESS: Review PROGRESS THIS RUN. If earlier skills succeeded and their effects remain valid, "
     "continue from the current state by selecting ONLY the remaining skills needed to complete the goal.\n"
-    "- 5. OPTIMAL SEQUENCE: Output the shortest sequence of valid skill IDs that transitions the current state to the goal.\n\n"
+    "- 5. OPTIMAL SEQUENCE: Output the shortest sequence of valid skill IDs that transitions the current state to the goal.\n"
+    "- 6. RECOVERY VIA RESET SKILL: If AVAILABLE SKILLS includes one tagged [RESET] (returns the arm to a known/safe "
+    "position from ANY current position or state, not one of the task's forward-progress phases), treat it as a "
+    "general-purpose recovery action available at any point in the plan — not only at the very end. Schedule it when "
+    "the workspace is unclear, the target object is not visible or not reachable, or the same skill has failed "
+    "repeatedly, so the next attempt starts from a known, well-conditioned position instead of wherever the arm was "
+    "left after a failed attempt. A [RESET] step's own completion is verified physically (the arm's joints stopping), "
+    "not just by a photo, so trust its reported outcome. If no [RESET] skill exists in AVAILABLE SKILLS for this task, "
+    "this point does not apply.\n\n"
     "SPECIAL ANSWERS\n"
     '- ["DONE"]  — the goal is ALREADY satisfied in the current workspace state (e.g. object is in destination).\n'
     '- ["ABORT"] — no sequence of the available skills can reach the goal from the current state.\n'
@@ -74,15 +106,36 @@ PLANNER_OUTPUT_TERSE = (
 VERIFY_PROMPT_RULES = (
     "IMPORTANT VERIFICATION GUIDANCE:\n"
     "- If the expected outcome is satisfied in the photo, reply strictly with SUCCESS.\n"
-    "- Do NOT expect the robot to be holding an object if the step is marked [positioning/approach, no grasp].\n"
-    "- For approach/positioning steps ('nájezd'), if the gripper is positioned near or above the target object with open jaws, that is SUCCESS.\n\n"
+    "- Do NOT expect the robot to be holding an object if the step is marked [positioning/approach, no grasp]. "
+    "For such a step, the gripper being correctly positioned relative to its target — with the jaws still open — "
+    "is exactly what success looks like.\n"
+    "- The expected outcome names specific things that must be VISIBLE. If the gripper or arm is blocking your "
+    "view of exactly that spot, you cannot confirm it — that is [unclear], never SUCCESS. Do not assume the "
+    "outcome happened just because nothing contradicts it; absence of evidence is not evidence of success.\n"
+    "- Your REASONING sentence and your final tag MUST be logically consistent. If your own reasoning says a "
+    "required object or state is NOT visible/NOT confirmed, the tag must NOT be SUCCESS — re-read your reasoning "
+    "before picking the tag.\n"
+    "- You judge ONLY what the camera can show. Independent robot sensors are evaluated separately and may "
+    "contradict you; that is expected and useful, so report what you actually see rather than what you think "
+    "the robot 'should' have achieved.\n\n"
     "Choose EXACTLY ONE response tag from this list:\n"
-    "  SUCCESS            the expected outcome is clearly achieved\n"
+    "  SUCCESS            the expected outcome is clearly, visibly achieved\n"
     "  [object_missed]    the robot arm is completely far away or missed the target area entirely\n"
     "  [object_slipped]   an object slipped or dropped during a carrying phase\n"
     "  [target_moved]     the target object shifted out of reach\n"
-    "  [unclear]          photo is unclear, blurry, or occluded\n"
-    "  [unknown_failure]  other severe failure"
+    "  [unclear]          photo is unclear, blurry, or occluded — INCLUDING the target spot being hidden behind the robot's own arm/gripper\n"
+    "  [unknown_failure]  other severe failure\n\n"
+    "OUTPUT FORMAT — exactly three lines, in this order:\n"
+    "1. ONE line beginning with \"REASONING:\" describing what you actually see in the photo relative to the "
+    "expected outcome (one sentence — this is shown to the operator and fed to the re-planner on failure, so it "
+    "must say what's wrong, not just repeat the tag).\n"
+    "2. ONE line \"GOAL: yes\" or \"GOAL: no\" — is the OVERALL GOAL (not just this step) fully achieved in the "
+    "photo right now? Answer 'yes' only if you can actually SEE the finished end state; if unsure, answer 'no'.\n"
+    "3. The LAST line: ONLY the tag — it must match what the REASONING line just said.\n\n"
+    "Example:\n"
+    "REASONING: The gripper is open and hovering well above the target location, not near the object — the arm approached the wrong place.\n"
+    "GOAL: no\n"
+    "[object_missed]"
 )
 
 # [unclear] is deliberately not in this list — it means "take another photo",
@@ -121,7 +174,8 @@ class LMStudio:
             "model": model, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens,
         })
-        msg = data.get("choices", [{}])[0].get("message", {})
+        choices = data.get("choices") or [{}]
+        msg = choices[0].get("message", {})
         content = msg.get("content") or ""
         reasoning = msg.get("reasoning_content") or ""
         if not content.strip() and reasoning.strip():
@@ -213,6 +267,114 @@ def parse_reasoning_sentence(text: str) -> str:
     return ""
 
 
+def parse_goal_flag(text: str) -> bool | None:
+    """Read the inspector's optional 'GOAL: yes|no' line.
+
+    None means the model didn't answer it (or answered something unparseable),
+    which is deliberately indistinguishable from "no opinion" — the caller
+    treats that as "no information" and changes nothing. A small local VLM
+    dropping one line of a three-line format must not break verification, so
+    this never raises and never guesses.
+    """
+    for line in text.splitlines():
+        stripped = line.strip().strip('*"` ')
+        if not stripped.upper().startswith("GOAL:"):
+            continue
+        answer = stripped[len("GOAL:"):].strip().strip('.*"` ').upper()
+        if answer.startswith("YES"):
+            return True
+        if answer.startswith("NO"):
+            return False
+    return None
+
+
+# Physical evidence channel (robot's own sensors) — see fuse_evidence().
+# UNCLEAR is deliberately distinct from NONE: NONE means "this step type has
+# no physical completion signal at all", UNCLEAR means "there IS a reading and
+# it landed too close to the threshold to claim either way". Both defer to the
+# camera, but only one of them says something went measured-but-inconclusive,
+# which is worth telling apart in the run data.
+PHYS_CONFIRM, PHYS_DENY, PHYS_NONE, PHYS_UNCLEAR = "CONFIRM", "DENY", "NONE", "UNCLEAR"
+
+
+def fuse_evidence(phys: str, phys_note: str, vis: str,
+                  v_tag: str = "", v_reason: str = "") -> tuple[bool, str, str, str]:
+    """Combine the physical and visual verdicts into (success, tag, reason, conflict).
+
+    The two channels measure DIFFERENT propositions and are therefore
+    complementary rather than redundant:
+
+      physical — did the robot's own sensors register the completion event
+        that defines this step type (protocol B: the jaws are loaded, i.e.
+        SOMETHING is held; protocol A: the joints stopped). It cannot say
+        WHAT is held, or whether it ended up in the right place.
+      visual — does the workspace semantically match the expected outcome
+        (the right object, the right location). It cannot reliably judge
+        grip force, and loses badly to occlusion when the gripper itself
+        hides the very spot being judged.
+
+    So neither may veto the other outright, which is what the earlier
+    if/elif chain effectively did (a grasp step failing protocol B was
+    marked failed without ever asking the inspector; a settled reset step
+    was marked succeeded without asking it either). Rules:
+
+      - a step fails when both channels agree it failed, or when the channel
+        that can actually observe the proposition in question says so;
+      - the inspector may overrule physical evidence only with a DEFINITE
+        tag, never with [unclear] — otherwise an uncertain small VLM would
+        invent new failures out of camera-angle ambiguity;
+      - any genuine disagreement is returned as `conflict` rather than being
+        collapsed into the winning verdict, because "the jaws are loaded but
+        the camera sees nothing held" is far more actionable for the planner
+        (and far more interesting as thesis data) than a bare tag.
+
+    `vis` is one of SUCCESS / FAIL / UNCLEAR / SKIPPED (inspector switched
+    off — the "physical only" ablation) / NOIMG (camera actually broken).
+    The last two are kept distinct on purpose: one is an experimental
+    condition, the other is a fault.
+    """
+    if vis in ("SKIPPED", "NOIMG"):
+        if phys == PHYS_CONFIRM:
+            return True, "SUCCESS", f"Bez inspektora — fyzicky potvrzeno ({phys_note}).", ""
+        if phys == PHYS_DENY:
+            return False, "[object_missed]", f"Bez inspektora — fyzicky vyvráceno ({phys_note}).", ""
+        if vis == "SKIPPED":
+            return True, "SKIPPED", "Inspektor vypnutý (skip_inspector) a žádný fyzický důkaz — krok se nekontroloval.", ""
+        # Missing camera frame with nothing physical to fall back on is a
+        # genuine failure, not a free pass.
+        return False, "[no_image]", "Snímek z kamery se nepodařilo získat a fyzický důkaz není k dispozici.", ""
+
+    if phys in (PHYS_NONE, PHYS_UNCLEAR):
+        # No usable physical claim — the camera decides on its own. For
+        # UNCLEAR that is the whole point: a reading that landed inside the
+        # dead-band around the threshold is not evidence, and pretending
+        # otherwise is how a mis-tuned threshold silently becomes a verdict.
+        reason = v_reason
+        if phys == PHYS_UNCLEAR and phys_note:
+            reason = f"{v_reason} (fyzika neprůkazná: {phys_note} — rozhodl inspektor ze snímku)"
+        return (vis == "SUCCESS"), v_tag, reason, ""
+
+    if phys == PHYS_CONFIRM:
+        if vis == "FAIL":
+            return False, v_tag, v_reason, (
+                f"Fyzika krok potvrzuje ({phys_note}), ale inspektor hlásí konkrétní problém "
+                f"{v_tag}: {v_reason}")
+        if vis == "SUCCESS":
+            return True, "SUCCESS", v_reason, ""
+        return True, "SUCCESS", (
+            f"Inspektor nerozhodl ({v_reason}) — nese fyzický důkaz ({phys_note})."), ""
+
+    # PHYS_DENY
+    if vis == "SUCCESS":
+        return True, "SUCCESS", v_reason, (
+            f"Fyzika krok nepotvrdila ({phys_note}), ale inspektor jasně vidí splněný výsledek: "
+            f"{v_reason}")
+    if vis == "FAIL":
+        return False, v_tag, v_reason, ""
+    return False, "[object_missed]", (
+        f"Fyzicky vyvráceno ({phys_note}); inspektor nerozhodl ({v_reason})."), ""
+
+
 # ── The inference daemon, seen from the orchestrator side ───────────────────
 
 class Daemon:
@@ -276,6 +438,8 @@ class Daemon:
         cmd.append(f"--protocol-a.threshold={float(cfg.get('protocol_a_threshold_rad', 0.005))}")
         cmd.append(f"--protocol-a.patience={int(cfg.get('protocol_a_patience', 5))}")
         cmd.append(f"--protocol-b.limit={float(cfg.get('protocol_b_limit_ma', 250))}")
+        cmd.append(f"--protocol-b.patience={int(cfg.get('protocol_b_patience', 3))}")
+        cmd.append(f"--protocol-b.grace={float(cfg.get('protocol_b_grace_s', 0.75))}")
 
         self.emit("log", level="INFO", message="Spouštím inferenční daemon: " + " ".join(cmd))
         self.proc = subprocess.Popen(
@@ -288,6 +452,12 @@ class Daemon:
 
         if not self._ready.wait(timeout=float(self.cfg.get("daemon_start_timeout_s", 180))):
             raise RuntimeError("Daemon se nespustil včas (nenahlásil DAEMON_READY).")
+        if self.proc.poll() is not None:
+            # _read_output() also sets _ready on EOF (process exit) so a
+            # daemon that crashes before ever printing DAEMON_READY (e.g. a
+            # broken import) unblocks this wait immediately instead of
+            # silently eating the full daemon_start_timeout_s above.
+            raise RuntimeError("Daemon skončil dřív, než nahlásil DAEMON_READY (viz log výše).")
 
     def _read_output(self) -> None:
         assert self.proc and self.proc.stdout
@@ -330,6 +500,12 @@ class Daemon:
             else:
                 self.emit("log", level="DEBUG", message=f"daemon: {line}")
         self.emit("log", level="WARN", message="Daemon ukončen.")
+        # Unblock start()'s readiness wait immediately if the process exited
+        # (stdout closed) before ever reporting DAEMON_READY, instead of
+        # leaving that wait to run out the full daemon_start_timeout_s.
+        # start() itself checks proc.poll() right after to tell this apart
+        # from a real ready signal and raise a clear error either way.
+        self._ready.set()
 
     def _send(self, command: str) -> None:
         if not self.proc or self.proc.poll() is not None or not self.proc.stdin:
@@ -350,13 +526,15 @@ class Daemon:
             raise RuntimeError(f"Výměna modelu selhala: {self._policy_error}")
         self.policy_path = policy_path
 
-    def run_task(self, task: str, timeout: float, is_grasp: bool = False) -> str:
+    def run_task(self, task: str, timeout: float, is_grasp: bool = False, is_reset: bool = False) -> str:
         """SET_TASK + wait for TASK_DONE (the task latch). Returns the reason."""
         self._task_done.clear()
         self._done_reason = ""
         cmd = f"SET_TASK:{task}"
         if is_grasp:
             cmd += "|grasp"
+        if is_reset:
+            cmd += "|reset"
         cmd += f"|timeout={timeout:.1f}"
         self._send(cmd)
         if not self._task_done.wait(timeout + 3.0):
@@ -426,11 +604,56 @@ def cameras_json(cfg: dict) -> str:
     return json.dumps(cams) if cams else ""
 
 
+def _dataset_episode_count(repo_id: str) -> int | None:
+    """Episodes currently recorded under `repo_id`, or None if unknown/empty.
+
+    Forward reference to `_dataset_stats` below is fine — Python resolves it
+    at call time, once the whole module (defined further down in this file)
+    has finished loading.
+    """
+    stats = _dataset_stats(repo_id)
+    episodes = (stats or {}).get("episodes")
+    return episodes if isinstance(episodes, int) and episodes > 0 else None
+
+
+def _sized_output_dir(root: str, base_name: str, policy: str, repo_id: str) -> str:
+    """Pick between the dataset-size-suffixed and the old flat checkpoint path.
+
+    Recording more episodes into the same repo_id (--resume) and retraining
+    used to always write to the same flat `<base_name>_<policy>` directory,
+    so a retrain on a grown dataset either collided with (lerobot_train
+    refuses to overwrite without --resume) or would have silently orphaned
+    the checkpoint trained on the smaller slice. Now a fresh training run
+    lands in `<base_name>_<N>ep_<policy>`, sized to the dataset's CURRENT
+    episode count, so each dataset size gets its own checkpoint and none of
+    them get overwritten.
+
+    Unpinned resolution (here and via baseline_output_dir/step_output_dir)
+    prefers that sized checkpoint once it's actually trained, but falls back
+    to the flat legacy path as long as THAT is trained and the sized one
+    isn't yet — so a checkpoint trained before this convention existed (or
+    on a smaller slice you haven't retrained on since) keeps loading without
+    having to pin it in "Správa modelů". A pair that's never been trained at
+    all picks the sized path, since that's where a fresh training run
+    should land.
+    """
+    legacy = f"{root}/{base_name}_{policy}"
+    episodes = _dataset_episode_count(repo_id)
+    if not episodes:
+        return legacy
+    sized = f"{root}/{base_name}_{episodes}ep_{policy}"
+    if checkpoint_status(sized)["trained"] or not checkpoint_status(legacy)["trained"]:
+        return sized
+    return legacy
+
+
 def baseline_output_dir(cfg: dict) -> str:
     if cfg.get("baseline_policy_path"):
         return cfg["baseline_policy_path"]
     root = cfg.get("output_root") or "outputs/training"
-    return f"{root}/{cfg.get('task_slug', 'task')}_{cfg.get('policy_type', 'act')}"
+    task_slug = cfg.get("task_slug", "task")
+    policy = cfg.get("policy_type", "act")
+    return _sized_output_dir(root, task_slug, policy, f"local/{task_slug}")
 
 
 def step_output_dir(cfg: dict, step_slug: str) -> str:
@@ -438,7 +661,9 @@ def step_output_dir(cfg: dict, step_slug: str) -> str:
         if s.get("slug") == step_slug and s.get("policy_path"):
             return s["policy_path"]
     root = cfg.get("output_root") or "outputs/training"
-    return f"{root}/{cfg.get('task_slug', 'task')}_{step_slug}_{cfg.get('policy_type', 'act')}"
+    task_slug = cfg.get("task_slug", "task")
+    policy = cfg.get("policy_type", "act")
+    return _sized_output_dir(root, f"{task_slug}_{step_slug}", policy, f"local/{task_slug}_{step_slug}")
 
 
 def step_catalog(cfg: dict) -> list[dict]:
@@ -449,7 +674,8 @@ def step_catalog(cfg: dict) -> list[dict]:
         if slug:
             entry = {"slug": slug,
                      "description": (step.get("description") or "").strip(),
-                     "grasp": bool(step.get("grasp"))}
+                     "grasp": bool(step.get("grasp")),
+                     "reset": bool(step.get("reset"))}
             if step.get("policy_path"):
                 entry["policy_path"] = step["policy_path"]
             timeout_s = step.get("timeout_s")
@@ -634,7 +860,15 @@ def list_trained_checkpoints(cfg: dict, step_slug: str | None = None) -> list[di
                     break
                     
             pretrained_cfg = model_dir / "checkpoints" / "last" / "pretrained_model" / "config.json"
-            dataset_used = f"local/{dir_name.rsplit('_', 1)[0]}" if "_" in dir_name else f"local/{dir_name}"
+            # Fallback guess from the directory name alone (overridden below
+            # once we can read the checkpoint's actual dataset_repo_id): strip
+            # the trailing "_<policy>" and, if present, the "_<N>ep" size
+            # suffix that baseline_output_dir()/step_output_dir() add.
+            guess = dir_name[: -(len(pol_type) + 1)] if dir_name.endswith(f"_{pol_type}") else dir_name
+            head, _, tail = guess.rpartition("_")
+            if tail.endswith("ep") and tail[:-2].isdigit():
+                guess = head
+            dataset_used = f"local/{guess}"
             if pretrained_cfg.exists():
                 try:
                     with open(pretrained_cfg, "r", encoding="utf-8") as f:
@@ -669,13 +903,19 @@ def model_status(cfg: dict) -> dict:
     baseline_status = checkpoint_status(baseline_output_dir(cfg), default_target)
     baseline_status["datasets"] = find_available_datasets(cfg, None)
     baseline_status["checkpoints"] = list_trained_checkpoints(cfg, None)
-    
+    # "pinned": did the user explicitly pick this checkpoint (via the model
+    # modal's radio list), as opposed to just getting whatever the
+    # naming-convention path happens to resolve to. Separate from "trained" —
+    # a pinned checkpoint can still be untrained, and an unpinned one can be.
+    baseline_status["pinned"] = bool(cfg.get("baseline_policy_path"))
+
     steps_dict = {}
     for s in step_catalog(cfg):
         slug = s["slug"]
         s_status = checkpoint_status(step_output_dir(cfg, slug), s.get("train_steps") or default_target)
         s_status["datasets"] = find_available_datasets(cfg, slug)
         s_status["checkpoints"] = list_trained_checkpoints(cfg, slug)
+        s_status["pinned"] = bool(s.get("policy_path"))
         steps_dict[slug] = s_status
 
     return {
@@ -697,6 +937,11 @@ class Orchestrator:
         self.daemon: Daemon | None = None
         self._stop = threading.Event()
         self.results: list[dict] = []
+        # Set when a re-plan proposes the exact same remaining steps as the
+        # attempt that just failed — a second consecutive repeat means the
+        # planner has no other strategy, so run() aborts instead of quietly
+        # burning the re-plan budget on copies of the same failed plan.
+        self._last_replan_was_repeat = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -713,7 +958,8 @@ class Orchestrator:
         lines.append("\nAVAILABLE SKILLS (use ONLY these skill IDs):")
         for s in step_catalog(cfg):
             grasp_type = " [ends by closing the gripper on the object]" if s.get("grasp") else ""
-            lines.append(f"- '{s['slug']}': {s['description']}{grasp_type}")
+            reset_type = " [RESET — returns the arm to a known/safe position from any state]" if s.get("reset") else ""
+            lines.append(f"- '{s['slug']}': {s['description']}{grasp_type}{reset_type}")
         lines.append("")
         lines.append(PLANNER_OUTPUT_REASONING if cfg.get("planner_reasoning", True)
                      else PLANNER_OUTPUT_TERSE)
@@ -759,7 +1005,8 @@ class Orchestrator:
 
     def _build_replan_context(self, instruction: str, step: str, tag: str,
                               reason: str, replans: int, max_replans: int,
-                              has_image: bool) -> str:
+                              has_image: bool, insp_reason: str = "",
+                              conflict: str = "") -> str:
         """Everything the planner needs to decide what to do next.
 
         Deliberately does NOT tell it to "start from the failed step" — that
@@ -778,13 +1025,27 @@ class Orchestrator:
         for i, r in enumerate(self.results, 1):
             verdict = "SUCCESS" if r["success"] else f"FAILED {r['tag']}"
             ended = r.get("reason") or "?"
-            lines.append(f"  {i}. {r['step']} -> {verdict}  (ended: {ended})")
+            insp = r.get("insp_reason")
+            note = f" — {insp}" if insp else ""
+            lines.append(f"  {i}. {r['step']} -> {verdict}  (ended: {ended}){note}")
 
-        lines += ["", f"LAST STEP: '{step}' — should have achieved: {expected}",
-                  f"The inspector reported {tag}."]
+        insp_line = f"The inspector reported {tag}" + (f": {insp_reason}" if insp_reason else ".")
+        lines += ["", f"LAST STEP: '{step}' — should have achieved: {expected}", insp_line]
         if failures_here > 1:
             lines.append(f"This step has now failed {failures_here}x in this run — "
                          "repeating it unchanged is unlikely to work.")
+        # A disagreement between the robot's own sensors and the camera says
+        # far more about what actually went wrong than either verdict alone
+        # (e.g. "the jaws are loaded but the camera sees nothing held" points
+        # at gripping the wrong thing, or at an occluded view — two very
+        # different fixes). Surface it verbatim instead of collapsing it into
+        # the single tag above.
+        if conflict:
+            lines.append(f"EVIDENCE CONFLICT on this step: {conflict}")
+            lines.append("The robot's sensors and the camera disagreed here. Take that into account: "
+                         "the sensors know whether the gripper is loaded, the camera knows what is "
+                         "actually where. Prefer a next step that would resolve the ambiguity or "
+                         "re-establish a known state, rather than blindly repeating the same skill.")
         note = self._gripper_note()
         if note:
             lines.append(note)
@@ -836,24 +1097,42 @@ class Orchestrator:
                 max_tokens=2048
             )
 
-        try:
-            reply = ask(with_image=True)
-        except Exception as e:
-            if not images_b64:
-                raise
-            self.emit("log", level="WARN",
-                      message=f"Plánovač se snímkem selhal ({e}) — zkouším bez snímku "
-                              "(model plánovače asi neumí obraz).")
-            reply = ask(with_image=False)
+        # A malformed reply (no parseable JSON array anywhere) used to kill
+        # the whole run on the spot — one bad completion from a small local
+        # model (truncated output, stray prose with no brackets) shouldn't
+        # cost the entire trial when the other two layers (daemon, inspector)
+        # already get a retry for their equivalent hiccups. One retry, with
+        # an explicit correction appended so it's not just asking the same
+        # question again and hoping for a different answer.
+        original_instruction = instruction
+        reply = ""
+        for attempt in (1, 2):
+            try:
+                reply = ask(with_image=True)
+            except Exception as e:
+                if not images_b64:
+                    raise
+                self.emit("log", level="WARN",
+                          message=f"Plánovač se snímkem selhal ({e}) — zkouším bez snímku "
+                                  "(model plánovače asi neumí obraz).")
+                reply = ask(with_image=False)
 
-        reasoning = parse_reasoning_sentence(reply)
-        plan = parse_json_array(reply)
-        if plan is None:
-            raise RuntimeError(f"CEO nevrátil platné JSON pole: {reply[:200]}")
-        self.emit("log", level="INFO", message=f"Surový plán: {plan}")
-        if reasoning:
-            self.emit("log", level="INFO", message=f"Odůvodnění CEO: „{reasoning}“")
-        return plan, reasoning
+            reasoning = parse_reasoning_sentence(reply)
+            plan = parse_json_array(reply)
+            self.emit("log", level="INFO", message=f"Surový plán: {plan}")
+            if reasoning:
+                self.emit("log", level="INFO", message=f"Odůvodnění CEO: „{reasoning}“")
+            if plan is not None:
+                return plan, reasoning
+
+            if attempt == 2:
+                raise RuntimeError(f"CEO nevrátil platné JSON pole ani napodruhé: {reply[:200]}")
+            self.emit("log", level="WARN",
+                      message="CEO nevrátil platné JSON pole — zkouším znovu s upřesněním formátu.")
+            instruction = (original_instruction +
+                          "\n\nYour previous reply did not contain a valid JSON array of skill ID "
+                          "strings. Follow OUTPUT FORMAT exactly: end your reply with ONLY a JSON "
+                          "array on the last line, e.g. [\"skill_a\"] or [\"DONE\"].")
 
     def _resolve_plan(self, raw_plan: list[str]) -> list[str]:
         """Drop hallucinated IDs and expand the goal into its ordered steps.
@@ -894,7 +1173,25 @@ class Orchestrator:
     # -- layer 3: the inspector ───────────────────────────────────────────
     @staticmethod
     def _read_verdict(raw_reply: str) -> tuple[bool, str]:
-        """Map the inspector's reply onto a verdict."""
+        """Map the inspector's reply onto a verdict.
+
+        Reads the tag from the reply's LAST line — its final statement, same
+        "read from the end" principle as parse_json_array() — since the reply
+        now leads with a REASONING line (see VERIFY_PROMPT_RULES) that would
+        break the old exact-match "the whole reply == SUCCESS" check. Falls
+        back to scanning the whole text in case the model ignores the
+        two-line format and puts the tag somewhere else.
+        """
+        lines = [l.strip() for l in raw_reply.splitlines() if l.strip()]
+        last_upper = (lines[-1] if lines else raw_reply).upper()
+        for tag in FAILURE_TAGS:
+            if tag.upper() in last_upper:
+                return False, tag
+        if UNCLEAR_TAG.upper() in last_upper:
+            return False, UNCLEAR_TAG
+        if last_upper.strip('."\'*` ') == "SUCCESS":
+            return True, "SUCCESS"
+
         upper = raw_reply.upper()
         for tag in FAILURE_TAGS:
             if tag.upper() in upper:
@@ -905,7 +1202,20 @@ class Orchestrator:
             return True, "SUCCESS"
         return False, "[unknown_failure]"
 
-    def _verify(self, step_slug: str, images_b64: list[str], plan: list[str] | None = None, step_index: int = 0) -> tuple[bool, str]:
+    def _verify(self, step_slug: str, images_b64: list[str], plan: list[str] | None = None,
+                step_index: int = 0, stop_reason: str = "") -> tuple[bool, str, str, bool | None, list[str]]:
+        """(success, tag, reasoning, goal_satisfied, images_used).
+
+        goal_satisfied is the inspector's read on the OVERALL task, not this
+        step: True/False when it answered, None when it didn't (see
+        parse_goal_flag) — callers must treat None as "no information".
+
+        images_used is returned because an [unclear] verdict makes this method
+        take a FRESH snapshot and re-ask; the caller must keep that newer
+        photo, otherwise everything downstream (the re-plan context, the
+        planner's own vision) would keep reasoning about the stale frame that
+        was already judged too ambiguous to decide on.
+        """
         cfg = self.cfg
         catalog = step_catalog(cfg)
         step_cfg = next((s for s in catalog if s["slug"] == step_slug), {})
@@ -927,6 +1237,8 @@ class Orchestrator:
                 p_cfg = next((s for s in catalog if s["slug"] == p_slug), {})
                 p_desc = p_cfg.get("description") or p_slug
                 grasp_note = " [grasps object]" if p_cfg.get("grasp") else " [positioning/approach, no grasp]"
+                if p_cfg.get("reset"):
+                    grasp_note += " [RESET skill]"
                 if i - 1 < step_index:
                     status = "[COMPLETED PREVIOUSLY]"
                 elif i - 1 == step_index:
@@ -939,12 +1251,42 @@ class Orchestrator:
             lines.append("TASK SKILLS CATALOG (ALL STEPS IN TASK):")
             for i, s in enumerate(catalog, 1):
                 grasp_note = " [grasps object]" if s.get("grasp") else " [positioning/approach, no grasp]"
+                if s.get("reset"):
+                    grasp_note += " [RESET skill]"
                 lines.append(f"  {i}. '{s['slug']}' ({s['description']}){grasp_note}")
             lines.append("")
 
         total_steps = len(plan) if plan else len(catalog)
         lines.append(f"STEP JUST EXECUTED (STEP {step_index + 1} OF {total_steps}): '{step_slug}' ({step_desc})")
         lines.append(f"EXPECTED OUTCOME TO VERIFY NOW: {expected}\n")
+
+        # Physical grounding for the photo — same signals the CEO planner
+        # already gets (see _gripper_note), just never previously reached the
+        # inspector even though it is the one deciding SUCCESS/FAILED. A step
+        # that ended by TIMEOUT never got a completion signal from the
+        # controller (no Protocol A settle, no Protocol B grasp) — the photo
+        # was taken at an arbitrary clock tick, possibly mid-motion, so a
+        # "looks about right" read deserves less confidence than for a step
+        # that ended because the robot itself signaled it was done.
+        evidence_lines = []
+        if stop_reason:
+            ended_on_signal = ("Protokol A" in stop_reason) or ("Protokol B" in stop_reason)
+            evidence_lines.append(f"- Step ended because: {stop_reason}.")
+            if not ended_on_signal:
+                evidence_lines.append(
+                    "  This was NOT a completion signal from the robot/controller (no settling, "
+                    "no grasp detected) — just the clock running out. The photo may show the arm "
+                    "mid-motion rather than at rest. Weigh 'looks approximately right' accordingly.")
+        gripper_note = self._gripper_note()
+        if gripper_note:
+            evidence_lines.append(f"- {gripper_note}")
+        if evidence_lines:
+            lines.append("PHYSICAL SENSOR EVIDENCE (from the robot, not the photo — use it to "
+                         "disambiguate what the camera can't show, e.g. an object hidden behind "
+                         "the gripper):")
+            lines.extend(evidence_lines)
+            lines.append("")
+
         lines.append(VERIFY_PROMPT_RULES)
 
         prompt = "\n".join(lines)
@@ -956,6 +1298,10 @@ class Orchestrator:
             self.emit("log", level="INFO",
                       message=f"VLM inspektor ({model}) odpovídá: „{raw_reply}\"")
             success, tag = self._read_verdict(raw_reply)
+            reasoning = parse_reasoning_sentence(raw_reply)
+            goal_done = parse_goal_flag(raw_reply)
+            if reasoning:
+                self.emit("log", level="INFO", message=f"Odůvodnění inspektora: „{reasoning}“")
 
             # [unclear] means "I cannot tell from this photo", not "it failed".
             # A fresh snapshot is far cheaper than a re-plan, so take one and
@@ -971,7 +1317,7 @@ class Orchestrator:
                 break
             images_b64 = fresh
             self.emit("snapshot", images=fresh, step=step_slug)
-        return success, tag
+        return success, tag, reasoning, goal_done, images_b64
 
     # -- the loop ----------------------------------------------------------
     def run(self, instruction: str) -> dict:
@@ -997,6 +1343,10 @@ class Orchestrator:
                     self.emit("log", level="WARN",
                               message=f"Výchozí snímek scény se nepodařilo pořídit ({e}) — "
                                       "plánuji bez něj.")
+                    # Drop the process, not just the reference — an orphaned
+                    # daemon keeps holding the serial port and the cameras.
+                    if self.daemon:
+                        self.daemon.stop()
                     self.daemon = None
 
             raw_plan, ceo_reasoning = self._create_plan(
@@ -1025,6 +1375,7 @@ class Orchestrator:
                 step_cfg = next((s for s in step_catalog(cfg) if s["slug"] == step), {})
                 policy_path = step_output_dir(cfg, step)
                 is_grasp = bool(step_cfg.get("grasp"))
+                is_reset = bool(step_cfg.get("reset"))
                 # Per-step timeout written by compute_step_timeouts.py;
                 # falls back to episode_time_s when the script hasn't run.
                 step_timeout = float(
@@ -1049,14 +1400,22 @@ class Orchestrator:
                             self.emit("log", level="INFO",
                                       message=f"Hot-swap modelu na krok '{step}'.")
                             self.daemon.set_policy(policy_path)
-                        reason = self.daemon.run_task(step, step_timeout, is_grasp)
+                        reason = self.daemon.run_task(step, step_timeout, is_grasp, is_reset)
                         break
-                    except RuntimeError as e:
+                    except (RuntimeError, OSError) as e:
+                        # OSError (e.g. BrokenPipeError from _send()'s
+                        # stdin.write()) is a real daemon-communication
+                        # failure of the exact same "wedged serial port"
+                        # shape as the RuntimeError this loop was built to
+                        # retry — just raised by a different code path (the
+                        # process dying between _send()'s liveness poll and
+                        # the write itself) — so it needs the same retry.
                         if attempt == 2:
                             raise
                         self.emit("log", level="ERROR",
                                   message=f"Daemon selhal ({e}) — restartuji a zkouším "
                                           f"krok '{step}' znovu.")
+                        self.daemon.stop()
                         self.daemon = None
                 self.emit("step", index=index, step=step, phase="executed", reason=reason)
 
@@ -1066,15 +1425,17 @@ class Orchestrator:
                 if images:
                     self.emit("snapshot", images=images, step=step)
 
-                # Physical validation: for grasp steps the current rise
-                # (protocol B) is mandatory and outranks the vision model.
-                #
-                # But only when the sensor demonstrably works. If no non-zero
-                # current has been seen even once in this run, a flat zero
-                # means "no reading", not "nothing grasped" — enforcing the
-                # check then fails every grasp step and burns the whole
-                # re-plan budget on a run that cannot possibly succeed. In
-                # that case defer to the inspector and say so loudly.
+                # ── Evidence fusion ──────────────────────────────────────
+                # Both channels are always evaluated; fuse_evidence() combines
+                # them (see its docstring for why neither may veto the other).
+                phys, phys_note = PHYS_NONE, ""
+
+                # Protocol B applies to grasp steps — but only when the sensor
+                # demonstrably works. If no non-zero current has been seen even
+                # once in this run, a flat zero means "no reading", not
+                # "nothing grasped"; enforcing it then fails every grasp step
+                # and burns the whole re-plan budget on a run that cannot
+                # possibly succeed. In that case fall back to vision and say so.
                 grasp_check_applies = is_grasp and cfg.get("protocol_b_enabled", True)
                 if grasp_check_applies and not self.daemon.load_ever_nonzero:
                     grasp_check_applies = False
@@ -1083,34 +1444,97 @@ class Orchestrator:
                                       "nevrací, takže fyzické ověření úchopu nelze použít. "
                                       "Krok posuzuje jen inspektor. Zkontroluj protokol B "
                                       "a čtení registru zátěže.")
-                protocol_b_ok = not grasp_check_applies or ("Protokol B" in (reason or ""))
+                if grasp_check_applies:
+                    if "Protokol B" in (reason or ""):
+                        # Firing already required the rise to be sustained AND
+                        # settled (see PROTOCOL_B_* in inference_daemon.py), so
+                        # this direction is the strong inference.
+                        phys, phys_note = PHYS_CONFIRM, "protokol B: čelisti registrují sevření"
+                    else:
+                        # NOT firing is the weak inference: it also happens when
+                        # the threshold is merely mis-tuned. If the final rise
+                        # landed just short of the limit, that is a measurement
+                        # too close to call, not a denial — say so and let the
+                        # camera decide instead of manufacturing a failure out
+                        # of a threshold this project has already had to retune
+                        # several times.
+                        phys, phys_note = PHYS_DENY, "protokol B: zátěž gripperu nepřešla práh nárůstu"
+                        limit = float(cfg.get("protocol_b_limit_ma", 250) or 0)
+                        band = limit * float(cfg.get("protocol_b_deadband_frac", 0.25) or 0)
+                        if limit > 0 and band > 0 and self.daemon.last_load is not None:
+                            rise = self.daemon.last_load - (self.daemon.last_baseline or 0.0)
+                            if rise >= limit - band:
+                                phys = PHYS_UNCLEAR
+                                phys_note = (f"nárůst {rise:.0f} je těsně pod prahem {limit:.0f} "
+                                             f"(pásmo nejistoty {band:.0f})")
+                elif is_reset and cfg.get("protocol_a_enabled", True):
+                    if "Protokol A" in (reason or ""):
+                        phys, phys_note = PHYS_CONFIRM, "protokol A: klouby se zastavily"
+                    # A reset that timed out proves nothing either way — the
+                    # arm may still be home — so it stays PHYS_NONE and the
+                    # inspector decides alone.
 
-                if not protocol_b_ok:
-                    success, tag = False, "[object_missed]"
-                    self.emit("log", level="WARN",
-                              message=f"Fyzické ověření úchopu selhalo — krok '{step}' neaktivoval "
-                                      f"zátěžový protokol B (zátěž nepřešla práh). Označeno jako [object_missed].")
-                elif cfg.get("skip_inspector"):
-                    success, tag = True, "SKIPPED"
-                    self.emit("log", level="WARN",
-                              message="Inspektor vypnutý (skip_inspector) — krok "
-                                      "považován za úspěšný bez ověření.")
+                # Visual channel. SKIPPED (inspector deliberately off, the
+                # "physical only" ablation) is deliberately distinct from
+                # NOIMG (camera broken) — the first is an experimental
+                # condition, the second is a real fault.
+                v_success, v_tag, v_reason, goal_done = False, "", "", None
+                if cfg.get("skip_inspector"):
+                    vis = "SKIPPED"
                 elif images:
-                    success, tag = self._verify(step, images, plan=plan, step_index=index)
+                    # `images` is reassigned on purpose: on an [unclear]
+                    # verdict _verify() re-snapshots, and the re-plan below
+                    # must reason about that fresher frame, not the stale one.
+                    v_success, v_tag, v_reason, goal_done, images = self._verify(
+                        step, images, plan=plan, step_index=index, stop_reason=reason or "")
+                    vis = "SUCCESS" if v_success else ("UNCLEAR" if v_tag == UNCLEAR_TAG else "FAIL")
                 else:
-                    # Missing camera frame is a genuine failure, not a free pass
-                    success, tag = False, "[no_image]"
+                    vis = "NOIMG"
+
+                success, tag, insp_reason, conflict = fuse_evidence(
+                    phys, phys_note, vis, v_tag, v_reason)
+
+                if tag == "[no_image]":
                     self.emit("log", level="ERROR",
                               message="Snímek z kamery se nepodařilo získat — krok "
                                       "označen jako neúspěšný.")
+                self.emit("log", level="INFO",
+                          message=f"Ověření kroku '{step}': fyzika={phys}"
+                                  + (f" ({phys_note})" if phys_note else "")
+                                  + f", inspektor={vis}"
+                                  + (f" {v_tag}" if v_tag else ""))
+                if conflict:
+                    self.emit("log", level="WARN", message=f"Rozpor důkazů u kroku '{step}': {conflict}")
 
                 att_num = len(self.results) + 1
+                # phys/vis/conflict are recorded per attempt on purpose: the
+                # thesis compares an orchestrated scheme against a monolithic
+                # one, and "how often did the two evidence channels disagree,
+                # and who was right" is exactly the kind of raw data that
+                # cannot be reconstructed afterwards from a single verdict.
                 self.results.append({"attempt": att_num, "replan": replans, "step": step,
-                                     "success": success, "tag": tag, "reason": reason})
+                                     "success": success, "tag": tag, "reason": reason,
+                                     "insp_reason": insp_reason,
+                                     "phys": phys, "vis": vis, "conflict": conflict,
+                                     "goal_seen_by_vlm": goal_done})
                 self.emit("step", index=index, step=step, phase="verified",
-                          success=success, tag=tag, reason=reason, attempt=att_num)
+                          success=success, tag=tag, reason=reason, attempt=att_num,
+                          insp_reason=insp_reason, conflict=conflict)
 
                 if success:
+                    # The inspector is the layer with eyes, so it is also the
+                    # one best placed to notice the overall goal is already
+                    # satisfied — possibly earlier than the plan expected (a
+                    # step can achieve the end state as a side effect). Only
+                    # honoured when this step also succeeded, so a single
+                    # confused "GOAL: yes" cannot end a run on its own, and
+                    # recorded in the run summary so these runs stay
+                    # auditable/filterable when the results are analysed.
+                    if goal_done:
+                        self.emit("log", level="INFO",
+                                  message="Inspektor potvrdil splnění celkového cíle — běh končí, "
+                                          "aniž by se dojel zbytek plánu.")
+                        return self._finish(True, started, goal_early_exit=True)
                     index += 1
                     continue
 
@@ -1122,9 +1546,11 @@ class Orchestrator:
                 self.emit("log", level="WARN",
                           message=f"Krok '{step}' selhal ({tag}) — re-plán {replans}/{max_replans}.")
                 self.emit("state", state="PLANNING")
+                previous_remaining = plan[index:]
                 context = self._build_replan_context(
                     instruction, step, tag, reason or "", replans, max_replans,
-                    has_image=bool(images))
+                    has_image=bool(images), insp_reason=insp_reason or "",
+                    conflict=conflict)
                 raw_plan, ceo_reasoning = self._create_plan(context, images_b64=images or None)
                 plan = self._resolve_plan(raw_plan)
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
@@ -1137,14 +1563,46 @@ class Orchestrator:
                     raise RuntimeError(
                         f"Plánovač označil stav po selhání kroku '{step}' ({tag}) "
                         "za nezotavitelný.")
+                plan_replaced_by_fallback = False
                 if not plan:
                     # Robust fallback: retry from the failed step onwards
                     all_slugs = [s["slug"] for s in step_catalog(cfg)]
                     if step in all_slugs:
                         plan = all_slugs[all_slugs.index(step):]
+                        plan_replaced_by_fallback = True
                         self.emit("log", level="INFO",
                                   message=f"Záložní re-plán: opakuji od kroku '{step}' -> {plan}")
-                self.emit("plan", steps=plan, replan=replans)
+
+                # Code-level loop guard: a re-plan only counts as a genuine new
+                # strategy if it actually differs from what was just tried and
+                # failed. A small local planner can (and in practice does)
+                # propose the exact same remaining steps again despite the
+                # prompt saying that's unlikely to work — prompt wording alone
+                # doesn't reliably fix that, so this is a model-agnostic
+                # backstop: one repeat is tolerated (logged), a second one in
+                # a row ends the run with a clear reason instead of silently
+                # spending the whole re-plan budget on copies of one attempt.
+                if plan == previous_remaining:
+                    if self._last_replan_was_repeat:
+                        raise RuntimeError(
+                            f"Plánovač navrhl u kroku '{step}' podruhé za sebou identický plán "
+                            f"po selhání ({tag}) — nemá zjevně jinou strategii k dispozici, běh "
+                            "ukončen místo tichého opakování.")
+                    self._last_replan_was_repeat = True
+                    self.emit("log", level="WARN",
+                              message=f"Plánovač po selhání navrhl stejný plán jako předtím pro "
+                                      f"krok '{step}' — beru na vědomí; při dalším identickém "
+                                      "opakování běh ukončím.")
+                else:
+                    self._last_replan_was_repeat = False
+
+                # Only re-emit when the fallback above actually replaced the
+                # plan. The planner's own plan was already emitted (with its
+                # reasoning) right after _resolve_plan, so emitting again
+                # unconditionally sent the UI a second, identical 'plan' event
+                # per re-plan — pure duplication in the live view.
+                if plan_replaced_by_fallback:
+                    self.emit("plan", steps=plan, replan=replans)
                 index = 0
                 if not plan:
                     raise RuntimeError("Re-plán vrátil prázdný plán.")
@@ -1168,11 +1626,17 @@ class Orchestrator:
                 self.daemon.stop()
                 self.daemon = None
 
-    def _finish(self, success: bool, started: float, error: str = "") -> dict:
+    def _finish(self, success: bool, started: float, error: str = "",
+                goal_early_exit: bool = False) -> dict:
         summary = {
             "success": success,
             "error": error,
             "duration_s": round(time.time() - started, 1),
+            # True when the run ended because the inspector reported the
+            # overall goal already satisfied, rather than by walking the plan
+            # to its end — kept in the raw data so these runs can be told
+            # apart (or filtered out) during analysis.
+            "goal_early_exit": goal_early_exit,
             "steps": self.results,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")
@@ -1189,8 +1653,7 @@ class Orchestrator:
             payload = dict(summary)
             payload["config"] = {k: v for k, v in self.cfg.items() if k != "steps"}
             payload["catalog"] = step_catalog(self.cfg)
-            (runs / name).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                                     encoding="utf-8")
+            atomic_write_text(runs / name, json.dumps(payload, indent=2, ensure_ascii=False))
             self.emit("log", level="INFO", message=f"Záznam běhu uložen: runs/{name}")
         except Exception as e:
             self.emit("log", level="WARN", message=f"Záznam běhu se nepodařilo uložit: {e}")
