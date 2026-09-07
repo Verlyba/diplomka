@@ -375,6 +375,84 @@ def fuse_evidence(phys: str, phys_note: str, vis: str,
         f"Fyzicky vyvráceno ({phys_note}); inspektor nerozhodl ({v_reason})."), ""
 
 
+# ── Grounded plan check (the cheap layer auditing the expensive one) ────────
+
+def plan_state_conflict(plan: list[str], catalog: list[dict], holding: bool | None) -> str:
+    """Does the plan's FIRST step contradict what the load sensor reports?
+
+    The planner is the slow, expensive, and — being a small local LLM — the
+    least reliable layer of the three: it is the one layer that answers from a
+    prompt rather than from a measurement, and it has been observed to
+    contradict evidence written verbatim in its own context. Everything below
+    it, on the other hand, is cheap and measured. So the cheap side gets to
+    audit the expensive side, deterministically, before any policy is loaded.
+
+    Only ONE bit of physical state is used — are the jaws loaded or not — and
+    only against metadata the step catalog already carries (`grasp`, `reset`,
+    and the order the steps are listed in). Nothing here knows what the task
+    is, what the objects are, or what the skills are called.
+
+    Two conflicts are detected, both of them "the plan starts from a state the
+    robot is demonstrably not in":
+
+      1. holding something, yet the plan opens with a grasping skill — the
+         planner is about to grasp what it is already holding;
+      2. holding nothing, yet the plan opens at a skill listed AFTER the last
+         grasping skill — i.e. a transport/release phase, which is only
+         meaningful with an object in hand.
+
+    Deliberately NOT flagged: holding something while the plan opens with a
+    pre-grasp skill. That reading depends far more heavily on catalog order
+    being semantically exact, and it is the case a mis-tuned holding threshold
+    would fire on for every single initial plan — a noisy check that cries
+    wolf is worse than no check.
+
+    Returns "" when consistent (or when nothing can be claimed), otherwise one
+    English sentence naming the conflict — it is written for the planner's own
+    context, since that is where it is sent back.
+    """
+    if holding is None or not plan:
+        return ""
+
+    order = {s["slug"]: i for i, s in enumerate(catalog)}
+    first = plan[0].strip()
+    idx = order.get(first)
+    if idx is None:
+        # DONE/ABORT sentinels and anything unrecognised: no step to judge.
+        return ""
+    first_cfg = catalog[idx]
+    if first_cfg.get("reset"):
+        # A RESET skill is by definition valid from any state — that is the
+        # whole reason the planner is told it may schedule one at any point.
+        return ""
+
+    grasp_indices = [i for i, s in enumerate(catalog) if s.get("grasp")]
+    if not grasp_indices:
+        # No grasping phase in this task at all, so gripper load says nothing
+        # about which phase the plan should start from.
+        return ""
+
+    if holding and first_cfg.get("grasp"):
+        return (f"the robot's gripper is currently loaded (it is holding something), but your "
+                f"plan starts with the grasping skill '{first}'")
+    if not holding and idx > grasp_indices[-1]:
+        return (f"the robot's gripper is currently empty (it is holding nothing), but your plan "
+                f"starts with '{first}', a skill that comes after the grasping phase and "
+                f"therefore assumes an object is already held")
+    return ""
+
+
+PLAN_STATE_CORRECTION = (
+    "STATE CHECK — your previous answer {plan} contradicts the robot's own gripper load sensor: "
+    "{conflict}.\n"
+    "That reading is a direct physical measurement, not an interpretation of the photo, so the "
+    "phase you started the plan from is probably not the phase the robot is actually in. Re-read "
+    "ROBOT STATE and PROGRESS THIS RUN and answer again, starting from the state actually "
+    "reported. If you are convinced your original plan is right despite the sensor, repeat it "
+    "unchanged and say in your REASONING line why the sensor should be disregarded."
+)
+
+
 # ── The inference daemon, seen from the orchestrator side ───────────────────
 
 class Daemon:
@@ -944,6 +1022,13 @@ class Orchestrator:
         # planner has no other strategy, so run() aborts instead of quietly
         # burning the re-plan budget on copies of the same failed plan.
         self._last_replan_was_repeat = False
+        # One record per plan the CEO produced: what it planned, what the load
+        # sensor said at that moment, whether the two contradicted each other,
+        # and whether a targeted correction changed the planner's mind. Raw
+        # thesis data — "how often does the slow layer contradict a physical
+        # measurement, and does one sentence fix it" cannot be reconstructed
+        # afterwards from the final plan alone. See plan_state_conflict().
+        self.plan_checks: list[dict] = []
 
     def stop(self) -> None:
         self._stop.set()
@@ -988,6 +1073,39 @@ class Orchestrator:
 
         holding_str = "something appears to be held" if rise >= holding_limit else "nothing appears to be held"
         return f"ROBOT STATE: gripper load {load:.0f}, {rise:+.0f} vs. idle — {holding_str}"
+
+    def _holding_state(self) -> bool | None:
+        """Is the gripper loaded? True / False / None = cannot be claimed.
+
+        Deliberately stricter than the phrasing _gripper_note() puts in the
+        prompt: that one only has to describe a reading, this one is used to
+        contradict the planner, so it must stay silent whenever the reading
+        isn't worth contradicting anyone over.
+
+          - the sensor never returned a non-zero value in this run: a flat
+            zero means "not reading", not "empty" (same reasoning as the
+            protocol B fallback in run());
+          - the rise sits inside a dead-band around the threshold: reuses
+            protocol_b_deadband_frac rather than inventing a second number,
+            since both are relative uncertainty bands on the same load
+            sensor. TODO(uživatel): if measurements show the two thresholds
+            need different bands, split this into its own config key.
+          - gripper_state_in_context is off: the planner is then not shown the
+            gripper state at all, so judging its plan by evidence it was never
+            given would quietly break that ablation.
+        """
+        if not self.cfg.get("gripper_state_in_context", True):
+            return None
+        if self.daemon is None or self.daemon.last_load is None:
+            return None
+        if not self.daemon.load_ever_nonzero:
+            return None
+        limit = float(self.cfg.get("holding_limit_ma", 20))
+        rise = self.daemon.last_load - (self.daemon.last_baseline or 0.0)
+        band = abs(limit) * float(self.cfg.get("protocol_b_deadband_frac", 0.25) or 0)
+        if band > 0 and abs(rise - limit) < band:
+            return None
+        return rise >= limit
 
     def _build_initial_context(self, instruction: str, has_image: bool) -> str:
         lines = [f"GOAL: {instruction}", "",
@@ -1172,6 +1290,61 @@ class Orchestrator:
                           message=f"Neznámé ID kroku '{item}' — zahozeno.")
         return resolved
 
+    def _plan_grounded(self, context: str, images: list[str] | None) -> tuple[list[str], str]:
+        """Ask the CEO for a plan, then check it against the load sensor.
+
+        The point of the split-speed architecture is that the layers below the
+        planner are cheap and measured; this is where that gets spent on the
+        planner itself. A plan that starts from a phase the robot is
+        demonstrably not in costs a whole step execution plus an inspector
+        call plus a re-plan to discover at runtime — one extra planner call to
+        catch it beforehand is the cheaper trade even though the planner is
+        the slow layer.
+
+        The correction is a re-ask, never an override: the planner may repeat
+        its plan and it will be executed. A deterministic rule that silently
+        rewrites the plan would (a) be able to deadlock the run on a
+        mis-tuned threshold, and (b) destroy the very measurement this is
+        interesting for — how often the planner contradicts a measurement, and
+        whether being told so changes its answer.
+        """
+        raw_plan, reasoning = self._create_plan(context, images_b64=images)
+        plan = self._resolve_plan(raw_plan)
+
+        # skip_planner is the fixed-order ablation — there is no planner to
+        # correct, and re-asking would return the same hard-coded list.
+        if not self.cfg.get("plan_state_check", True) or self.cfg.get("skip_planner"):
+            return plan, reasoning
+
+        holding = self._holding_state()
+        conflict = plan_state_conflict(plan, step_catalog(self.cfg), holding)
+        record = {"plan": list(plan), "holding": holding, "conflict": conflict,
+                  "corrected": False}
+
+        if conflict:
+            self.emit("log", level="WARN",
+                      message=f"Plán CEO odporuje čidlu zátěže: {conflict} — žádám o opravu.")
+            corrected_context = (
+                context + "\n\n" +
+                PLAN_STATE_CORRECTION.format(plan=json.dumps(plan, ensure_ascii=False),
+                                             conflict=conflict))
+            raw_plan, reasoning2 = self._create_plan(corrected_context, images_b64=images)
+            plan2 = self._resolve_plan(raw_plan)
+            conflict2 = plan_state_conflict(plan2, step_catalog(self.cfg), holding)
+            record.update({"corrected": True, "plan_after": list(plan2),
+                           "conflict_after": conflict2})
+            if conflict2:
+                self.emit("log", level="WARN",
+                          message="CEO i po upozornění trvá na plánu, který odporuje čidlu — "
+                                  "spouštím ho tak, jak ho navrhl, a zaznamenávám to do běhu.")
+            else:
+                self.emit("log", level="INFO",
+                          message="CEO po upozornění navrhl plán odpovídající stavu gripperu.")
+            plan, reasoning = plan2, (reasoning2 or reasoning)
+
+        self.plan_checks.append(record)
+        return plan, reasoning
+
     # -- layer 3: the inspector ───────────────────────────────────────────
     @staticmethod
     def _read_verdict(raw_reply: str) -> tuple[bool, str]:
@@ -1328,6 +1501,7 @@ class Orchestrator:
         replans = 0
         started = time.time()
         self.results = []
+        self.plan_checks = []
 
         try:
             self.emit("state", state="PLANNING")
@@ -1351,10 +1525,9 @@ class Orchestrator:
                         self.daemon.stop()
                     self.daemon = None
 
-            raw_plan, ceo_reasoning = self._create_plan(
+            plan, ceo_reasoning = self._plan_grounded(
                 self._build_initial_context(instruction, bool(initial_images)),
-                images_b64=initial_images or None)
-            plan = self._resolve_plan(raw_plan)
+                initial_images or None)
             self.emit("plan", steps=plan, reasoning=ceo_reasoning)
 
             if plan == [PLAN_DONE]:
@@ -1553,8 +1726,7 @@ class Orchestrator:
                     instruction, step, tag, reason or "", replans, max_replans,
                     has_image=bool(images), insp_reason=insp_reason or "",
                     conflict=conflict)
-                raw_plan, ceo_reasoning = self._create_plan(context, images_b64=images or None)
-                plan = self._resolve_plan(raw_plan)
+                plan, ceo_reasoning = self._plan_grounded(context, images or None)
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
 
                 if plan == [PLAN_DONE]:
@@ -1640,6 +1812,9 @@ class Orchestrator:
             # apart (or filtered out) during analysis.
             "goal_early_exit": goal_early_exit,
             "steps": self.results,
+            # Additive to the run format: existing analyses key on the fields
+            # above and are unaffected. See plan_state_conflict().
+            "plan_checks": self.plan_checks,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")
         self.emit("finished", **summary)
