@@ -442,14 +442,62 @@ def plan_state_conflict(plan: list[str], catalog: list[dict], holding: bool | No
     return ""
 
 
-PLAN_STATE_CORRECTION = (
-    "STATE CHECK — your previous answer {plan} contradicts the robot's own gripper load sensor: "
-    "{conflict}.\n"
-    "That reading is a direct physical measurement, not an interpretation of the photo, so the "
-    "phase you started the plan from is probably not the phase the robot is actually in. Re-read "
-    "ROBOT STATE and PROGRESS THIS RUN and answer again, starting from the state actually "
-    "reported. If you are convinced your original plan is right despite the sensor, repeat it "
-    "unchanged and say in your REASONING line why the sensor should be disregarded."
+def plan_repeat_conflict(plan: list[str], failed_plans: list[tuple[int, list[str]]],
+                         progress: int) -> str:
+    """Has this exact plan already been tried and failed from this same state?
+
+    The second deterministic audit of the planner, and the one that costs
+    nothing at all to run: it needs no sensor, only this run's own history.
+
+    A small local planner asked "that failed, what now" repeatedly tends to
+    answer with what it already answered — the prompt says repeating an
+    unchanged attempt is unlikely to work, and it repeats it anyway. Comparing
+    only against the attempt that just failed (the original loop guard) misses
+    the cycling case, where the planner alternates between two plans and every
+    single re-plan differs from its immediate predecessor while the pair as a
+    whole makes no progress at all.
+
+    `failed_plans` holds one `(progress, steps)` entry per plan that was
+    executed and failed, where `progress` is how many steps had already
+    succeeded in this run at that moment. That count is the state key: it is
+    the only "the world has changed" signal available without knowing anything
+    about the task. If something — anything, a RESET included — succeeded
+    since, the robot is demonstrably not in the situation the old plan failed
+    in, and re-proposing it is legitimate recovery rather than a loop. Only an
+    identical plan proposed after a run of pure failures is flagged.
+
+    That threshold is deliberately conservative and leaves one loop shape
+    uncovered: reset-retry cycling (reset succeeds, the same forward plan
+    fails, repeat) always has a success in between, so it never matches. It
+    would take treating RESET successes as "no progress" to catch, which would
+    flag the very first reset-then-retry — the textbook correct recovery — as
+    a loop. A check that cries wolf on the recommended behaviour is worse than
+    one with a blind spot; the re-plan budget still bounds that case.
+
+    Returns "" when the plan is new, otherwise one English sentence written for
+    the planner's own context, since that is where it is sent back.
+    """
+    steps = [s.strip() for s in plan if s.strip()]
+    if not steps or (len(steps) == 1 and steps[0].upper() in (PLAN_DONE, PLAN_ABORT)):
+        return ""
+    for prev_progress, prev_steps in failed_plans:
+        if prev_progress == progress and list(prev_steps) == steps:
+            return (f"the sequence {json.dumps(steps, ensure_ascii=False)} has already been "
+                    f"executed earlier in this run and failed, and nothing has completed "
+                    f"successfully since then — the robot is still in the situation that plan "
+                    f"already failed in, so running it again repeats a failed attempt instead of "
+                    f"trying a different way to reach the goal")
+    return ""
+
+
+PLAN_CORRECTION = (
+    "PLAN CHECK — your previous answer {plan} contradicts what this system has actually "
+    "observed:\n{findings}\n"
+    "These are direct observations — a sensor reading, or this run's own execution history — not "
+    "interpretations of the photo. Re-read ROBOT STATE and PROGRESS THIS RUN and answer again, "
+    "starting from the situation actually reported. If you are convinced your original plan is "
+    "right anyway, repeat it unchanged and say in your REASONING line why the observation should "
+    "be disregarded."
 )
 
 
@@ -1017,17 +1065,21 @@ class Orchestrator:
         self.daemon: Daemon | None = None
         self._stop = threading.Event()
         self.results: list[dict] = []
-        # Set when a re-plan proposes the exact same remaining steps as the
-        # attempt that just failed — a second consecutive repeat means the
-        # planner has no other strategy, so run() aborts instead of quietly
-        # burning the re-plan budget on copies of the same failed plan.
+        # Set when a re-plan proposes a plan that already failed from this same
+        # state — a second consecutive repeat means the planner has no other
+        # strategy, so run() aborts instead of quietly burning the re-plan
+        # budget on copies of the same failed plan.
         self._last_replan_was_repeat = False
+        # One (progress, steps) entry per plan that was executed and failed;
+        # the key plan_repeat_conflict() matches new proposals against.
+        self._failed_plans: list[tuple[int, list[str]]] = []
         # One record per plan the CEO produced: what it planned, what the load
-        # sensor said at that moment, whether the two contradicted each other,
-        # and whether a targeted correction changed the planner's mind. Raw
-        # thesis data — "how often does the slow layer contradict a physical
-        # measurement, and does one sentence fix it" cannot be reconstructed
-        # afterwards from the final plan alone. See plan_state_conflict().
+        # sensor said at that moment, which of the deterministic audits it
+        # failed (state / repeat), and whether a targeted correction changed
+        # the planner's mind. Raw thesis data — "how often does the slow layer
+        # contradict what was already measured or already tried, and does one
+        # sentence fix it" cannot be reconstructed afterwards from the final
+        # plan alone. See plan_state_conflict() and plan_repeat_conflict().
         self.plan_checks: list[dict] = []
 
     def stop(self) -> None:
@@ -1106,6 +1158,14 @@ class Orchestrator:
         if band > 0 and abs(rise - limit) < band:
             return None
         return rise >= limit
+
+    def _progress(self) -> int:
+        """How many steps have completed successfully in this run so far.
+
+        The state key of plan_repeat_conflict(): the coarsest possible "has
+        anything changed since" signal that needs no knowledge of the task.
+        """
+        return sum(1 for r in self.results if r.get("success"))
 
     def _build_initial_context(self, instruction: str, has_image: bool) -> str:
         lines = [f"GOAL: {instruction}", "",
@@ -1290,22 +1350,43 @@ class Orchestrator:
                           message=f"Neznámé ID kroku '{item}' — zahozeno.")
         return resolved
 
+    def _audit_plan(self, plan: list[str], holding: bool | None) -> tuple[str, str]:
+        """The cheap deterministic checks of the planner's answer.
+
+        Returns (state conflict, repeat conflict) — each an empty string when
+        that check passes or is switched off. Both are pure functions over data
+        the orchestrator already has, so running them costs nothing next to the
+        planner call they are auditing.
+        """
+        state = ""
+        if self.cfg.get("plan_state_check", True):
+            state = plan_state_conflict(plan, step_catalog(self.cfg), holding)
+        repeat = ""
+        if self.cfg.get("plan_repeat_check", True):
+            repeat = plan_repeat_conflict(plan, self._failed_plans, self._progress())
+        return state, repeat
+
     def _plan_grounded(self, context: str, images: list[str] | None) -> tuple[list[str], str]:
-        """Ask the CEO for a plan, then check it against the load sensor.
+        """Ask the CEO for a plan, then audit it before anything is loaded.
 
         The point of the split-speed architecture is that the layers below the
         planner are cheap and measured; this is where that gets spent on the
         planner itself. A plan that starts from a phase the robot is
-        demonstrably not in costs a whole step execution plus an inspector
-        call plus a re-plan to discover at runtime — one extra planner call to
-        catch it beforehand is the cheaper trade even though the planner is
-        the slow layer.
+        demonstrably not in, or that was already executed and failed from this
+        very state, costs a whole step execution plus an inspector call plus a
+        re-plan to discover at runtime — one extra planner call to catch it
+        beforehand is the cheaper trade even though the planner is the slow
+        layer.
+
+        At most ONE correction round happens per plan no matter how many checks
+        fired, so the audit can never turn one planner call into three: the
+        findings are collected and sent back together.
 
         The correction is a re-ask, never an override: the planner may repeat
         its plan and it will be executed. A deterministic rule that silently
         rewrites the plan would (a) be able to deadlock the run on a
         mis-tuned threshold, and (b) destroy the very measurement this is
-        interesting for — how often the planner contradicts a measurement, and
+        interesting for — how often the planner contradicts an observation, and
         whether being told so changes its answer.
         """
         raw_plan, reasoning = self._create_plan(context, images_b64=images)
@@ -1313,33 +1394,39 @@ class Orchestrator:
 
         # skip_planner is the fixed-order ablation — there is no planner to
         # correct, and re-asking would return the same hard-coded list.
-        if not self.cfg.get("plan_state_check", True) or self.cfg.get("skip_planner"):
+        if self.cfg.get("skip_planner"):
             return plan, reasoning
 
         holding = self._holding_state()
-        conflict = plan_state_conflict(plan, step_catalog(self.cfg), holding)
-        record = {"plan": list(plan), "holding": holding, "conflict": conflict,
-                  "corrected": False}
+        state, repeat = self._audit_plan(plan, holding)
+        record = {"plan": list(plan), "holding": holding, "conflict": state,
+                  "repeat": repeat, "corrected": False}
 
-        if conflict:
-            self.emit("log", level="WARN",
-                      message=f"Plán CEO odporuje čidlu zátěže: {conflict} — žádám o opravu.")
+        findings = [f for f in (state, repeat) if f]
+        if findings:
+            if state:
+                self.emit("log", level="WARN",
+                          message=f"Plán CEO odporuje čidlu zátěže: {state} — žádám o opravu.")
+            if repeat:
+                self.emit("log", level="WARN",
+                          message="Plán CEO už v tomto běhu ze stejného stavu selhal — "
+                                  "žádám o jinou strategii.")
             corrected_context = (
                 context + "\n\n" +
-                PLAN_STATE_CORRECTION.format(plan=json.dumps(plan, ensure_ascii=False),
-                                             conflict=conflict))
+                PLAN_CORRECTION.format(plan=json.dumps(plan, ensure_ascii=False),
+                                       findings="\n".join(f"- {f}." for f in findings)))
             raw_plan, reasoning2 = self._create_plan(corrected_context, images_b64=images)
             plan2 = self._resolve_plan(raw_plan)
-            conflict2 = plan_state_conflict(plan2, step_catalog(self.cfg), holding)
+            state2, repeat2 = self._audit_plan(plan2, holding)
             record.update({"corrected": True, "plan_after": list(plan2),
-                           "conflict_after": conflict2})
-            if conflict2:
+                           "conflict_after": state2, "repeat_after": repeat2})
+            if state2 or repeat2:
                 self.emit("log", level="WARN",
-                          message="CEO i po upozornění trvá na plánu, který odporuje čidlu — "
+                          message="CEO i po upozornění trvá na plánu, který odporuje měření — "
                                   "spouštím ho tak, jak ho navrhl, a zaznamenávám to do běhu.")
             else:
                 self.emit("log", level="INFO",
-                          message="CEO po upozornění navrhl plán odpovídající stavu gripperu.")
+                          message="CEO po upozornění navrhl plán odpovídající zjištěnému stavu.")
             plan, reasoning = plan2, (reasoning2 or reasoning)
 
         self.plan_checks.append(record)
@@ -1502,6 +1589,10 @@ class Orchestrator:
         started = time.time()
         self.results = []
         self.plan_checks = []
+        # Per-run state: history left over from a previous run() call on the
+        # same instance would make the very first re-plan look like a repeat.
+        self._failed_plans = []
+        self._last_replan_was_repeat = False
 
         try:
             self.emit("state", state="PLANNING")
@@ -1721,7 +1812,11 @@ class Orchestrator:
                 self.emit("log", level="WARN",
                           message=f"Krok '{step}' selhal ({tag}) — re-plán {replans}/{max_replans}.")
                 self.emit("state", state="PLANNING")
-                previous_remaining = plan[index:]
+                # Record what was being executed when this failure happened,
+                # keyed by the progress made so far, BEFORE asking for a new
+                # plan — the audit inside _plan_grounded() has to be able to
+                # see the attempt it is meant to stop the planner repeating.
+                self._failed_plans.append((self._progress(), list(plan[index:])))
                 context = self._build_replan_context(
                     instruction, step, tag, reason or "", replans, max_replans,
                     has_image=bool(images), insp_reason=insp_reason or "",
@@ -1748,25 +1843,28 @@ class Orchestrator:
                                   message=f"Záložní re-plán: opakuji od kroku '{step}' -> {plan}")
 
                 # Code-level loop guard: a re-plan only counts as a genuine new
-                # strategy if it actually differs from what was just tried and
-                # failed. A small local planner can (and in practice does)
-                # propose the exact same remaining steps again despite the
-                # prompt saying that's unlikely to work — prompt wording alone
-                # doesn't reliably fix that, so this is a model-agnostic
-                # backstop: one repeat is tolerated (logged), a second one in
-                # a row ends the run with a clear reason instead of silently
-                # spending the whole re-plan budget on copies of one attempt.
-                if plan == previous_remaining:
+                # strategy if it isn't one this run has already executed and
+                # failed from this same state (see plan_repeat_conflict). A
+                # small local planner can (and in practice does) propose the
+                # same steps again despite the prompt saying that's unlikely to
+                # work, and _plan_grounded() has by now already asked it once to
+                # reconsider — so this is the model-agnostic backstop that runs
+                # even when the correction ask is switched off, and it also
+                # covers the fallback plan built below, which no planner saw.
+                # One repeat is tolerated (logged), a second one in a row ends
+                # the run with a clear reason instead of silently spending the
+                # whole re-plan budget on copies of one attempt.
+                if plan_repeat_conflict(plan, self._failed_plans, self._progress()):
                     if self._last_replan_was_repeat:
                         raise RuntimeError(
-                            f"Plánovač navrhl u kroku '{step}' podruhé za sebou identický plán "
-                            f"po selhání ({tag}) — nemá zjevně jinou strategii k dispozici, běh "
-                            "ukončen místo tichého opakování.")
+                            f"Plánovač po selhání kroku '{step}' ({tag}) podruhé za sebou navrhl "
+                            "plán, který v tomto běhu ze stejného stavu už selhal — nemá zjevně "
+                            "jinou strategii k dispozici, běh ukončen místo tichého opakování.")
                     self._last_replan_was_repeat = True
                     self.emit("log", level="WARN",
-                              message=f"Plánovač po selhání navrhl stejný plán jako předtím pro "
-                                      f"krok '{step}' — beru na vědomí; při dalším identickém "
-                                      "opakování běh ukončím.")
+                              message=f"Plánovač po selhání kroku '{step}' navrhl plán, který ze "
+                                      "stejného stavu už jednou selhal — beru na vědomí; při "
+                                      "dalším takovém opakování běh ukončím.")
                 else:
                     self._last_replan_was_repeat = False
 
@@ -1813,7 +1911,8 @@ class Orchestrator:
             "goal_early_exit": goal_early_exit,
             "steps": self.results,
             # Additive to the run format: existing analyses key on the fields
-            # above and are unaffected. See plan_state_conflict().
+            # above and are unaffected. See plan_state_conflict() and
+            # plan_repeat_conflict().
             "plan_checks": self.plan_checks,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")

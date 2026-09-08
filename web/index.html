@@ -206,6 +206,9 @@
           <label class="checkline" title="Před spuštěním plánu se jeho první krok porovná s čidlem zátěže gripperu: úchop, když robot už něco drží (nebo naopak přenos/položení s prázdnými čelistmi), je rozpor a plánovač dostane jednu cílenou výzvu k opravě. Trvá-li na svém, plán se stejně spustí a rozpor se zapíše do záznamu běhu.">
             <input data-key="plan_state_check" type="checkbox"> Kontrolovat plán proti stavu gripperu
           </label>
+          <label class="checkline" title="Navrhne-li plánovač po selhání plán, který v tomto běhu ze stejného stavu už jednou selhal (a od té doby se nic nepovedlo), dostane jednu cílenou výzvu ke změně strategie. Trvá-li na svém, plán se stejně spustí a zapíše se do záznamu běhu. Pojistka, která běh po druhém takovém opakování ukončí, platí i při vypnuté volbě.">
+            <input data-key="plan_repeat_check" type="checkbox"> Upozorňovat plánovač na opakovaný plán
+          </label>
         </div>
         <div class="note">Model plánovače dostává snímek scény <b>před prvním plánem</b> (aby viděl
           skutečný výchozí stav a nevymýšlel plán naslepo) i <b>při re-plánu po selhání</b> (stejný
