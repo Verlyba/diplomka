@@ -325,10 +325,16 @@ def parse_goal_flag(text: str) -> bool | None:
 # which is worth telling apart in the run data.
 PHYS_CONFIRM, PHYS_DENY, PHYS_NONE, PHYS_UNCLEAR = "CONFIRM", "DENY", "NONE", "UNCLEAR"
 
+# What the fusion actually established about the step, one level above the
+# boolean `success`. UNCERTAIN is not a third kind of failure — it means no
+# channel asserted anything about this step at all, so calling it a failure
+# would be inventing negative evidence out of missing evidence.
+OUTCOME_SUCCESS, OUTCOME_FAILURE, OUTCOME_UNCERTAIN = "success", "failure", "uncertain"
+
 
 def fuse_evidence(phys: str, phys_note: str, vis: str,
-                  v_tag: str = "", v_reason: str = "") -> tuple[bool, str, str, str]:
-    """Combine the physical and visual verdicts into (success, tag, reason, conflict).
+                  v_tag: str = "", v_reason: str = "") -> tuple[bool, str, str, str, str]:
+    """Combine the verdicts into (success, tag, reason, conflict, outcome).
 
     The two channels measure DIFFERENT propositions and are therefore
     complementary rather than redundant:
@@ -361,17 +367,31 @@ def fuse_evidence(phys: str, phys_note: str, vis: str,
     off — the "physical only" ablation) / NOIMG (camera actually broken).
     The last two are kept distinct on purpose: one is an experimental
     condition, the other is a fault.
+
+    The fifth return value separates "observed to have failed" from "never
+    observed at all". Exactly one combination is OUTCOME_UNCERTAIN: the
+    inspector answered [unclear] AND the physical channel had nothing to say
+    (no completion signal defined for this step type, or a reading inside the
+    dead-band). There, neither channel claimed the step went wrong — the
+    verdict is a statement about the observation, not about the robot. A
+    broken camera (NOIMG) is deliberately NOT uncertain but a failure: an
+    ambiguous photo can be resolved by looking again, a dead channel cannot.
     """
     if vis in ("SKIPPED", "NOIMG"):
         if phys == PHYS_CONFIRM:
-            return True, "SUCCESS", f"Bez inspektora — fyzicky potvrzeno ({phys_note}).", ""
+            return True, "SUCCESS", f"Bez inspektora — fyzicky potvrzeno ({phys_note}).", "", OUTCOME_SUCCESS
         if phys == PHYS_DENY:
-            return False, "[object_missed]", f"Bez inspektora — fyzicky vyvráceno ({phys_note}).", ""
+            return False, "[object_missed]", f"Bez inspektora — fyzicky vyvráceno ({phys_note}).", "", OUTCOME_FAILURE
         if vis == "SKIPPED":
-            return True, "SKIPPED", "Inspektor vypnutý (skip_inspector) a žádný fyzický důkaz — krok se nekontroloval.", ""
+            # Nothing was observed here either, but this one stays a pass:
+            # skip_inspector is an experimental condition in which "no check"
+            # is defined to mean "no objection". Reporting it as uncertain
+            # would make that ablation re-verify steps it deliberately does
+            # not verify.
+            return True, "SKIPPED", "Inspektor vypnutý (skip_inspector) a žádný fyzický důkaz — krok se nekontroloval.", "", OUTCOME_SUCCESS
         # Missing camera frame with nothing physical to fall back on is a
         # genuine failure, not a free pass.
-        return False, "[no_image]", "Snímek z kamery se nepodařilo získat a fyzický důkaz není k dispozici.", ""
+        return False, "[no_image]", "Snímek z kamery se nepodařilo získat a fyzický důkaz není k dispozici.", "", OUTCOME_FAILURE
 
     if phys in (PHYS_NONE, PHYS_UNCLEAR):
         # No usable physical claim — the camera decides on its own. For
@@ -381,27 +401,67 @@ def fuse_evidence(phys: str, phys_note: str, vis: str,
         reason = v_reason
         if phys == PHYS_UNCLEAR and phys_note:
             reason = f"{v_reason} (fyzika neprůkazná: {phys_note} — rozhodl inspektor ze snímku)"
-        return (vis == "SUCCESS"), v_tag, reason, ""
+        if vis == "SUCCESS":
+            return True, v_tag, reason, "", OUTCOME_SUCCESS
+        if vis == "UNCLEAR":
+            # The one cell of the table where nobody observed anything.
+            return False, v_tag, reason, "", OUTCOME_UNCERTAIN
+        return False, v_tag, reason, "", OUTCOME_FAILURE
 
     if phys == PHYS_CONFIRM:
         if vis == "FAIL":
             return False, v_tag, v_reason, (
                 f"Fyzika krok potvrzuje ({phys_note}), ale inspektor hlásí konkrétní problém "
-                f"{v_tag}: {v_reason}")
+                f"{v_tag}: {v_reason}"), OUTCOME_FAILURE
         if vis == "SUCCESS":
-            return True, "SUCCESS", v_reason, ""
+            return True, "SUCCESS", v_reason, "", OUTCOME_SUCCESS
         return True, "SUCCESS", (
-            f"Inspektor nerozhodl ({v_reason}) — nese fyzický důkaz ({phys_note})."), ""
+            f"Inspektor nerozhodl ({v_reason}) — nese fyzický důkaz ({phys_note})."), "", OUTCOME_SUCCESS
 
     # PHYS_DENY
     if vis == "SUCCESS":
         return True, "SUCCESS", v_reason, (
             f"Fyzika krok nepotvrdila ({phys_note}), ale inspektor jasně vidí splněný výsledek: "
-            f"{v_reason}")
+            f"{v_reason}"), OUTCOME_SUCCESS
     if vis == "FAIL":
-        return False, v_tag, v_reason, ""
+        return False, v_tag, v_reason, "", OUTCOME_FAILURE
     return False, "[object_missed]", (
-        f"Fyzicky vyvráceno ({phys_note}); inspektor nerozhodl ({v_reason})."), ""
+        f"Fyzicky vyvráceno ({phys_note}); inspektor nerozhodl ({v_reason})."), "", OUTCOME_FAILURE
+
+
+def reflex_retry_decision(outcome: str, step: str, streak_step: str, streak_count: int,
+                          enabled: bool = True) -> tuple[str, str, int]:
+    """What to do about a step whose outcome nobody could observe.
+
+    Returns (action, streak_step, streak_count) with action one of
+    "none" / "retry" / "escalate".
+
+    This is where the split-speed architecture pays off. Today an [unclear]
+    verdict with no physical evidence spends the most expensive resource in
+    the system — a call to the slow planner — on a situation in which the
+    planner has been given no new information: nothing falsified the plan, so
+    there is nothing to re-plan from. And in practice the planner then very
+    often answers with the same remaining steps (which is precisely why run()
+    needs a repeat loop-guard at all), i.e. the robot re-executes the step
+    anyway — just one slow LLM call later. Doing that re-execution directly is
+    the same physical behaviour at the cost of the fast layer only.
+
+    Bounded the same way as the existing repeat guard: one reflex retry per
+    consecutive streak on the same step, a second unobserved verdict in a row
+    escalates to a normal failure + re-plan. That bound is not a tuned
+    constant — it is the point at which "look again" has demonstrably stopped
+    working, so the expensive layer really is the next thing to try.
+
+    `enabled` False reproduces the previous behaviour exactly (uncertain is
+    handled as a failure), which is what makes this an ablatable condition
+    rather than a silent change of the measured loop.
+    """
+    if outcome != OUTCOME_UNCERTAIN:
+        return "none", "", 0
+    count = streak_count + 1 if step == streak_step else 1
+    if not enabled or count >= 2:
+        return "escalate", step, count
+    return "retry", step, count
 
 
 # ── Grounded plan check (the cheap layer auditing the expensive one) ────────
@@ -1051,6 +1111,10 @@ class Orchestrator:
         # planner has no other strategy, so run() aborts instead of quietly
         # burning the re-plan budget on copies of the same failed plan.
         self._last_replan_was_repeat = False
+        # Which step is currently in an unobserved streak, and how long it has
+        # been running. See reflex_retry_decision().
+        self._uncertain_step = ""
+        self._uncertain_repeats = 0
         # One record per plan the CEO produced: what it planned, what the load
         # sensor said at that moment, whether the two contradicted each other,
         # and whether a targeted correction changed the planner's mind. Raw
@@ -1160,7 +1224,7 @@ class Orchestrator:
     def _build_replan_context(self, instruction: str, step: str, tag: str,
                               reason: str, replans: int, max_replans: int,
                               has_image: bool, insp_reason: str = "",
-                              conflict: str = "") -> str:
+                              conflict: str = "", unobserved: bool = False) -> str:
         """Everything the planner needs to decide what to do next.
 
         Deliberately does NOT tell it to "start from the failed step" — that
@@ -1171,20 +1235,48 @@ class Orchestrator:
         """
         expected = next((s.get("verify_hint") or s.get("description")
                          for s in step_catalog(self.cfg) if s["slug"] == step), step)
-        failures_here = sum(1 for r in self.results if r["step"] == step and not r["success"])
+        # Attempts nobody could observe are deliberately NOT counted here: an
+        # unobserved step did not fail, and telling the planner that it "failed
+        # 3x" would be feeding the least reliable layer a claim about the world
+        # that no measurement supports (see OUTCOME_UNCERTAIN).
+        failures_here = sum(1 for r in self.results
+                            if r["step"] == step and not r["success"]
+                            and r.get("outcome") != OUTCOME_UNCERTAIN)
 
         lines = [f"GOAL: {instruction}", "", "PROGRESS THIS RUN:"]
         if not self.results:
             lines.append("  (nothing completed yet)")
         for i, r in enumerate(self.results, 1):
-            verdict = "SUCCESS" if r["success"] else f"FAILED {r['tag']}"
+            if r["success"]:
+                verdict = "SUCCESS"
+            elif r.get("outcome") == OUTCOME_UNCERTAIN:
+                verdict = f"NOT VERIFIED {r['tag']} (outcome unknown, not a failure)"
+            else:
+                verdict = f"FAILED {r['tag']}"
             ended = r.get("reason") or "?"
             insp = r.get("insp_reason")
             note = f" — {insp}" if insp else ""
             lines.append(f"  {i}. {r['step']} -> {verdict}  (ended: {ended}){note}")
 
-        insp_line = f"The inspector reported {tag}" + (f": {insp_reason}" if insp_reason else ".")
+        if unobserved:
+            insp_line = (
+                "This step could NOT be evaluated: the camera view was inconclusive and the "
+                "robot's own sensors have no completion signal for this kind of step"
+                + (f" ({insp_reason})" if insp_reason else "") + ".")
+        else:
+            insp_line = f"The inspector reported {tag}" + (f": {insp_reason}" if insp_reason else ".")
         lines += ["", f"LAST STEP: '{step}' — should have achieved: {expected}", insp_line]
+        if unobserved:
+            hint = ("Prefer a next step that makes the workspace observable again over guessing "
+                    "that the step failed.")
+            # Only offered when the task actually has such a skill — the
+            # catalog's own `reset` flag decides, nothing task-specific.
+            if any(s.get("reset") for s in step_catalog(self.cfg)):
+                hint = ("Prefer a next step that makes the workspace observable again — the "
+                        "[RESET] skill moves the arm out of the camera's way to a known "
+                        "position — over guessing that the step failed.")
+            lines.append("Its outcome is UNKNOWN, not negative — nothing observed says it went "
+                         "wrong, and looking again did not help. " + hint)
         if failures_here > 1:
             lines.append(f"This step has now failed {failures_here}x in this run — "
                          "repeating it unchanged is unlikely to work.")
@@ -1658,6 +1750,8 @@ class Orchestrator:
         self.results = []
         self.plan_checks = []
         self.done_checks = []
+        self._uncertain_step = ""
+        self._uncertain_repeats = 0
 
         try:
             self.emit("state", state="PLANNING")
@@ -1824,8 +1918,11 @@ class Orchestrator:
                 else:
                     vis = "NOIMG"
 
-                success, tag, insp_reason, conflict = fuse_evidence(
+                success, tag, insp_reason, conflict, outcome = fuse_evidence(
                     phys, phys_note, vis, v_tag, v_reason)
+                action, self._uncertain_step, self._uncertain_repeats = reflex_retry_decision(
+                    outcome, step, self._uncertain_step, self._uncertain_repeats,
+                    bool(cfg.get("uncertain_retry", True)))
 
                 if tag == "[no_image]":
                     self.emit("log", level="ERROR",
@@ -1849,7 +1946,13 @@ class Orchestrator:
                                      "success": success, "tag": tag, "reason": reason,
                                      "insp_reason": insp_reason,
                                      "phys": phys, "vis": vis, "conflict": conflict,
-                                     "goal_seen_by_vlm": goal_done})
+                                     "goal_seen_by_vlm": goal_done,
+                                     # Additive: `success` keeps its meaning
+                                     # (False for both a failure and a
+                                     # non-observation), `outcome` is what
+                                     # tells the two apart in the analysis.
+                                     "outcome": outcome,
+                                     "reflex_retry": action == "retry"})
                 self.emit("step", index=index, step=step, phase="verified",
                           success=success, tag=tag, reason=reason, attempt=att_num,
                           insp_reason=insp_reason, conflict=conflict)
@@ -1871,7 +1974,26 @@ class Orchestrator:
                     index += 1
                     continue
 
+                # 3b) nobody observed this step -> look again by doing, not by
+                # planning. No channel claimed the step went wrong, so the
+                # plan is not falsified and the slow layer would be re-planning
+                # from no new information. See reflex_retry_decision().
+                if action == "retry":
+                    self.emit("log", level="WARN",
+                              message=f"Krok '{step}' se nepodařilo vyhodnotit (ani snímek, ani "
+                                      "čidla) — opakuji ho bez volání CEO; při druhé neprůkazné "
+                                      "kontrole v řadě přejdu na re-plán.")
+                    continue
+
                 # 4) failure -> re-plan with the failure context
+                if action == "escalate":
+                    self.emit("log", level="WARN",
+                              message=(f"Krok '{step}' zůstal nevyhodnotitelný i po opakování — "
+                                       "beru to jako selhání a jdu na re-plán."
+                                       if self._uncertain_repeats > 1 else
+                                       f"Krok '{step}' se nepodařilo vyhodnotit; reflexní "
+                                       "opakování je vypnuté (uncertain_retry), takže jdu "
+                                       "rovnou na re-plán."))
                 replans += 1
                 if replans > max_replans:
                     raise RuntimeError(
@@ -1883,7 +2005,7 @@ class Orchestrator:
                 context = self._build_replan_context(
                     instruction, step, tag, reason or "", replans, max_replans,
                     has_image=bool(images), insp_reason=insp_reason or "",
-                    conflict=conflict)
+                    conflict=conflict, unobserved=(outcome == OUTCOME_UNCERTAIN))
                 plan, ceo_reasoning = self._plan_grounded(context, images or None)
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
 

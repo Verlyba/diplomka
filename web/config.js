@@ -66,6 +66,9 @@ const DEFAULTS = {
   // Když plánovač prohlásí cíl za splněný (["DONE"]), zeptá se orchestrátor
   // nejdřív inspektora, jestli to na snímku opravdu vidí.
   done_visual_check: true,
+  // Krok, který se nepodařilo vyhodnotit (inspektor „nevidím" a žádný fyzický
+  // důkaz), se jednou zopakuje bez volání plánovače — nikdo netvrdí, že selhal.
+  uncertain_retry: true,
 
   // Ukončovací protokoly kroku. Správné hodnoty závisí na úloze i hardwaru
   // (jiný gripper, jiný předmět, úloha bez úchopu), proto jsou obě metody

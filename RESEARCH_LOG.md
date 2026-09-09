@@ -11,6 +11,146 @@ Větev se nikdy nemerguje sama; revizi a merge do `main` dělá uživatel ručn�
 
 ---
 
+## 2026-09-10 — „Nikdo to neviděl" přestává být selhání (OUTCOME_UNCERTAIN)
+
+### Co jsem zkoumal
+
+Navázal jsem na poučení z 2026-09-08: **stav prostředí nelze odvodit z
+historie běhu, o světě smí mluvit jen měření.** Hledal jsem, jestli tenhle
+princip neporušuje i něco, co v repu už dávno je. Porušuje — v pravdivostní
+tabulce `fuse_evidence()` jsou dvě buňky, ve kterých orchestrátor **vyrábí
+negativní důkaz z chybějícího důkazu**:
+
+| fyzika | inspektor | dosavadní verdikt |
+|---|---|---|
+| `NONE` (krok bez protokolu A/B) | `UNCLEAR` | selhání `[unclear]` |
+| `UNCLEAR` (zátěž v pásmu nejistoty) | `UNCLEAR` | selhání `[unclear]` |
+
+V obou případech **žádný kanál netvrdí, že krok dopadl špatně**. Fyzika mlčí
+(u kroku typu nájezd/přenos/položení žádný ukončovací signál neexistuje),
+kamera říká doslova „z tohohle snímku to nepoznám" — a `_verify()` už jednou
+zkusil nový snímek. Přesto se to zapsalo jako `success: False` s chybovým
+tagem a mělo tři důsledky, které jdou proti sobě:
+
+1. **Zkresluje data diplomky.** V `runs/*.json` je nepozorovaný krok
+   nerozeznatelný od kroku, který prokazatelně selhal.
+2. **Lže plánovači.** `_build_replan_context()` počítá `failures_here` a při
+   >1 přidá větu „This step has now failed 3x — repeating it unchanged is
+   unlikely to work." U kroku, který nikdo neviděl, je to **nepravdivé
+   tvrzení o světě**, a dostává ho ta nejméně spolehlivá vrstva jako fakt.
+   Přitom správná reakce na nepozorovaný krok bývá právě „zopakuj ho" nebo
+   „ukliď rameno z výhledu" — tedy pravý opak toho, kam ta věta plánovač tlačí.
+3. **Utrácí tu nejdražší věc v systému za nic.** Neprůkazná kontrola dnes
+   spustí re-plán, tedy volání pomalého CEO — kterému ale orchestrátor
+   nepředává **žádnou novou informaci**: plán nebyl ničím vyvrácen. A protože
+   plánovač v takové situaci často vrátí tentýž zbytek plánu (kvůli tomu v
+   `run()` vůbec existuje loop-guard na identický plán), robot ten krok
+   stejně nakonec zopakuje — jen o jedno pomalé volání LLM později.
+
+To je přesně to místo, kde má dvourychlostní architektura co nabídnout:
+**problém pozorování se řeší pozorováním, ne plánováním.**
+
+### Co jsem změnil
+
+**1. `fuse_evidence()` vrací pátou hodnotu `outcome`** ∈
+`success` / `failure` / `uncertain` (`OUTCOME_*`). `uncertain` nastane právě
+v těch dvou buňkách výše. `success` **zůstává boolean se stejným významem**
+(u nepozorovaného kroku `False` — nic se nepotvrdilo), takže žádná existující
+analýza nad `steps[].success` se nemění; `outcome` je to, co ty dva případy
+teprve odliší.
+
+Dvě hranice jsou vědomé a jsou v testech:
+
+- **`NOIMG` (rozbitá kamera) uncertain NENÍ.** Nejednoznačný snímek se dá
+  vyřešit tím, že se člověk podívá znovu; mrtvý kanál ne. Zůstává selháním.
+- **`SKIPPED` (ablace „jen fyzika") uncertain NENÍ.** Tam taky nikdo nic
+  neviděl, ale v té ablaci je „žádná kontrola" definovaná jako „žádná
+  námitka". Jinak by ablace začala kroky přeověřovat, což by ji rozbilo.
+
+**2. Nová čistá funkce `reflex_retry_decision()`** + její zapojení do `run()`.
+První neprůkazná kontrola daného kroku → **krok se jednou zopakuje bez volání
+CEO** (hot-swap policy je no-op, `set_policy()` na stejnou cestu se vrací
+hned, takže cena je jedno spuštění dovednosti). Druhá neprůkazná kontrola
+téhož kroku v řadě → bere se jako selhání a jde se na normální re-plán.
+
+**Žádná nová vymyšlená konstanta.** Mez „jedno zopakování, pak eskalace" není
+odhadnutý parametr, ale bod, ve kterém „podívej se znovu" prokazatelně
+přestalo fungovat — a je to týž idiom, jaký v `run()` už používá loop-guard
+na identický plán (jedno opakování se toleruje, druhé běh ukončí).
+
+**3. Re-plán dostává pravdu.** Když se eskaluje, `_build_replan_context()`
+dostane `unobserved=True` a napíše, že krok **nebyl vyhodnocen**, že jeho
+výsledek je *neznámý, ne negativní*, a nabídne krok obnovující pozorovatelnost
+(větu o `[RESET]` přidá jen tehdy, když katalog nějaký `reset` krok opravdu
+má — nic task-specific). `failures_here` **nepočítá nepozorované pokusy**,
+takže věta o „failed Nx" se objeví jen u skutečně pozorovaných selhání. V
+soupisu `PROGRESS THIS RUN` se takový pokus vypíše jako
+`NOT VERIFIED [unclear] (outcome unknown, not a failure)`.
+
+**4. Zpětná kompatibilita a ablace.** Nová aditivní pole v `runs/*.json`:
+`steps[].outcome` a `steps[].reflex_retry`. Nový přepínač `uncertain_retry`
+(default `true`) v `server.py`, `web/config.js`, checkbox v `web/index.html`;
+`false` reprodukuje **přesně** dosavadní chování (neprůkazný krok = selhání =
+re-plán), takže je to ablatovatelná podmínka, ne tichá změna měřené smyčky.
+Testy: `tests/test_fusion.py` rozšířený o `outcome` ve všech 18 kombinacích,
+o invariant „`uncertain` nikdy nesmí přijít se `success=True`" a o 7 případů
+`reflex_retry_decision()`.
+
+### Co jsem zvažoval a zavrhl
+
+- **Při `uncertain` spustit `[RESET]` dovednost a vyfotit znovu.** Nejsilnější
+  nápad večera a věcně správný: nejčastější příčina `[unclear]` je okluze
+  vlastním ramenem a homing je přesně ten úkon, co ji odstraní, je levný a
+  task-nezávislý (katalogový příznak `reset`). **Zavrhl jsem ho na dnešek:**
+  u úchopového kroku by odjezd domů s předmětem v čelistech výrazně změnil
+  scénu, kterou se orchestrátor právě chystal posoudit, a tenhle druh
+  fyzického chování nemám jak bez robota ověřit. Reflexní zopakování téhož
+  kroku je proti tomu bezpečnější v tom, že **nezavádí žádnou novou třídu
+  pohybu** — přesně to samé se dnes stane, když plánovač po neprůkazné
+  kontrole vrátí tentýž plán. Nechávám to jako kandidáta na příště, ale je to
+  rozhodnutí, které chce tvůj názor na to, co robot smí dělat.
+- **Nechat `uncertain` proletět jako úspěch a jít na další krok.** To by z
+  chybějícího důkazu vyrobilo pozitivní tvrzení — stejná chyba jako dnešní
+  stav, jen v opačném směru, a navíc by tiše nafukovala měřené číslo.
+- **Vlastní rozpočet nepozorování oddělený od `max_replans`.** Znělo to
+  čistě, ale znamenalo by to druhý limit, který musí uživatel ladit. Takhle
+  eskalace spotřebuje re-plán jako každé jiné selhání a běh zůstává omezený
+  jediným existujícím číslem.
+- **Počítat `uncertain` do `success` runu jinak.** Nesahám na hlavní měřenou
+  veličinu, stejně jako u `done_checks` (2026-09-09). Data na obě varianty
+  vyhodnocení teď existují.
+
+### Otevřené otázky
+
+- **Jak často vůbec `uncertain` nastává?** Teď je to měřitelné
+  (`steps[].outcome`). Jestli je to <2 % kroků, je celá změna hlavně
+  metodická čistota; jestli je to 20 %, byla dosud pětina „selhání" v datech
+  diplomky ve skutečnosti nepozorování.
+- **Pomůže reflexní zopakování, nebo jen sežere čas?** `steps[].reflex_retry`
+  říká, u kterých pokusů se to stalo — dá se spočítat, kolikrát druhý pokus
+  skončil `success` (tedy kolik volání CEO se ušetřilo) a kolikrát zase
+  `uncertain`.
+- Kdyby vyšlo, že po zopakování je verdikt skoro vždy zase `uncertain`, je to
+  silný argument pro tu zavrženou variantu s `[RESET]`: znamenalo by to, že
+  příčina je okluze, kterou opakování téhož kroku neodstraní.
+
+### Co potřebuje ověření na reálném hardwaru (uživatel)
+
+1. **Že zopakování nevyhodnotitelného kroku nedělá nic divokého.** Je to
+   jediné místo, kde tahle změna mění fyzické chování robota — a mění ho na
+   to, co se dnes stane po re-plánu, který vrátí tentýž plán. Nejlevnější
+   sanity check: úloha s krokem, kde rameno běžně zaclání kameře.
+2. **Že se `[unclear]` u tvých kroků skutečně párují s `outcome: uncertain`**
+   a ne s `outcome: failure` — pokud se u tebe `[unclear]` objevuje hlavně u
+   úchopových kroků, rozhoduje o nich protokol B a tahle změna se jich
+   netýká vůbec.
+3. **Že nová pole `outcome` / `reflex_retry` neshodí tvoje analytické
+   skripty** (jsou aditivní, ale ověř).
+4. Ablace na jeden večer: tatáž úloha 2× s `uncertain_retry: true` a 2× s
+   `false`, a porovnat počet volání CEO na běh.
+
+---
+
 ## 2026-09-09 — Zavrženo: kontrola opakovaného plánu. Nové: ověření „cíl splněn"
 
 ### Zavržená noc 2026-09-08 (revert)
