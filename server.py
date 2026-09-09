@@ -130,7 +130,6 @@ DEFAULT_CONFIG: dict = {
     "planner_vision": True,
     "planner_reasoning": True,
     "plan_state_check": True,
-    "plan_repeat_check": True,
     # step termination protocols — task- and hardware-specific, hence togglable
     "protocol_a_enabled": True,
     "protocol_a_threshold_rad": 0.5,

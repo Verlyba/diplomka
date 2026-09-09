@@ -1,9 +1,8 @@
-"""Deterministicka kontrola planu CEO (orchestrator.plan_*_conflict).
+"""Kontrola planu proti stavu gripperu (orchestrator.plan_state_conflict).
 
 Stejne jako test_fusion.py nepotrebuje robota ani LeRobota — kontrola je
-cista funkce nad katalogem kroku, jednim bitem fyzickeho stavu a historii
-behu, takze jde overit cela, vcetne pripadu, ktere se na skutecnem robotu
-trefi jen zridka.
+cista funkce nad katalogem kroku a jednim bitem fyzickeho stavu, takze jde
+overit cela, vcetne pripadu, ktere se na skutecnem robotu trefi jen zridka.
 
     python tests/test_plan_check.py
 """
@@ -12,8 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from orchestrator import (PLAN_ABORT, PLAN_DONE, plan_repeat_conflict,
-                          plan_state_conflict)
+from orchestrator import PLAN_ABORT, PLAN_DONE, plan_state_conflict
 
 # Zamerne bezbarvy, neutralni katalog: kontrola nesmi znat nic o konkretni
 # uloze — jen poradi kroku a priznaky grasp/reset.
@@ -78,49 +76,10 @@ conflict = plan_state_conflict(["pick"], CATALOG, True)
 if "pick" not in conflict:
     failures.append(("text rozporu nejmenuje krok", conflict, "obsahuje 'pick'"))
 
-
-# ── Kontrola opakovaneho planu (plan_repeat_conflict) ─────────────────────
-# Historie je seznam (progress, kroky) — progress = kolik kroku se v behu do
-# te chvile povedlo. Shoda plati jen pri stejnem progressu: kdyz se mezitim
-# neco povedlo, svet uz je jinde a zopakovat drivejsi plan je legitimni.
-HIST = [(0, ["approach", "pick"]), (1, ["transport", "release"])]
-
-REPEAT_CASES = [
-    ("stejny plan ze stejneho stavu", ["approach", "pick"], HIST, 0, True),
-    ("stejny plan po uspesnem kroku", ["approach", "pick"], HIST, 1, False),
-    ("stejny plan, ale jiny zaznam historie", ["transport", "release"], HIST, 1, True),
-    ("plan z historie pri jinem progressu", ["transport", "release"], HIST, 0, False),
-    ("uplne novy plan", ["home", "approach", "pick"], HIST, 0, False),
-    ("prefix drivejsiho planu neni opakovani", ["approach"], HIST, 0, False),
-    ("delsi varianta drivejsiho planu", ["approach", "pick", "transport"], HIST, 0, False),
-    ("jine poradi tychz kroku", ["pick", "approach"], HIST, 0, False),
-    ("prazdna historie", ["approach", "pick"], [], 0, False),
-    ("prazdny plan", [], HIST, 0, False),
-    ("sentinel DONE", [PLAN_DONE], HIST, 0, False),
-    ("sentinel ABORT", [PLAN_ABORT], HIST, 0, False),
-    # Bily znak navic prijde z modelu bezne — nesmi kontrolu obejit.
-    ("mezery kolem ID kroku", [" approach ", "pick"], HIST, 0, True),
-]
-
-for popis, plan, hist, progress, want_repeat in REPEAT_CASES:
-    conflict = plan_repeat_conflict(plan, hist, progress)
-    got = bool(conflict)
-    status = "ok  " if got == want_repeat else "CHYBA"
-    if got != want_repeat:
-        failures.append((popis, got, want_repeat))
-    print(f"{status} progress={progress} plan={str(plan):<34} -> "
-          f"{'opakovani' if got else 'v poradku'}   ({popis})")
-
-# I tohle hlaseni jde primo do kontextu planovace, takze musi vypsat, ktera
-# sekvence se opakuje — jinak nema co zmenit.
-repeat = plan_repeat_conflict(["approach", "pick"], HIST, 0)
-if "approach" not in repeat or "pick" not in repeat:
-    failures.append(("text opakovani nejmenuje kroky", repeat, "obsahuje kroky planu"))
-
 print()
 if failures:
     print(f"NEPROSLO: {len(failures)} pripadu")
     for f in failures:
         print("  ", f)
     sys.exit(1)
-print(f"OK — vsech {len(CASES) + len(REPEAT_CASES)} pripadu kontroly planu sedi.")
+print(f"OK — vsech {len(CASES)} pripadu kontroly planu sedi.")
