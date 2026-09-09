@@ -138,6 +138,35 @@ VERIFY_PROMPT_RULES = (
     "[object_missed]"
 )
 
+GOAL_CHECK_RULES = (
+    "The planning layer claims the OVERALL GOAL above is ALREADY achieved and wants to stop the "
+    "task right now. Your job is to look at the photo(s) and say whether that is true.\n\n"
+    "- Judge the OVERALL GOAL as stated above, not any individual step or motion.\n"
+    "- Answer 'yes' only if you can actually SEE the finished end state. If the decisive spot is "
+    "hidden behind the robot's own arm, out of frame, or you are unsure for any other reason, "
+    "answer 'no'. Here 'no' means 'not confirmed', which is the safe answer: a wrong 'yes' ends "
+    "the task while it is still unfinished.\n"
+    "- Do not assume the goal happened just because nothing in the photo contradicts it.\n"
+    "- You judge ONLY what the camera can show. You are not being asked to plan anything.\n\n"
+    "OUTPUT FORMAT — exactly two lines, in this order:\n"
+    "1. ONE line beginning with \"REASONING:\" describing what you actually see relative to the "
+    "goal (one sentence — it is shown to the operator and sent back to the planner).\n"
+    "2. ONE line \"GOAL: yes\" or \"GOAL: no\".\n\n"
+    "Example:\n"
+    "REASONING: The object is still lying on the table beside the target location, not in it.\n"
+    "GOAL: no"
+)
+
+DONE_CORRECTION = (
+    "GOAL CHECK — you answered [\"DONE\"], but the visual inspector looked at the workspace photo "
+    "and reports that the overall goal is NOT achieved: {reason}\n"
+    "The inspector judges only what the camera shows and can be wrong about things it cannot see, "
+    "so this is a second opinion from the layer that is actually looking at the scene, not an "
+    "order. Decide again. If the goal really is finished, answer [\"DONE\"] again and say in your "
+    "REASONING line what visible evidence the inspector is missing. Otherwise output the remaining "
+    "skills needed to actually finish the goal."
+)
+
 # [unclear] is deliberately not in this list — it means "take another photo",
 # not "the step failed". It is handled separately in _verify().
 FAILURE_TAGS = ["[object_missed]", "[object_slipped]", "[target_moved]", "[unknown_failure]"]
@@ -1029,6 +1058,11 @@ class Orchestrator:
         # measurement, and does one sentence fix it" cannot be reconstructed
         # afterwards from the final plan alone. See plan_state_conflict().
         self.plan_checks: list[dict] = []
+        # One record per time the planner claimed the goal was already done and
+        # the inspector was asked to confirm it from a photo. See _settle_done()
+        # — a DONE is what ends a run as a success, so how often the two layers
+        # disagree about it is a headline number, not a diagnostic detail.
+        self.done_checks: list[dict] = []
 
     def stop(self) -> None:
         self._stop.set()
@@ -1345,6 +1379,127 @@ class Orchestrator:
         self.plan_checks.append(record)
         return plan, reasoning
 
+    def _verify_goal(self, images_b64: list[str]) -> tuple[bool | None, str]:
+        """Ask the inspector one question: is the OVERALL goal achieved right now?
+
+        Returns (True / False / None, one-sentence reasoning). None means the
+        inspector did not answer usably — no opinion, never a guess (same
+        contract as parse_goal_flag).
+
+        Deliberately a separate, much shorter prompt than _verify(): there is no
+        step to judge here, no plan position, no expected step outcome. Asking
+        the step-verification prompt about a step that was never executed would
+        mostly feed the model context it has to actively ignore.
+        """
+        cfg = self.cfg
+        lines = ["You are the visual inspector of a robotic manipulation system.",
+                 "Inspect the attached photo(s) of the workspace.\n"]
+        if cfg.get("scene_description"):
+            lines.append(f"SCENE & ENVIRONMENT:\n{cfg['scene_description']}\n")
+        lines.append(f"OVERALL GOAL: '{cfg.get('task_slug')}' — {cfg.get('task_description', '')}\n")
+        lines.append(GOAL_CHECK_RULES)
+
+        model = cfg.get("vlm_model", "local-vlm")
+        try:
+            reply = self.lm.chat_with_images(model=model, user_prompt="\n".join(lines),
+                                             images_b64=images_b64, temperature=0.1,
+                                             max_tokens=1024)
+        except Exception as e:
+            # A failing inspector must never turn a run that would otherwise
+            # have finished into an error — it only ever adds an opinion here.
+            self.emit("log", level="WARN",
+                      message=f"Kontrolní dotaz na splnění cíle selhal ({e}) — "
+                              "tvrzení plánovače se nekontroluje.")
+            return None, ""
+
+        raw = reply.strip()
+        self.emit("log", level="INFO", message=f"Inspektor ke splnění cíle: „{raw}\"")
+        return parse_goal_flag(raw), parse_reasoning_sentence(raw)
+
+    def _settle_done(self, context: str, images: list[str] | None) -> tuple[list[str], str]:
+        """The planner says DONE — ask the layer with eyes before believing it.
+
+        This is the one claim in the whole scheme that nothing verified: DONE
+        ended the run as a success, on the word of the slow layer that answers
+        from a prompt rather than from a measurement, and that is documented in
+        this project to misread evidence written verbatim in its own context.
+        Every other verdict in the run gets fused from two channels first (see
+        fuse_evidence); the one that decides the run's headline result did not.
+        Meanwhile the inspector is fast, is called after every single step
+        anyway, and already answers exactly this question for free ("GOAL:
+        yes/no", see parse_goal_flag) — it just was never asked at the moment
+        it actually decides anything.
+
+        The asymmetry is deliberate in both directions:
+
+          - STOPPING still requires the planner. If the inspector says the goal
+            is not achieved but the planner repeats DONE, the run stops as DONE
+            anyway and the disagreement is recorded. A small VLM that answers
+            "not confirmed" out of a bad camera angle must not be able to push
+            the robot into manipulating an already finished scene.
+          - CONTINUING requires BOTH layers to agree there is work left: the
+            inspector says not achieved AND the planner, once told, changes its
+            mind and names the remaining skills.
+
+        Returns the plan to act on: [PLAN_DONE] to finish, or a real plan.
+        `success` in the run summary is NOT touched — see done_checks.
+        """
+        record: dict = {"replan_index": len(self.done_checks), "verdict": "",
+                        "inspector_reason": "", "insisted": None, "plan_after": None}
+        self.done_checks.append(record)
+
+        if not self.cfg.get("done_visual_check", True):
+            record["verdict"] = "off"
+            return [PLAN_DONE], ""
+        if self.cfg.get("skip_inspector"):
+            # The "physical evidence only" ablation — the inspector is switched
+            # off for the whole run and must not be called here either.
+            record["verdict"] = "skipped"
+            return [PLAN_DONE], ""
+
+        frames = list(images or [])
+        if not frames and self.daemon is not None:
+            try:
+                frames = self.daemon.snapshot()
+            except Exception as e:
+                self.emit("log", level="WARN",
+                          message=f"Snímek pro kontrolu splnění cíle se nepodařilo pořídit ({e}).")
+                frames = []
+        if not frames:
+            record["verdict"] = "unknown"
+            return [PLAN_DONE], ""
+
+        goal_ok, reason = self._verify_goal(frames)
+        record["inspector_reason"] = reason
+        if goal_ok is None:
+            record["verdict"] = "unknown"
+            self.emit("log", level="WARN",
+                      message="Inspektor se ke splnění cíle nevyjádřil — beru DONE nekontrolované.")
+            return [PLAN_DONE], ""
+        if goal_ok:
+            record["verdict"] = "confirmed"
+            self.emit("log", level="INFO",
+                      message="Inspektor potvrdil, že cíl je splněný — DONE ověřeno snímkem.")
+            return [PLAN_DONE], ""
+
+        record["verdict"] = "denied"
+        self.emit("log", level="WARN",
+                  message=f"Plánovač hlásí DONE, ale inspektor cíl na snímku nevidí: {reason} — "
+                          "žádám plánovač o přehodnocení.")
+        plan, reasoning = self._plan_grounded(
+            context + "\n\n" + DONE_CORRECTION.format(reason=reason or "(bez odůvodnění)"),
+            frames or None)
+        record["insisted"] = (plan == [PLAN_DONE])
+        record["plan_after"] = list(plan)
+        if record["insisted"]:
+            self.emit("log", level="WARN",
+                      message="Plánovač na DONE trvá i po upozornění inspektora — běh končí jako "
+                              "úspěšný, ale rozpor je zapsaný v záznamu běhu (done_checks).")
+        else:
+            self.emit("log", level="INFO",
+                      message=f"Plánovač po upozornění DONE odvolal a pokračuje: {plan}")
+        return plan, reasoning
+
     # -- layer 3: the inspector ───────────────────────────────────────────
     @staticmethod
     def _read_verdict(raw_reply: str) -> tuple[bool, str]:
@@ -1502,6 +1657,7 @@ class Orchestrator:
         started = time.time()
         self.results = []
         self.plan_checks = []
+        self.done_checks = []
 
         try:
             self.emit("state", state="PLANNING")
@@ -1525,15 +1681,17 @@ class Orchestrator:
                         self.daemon.stop()
                     self.daemon = None
 
-            plan, ceo_reasoning = self._plan_grounded(
-                self._build_initial_context(instruction, bool(initial_images)),
-                initial_images or None)
+            initial_context = self._build_initial_context(instruction, bool(initial_images))
+            plan, ceo_reasoning = self._plan_grounded(initial_context, initial_images or None)
             self.emit("plan", steps=plan, reasoning=ceo_reasoning)
 
             if plan == [PLAN_DONE]:
-                self.emit("log", level="INFO",
-                          message="Plánovač vyhodnotil, že cíl je už splněný — nic se nespouští.")
-                return self._finish(True, started)
+                plan, ceo_reasoning = self._settle_done(initial_context, initial_images)
+                if plan == [PLAN_DONE]:
+                    self.emit("log", level="INFO",
+                              message="Plánovač vyhodnotil, že cíl je už splněný — nic se nespouští.")
+                    return self._finish(True, started)
+                self.emit("plan", steps=plan, reasoning=ceo_reasoning)
             if plan == [PLAN_ABORT]:
                 raise RuntimeError("Plánovač označil úlohu za neproveditelnou z výchozího stavu.")
             if not plan:
@@ -1730,9 +1888,12 @@ class Orchestrator:
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
 
                 if plan == [PLAN_DONE]:
-                    self.emit("log", level="INFO",
-                              message="Plánovač po selhání vyhodnotil, že cíl je přesto splněný.")
-                    return self._finish(True, started)
+                    plan, ceo_reasoning = self._settle_done(context, images)
+                    if plan == [PLAN_DONE]:
+                        self.emit("log", level="INFO",
+                                  message="Plánovač po selhání vyhodnotil, že cíl je přesto splněný.")
+                        return self._finish(True, started)
+                    self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
                 if plan == [PLAN_ABORT]:
                     raise RuntimeError(
                         f"Plánovač označil stav po selhání kroku '{step}' ({tag}) "
@@ -1815,6 +1976,7 @@ class Orchestrator:
             # Additive to the run format: existing analyses key on the fields
             # above and are unaffected. See plan_state_conflict().
             "plan_checks": self.plan_checks,
+            "done_checks": self.done_checks,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")
         self.emit("finished", **summary)

@@ -63,6 +63,9 @@ const DEFAULTS = {
   // Než se plán spustí, porovná se jeho první krok s čidlem zátěže gripperu
   // (drží / nedrží). Při rozporu se plánovač jednou vyzve k opravě.
   plan_state_check: true,
+  // Když plánovač prohlásí cíl za splněný (["DONE"]), zeptá se orchestrátor
+  // nejdřív inspektora, jestli to na snímku opravdu vidí.
+  done_visual_check: true,
 
   // Ukončovací protokoly kroku. Správné hodnoty závisí na úloze i hardwaru
   // (jiný gripper, jiný předmět, úloha bez úchopu), proto jsou obě metody

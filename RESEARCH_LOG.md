@@ -11,6 +11,144 @@ Větev se nikdy nemerguje sama; revizi a merge do `main` dělá uživatel ručn�
 
 ---
 
+## 2026-09-09 — Zavrženo: kontrola opakovaného plánu. Nové: ověření „cíl splněn"
+
+### Zavržená noc 2026-09-08 (revert)
+
+Předchozí noc přidala `plan_repeat_conflict()` — kontrolu, která hlásila
+opakovaný re-plán, když se od minulého pokusu „nic nepovedlo" (počet
+úspěšných kroků byl stejný). **Uživatel to zamítl a měl pravdu; commit je
+revertovaný.** Chyba nebyla v implementaci, ale v premise:
+
+1. **Počet úspěšných kroků není stav světa.** Neúspěšný pokus je pořád
+   pohyb — robot mohl předmět posunout, převrátit nebo vystrčit z dosahu.
+   „Od té doby se nic nepovedlo, takže je situace stejná" je nepravdivé
+   tvrzení o prostředí, odvozené z účetnictví orchestrátoru. Zopakovaný plán
+   proto může být zcela legitimní pokus v jiné, změněné scéně.
+2. **Plán začínající homingem je nový pokus z výchozí pozice**, ne smyčka.
+   Že to moje kontrola většinou nehlásila, byla shoda okolností plynoucí z
+   toho, jak se zaznamenával zbytek plánu, ne vlastnost návrhu.
+
+**Poučení, které platí i pro příští noci: stav prostředí nelze odvodit z
+historie běhu. O světě smí mluvit jen měření** — čidlo, nebo kamera. Ten
+princip už v repu je (`fuse_evidence()` staví na dvou měřicích kanálech);
+včerejší kontrola ho porušila a je proto pryč. Zůstává pouze původní
+loop-guard `plan == previous_remaining`, který netvrdí nic o prostředí —
+jen o tom, že plánovač po selhání zopakoval doslova totéž.
+
+### Co jsem zkoumal dnes
+
+Hledal jsem tvrzení, které **rozhoduje o výsledku běhu a přitom ho nikdo
+neověřuje**. Našel jsem jedno, a je to to nejdůležitější v celém schématu:
+
+```python
+if plan == [PLAN_DONE]:
+    return self._finish(True, started)   # success: True, žádná kontrola
+```
+
+Když CEO odpoví `["DONE"]` („cíl je už splněný"), běh se **okamžitě zapíše
+do `runs/*.json` jako úspěšný**. Bez snímku, bez inspektora, bez fyzického
+důkazu. Přitom:
+
+- každý jednotlivý krok se posuzuje fúzí dvou nezávislých kanálů
+  (`fuse_evidence()`), ale tvrzení o **celém cíli** neprochází ničím;
+- vydává ho ta vrstva, která odpovídá z promptu, ne z měření, a u které je
+  v tomhle projektu zdokumentované, že chybně přečte důkaz doslova napsaný
+  ve svém vlastním kontextu;
+- halucinované DONE **nafukuje úspěšnost orchestrovaného schématu** přesně v
+  tom čísle, které se v diplomce porovnává s baseline.
+
+A přitom vrstva, která na tuhle otázku umí odpovědět, je k dispozici zadarmo:
+VLM inspektor je rychlý, volá se po každém kroku a **už dnes tuhle přesnou
+otázku zodpovídá** (`GOAL: yes/no`, `parse_goal_flag()`). Jen se ho nikdo
+nezeptal v okamžiku, kdy o něčem rozhoduje.
+
+### Co jsem změnil
+
+`Orchestrator._settle_done()` + `_verify_goal()` v `orchestrator.py`, zapojené
+na obou místech, kde se DONE dosud rovnalo konci běhu (úvodní plán i re-plán).
+
+Když plánovač řekne DONE, dostane inspektor **snímky, které už jsou po ruce**
+(u úvodního plánu tytéž, ze kterých plánoval CEO — dva různé modely, tentýž
+obrázek, jedno tvrzení; u re-plánu ty, které právě posuzoval). Žádný nový
+snímek se nepořizuje, pokud nějaké existují, takže cena je **jedno volání
+rychlého modelu**.
+
+Asymetrie je záměrná v obou směrech:
+
+- **Zastavit smí jen plánovač.** Když inspektor cíl nevidí, ale plánovač na
+  DONE po upozornění trvá, běh **skončí jako DONE** a rozpor se jen zapíše.
+  Zmatený VLM (špatný úhel, gripper v cestě) nesmí poslat robota manipulovat
+  s už hotovou scénou — to by mohlo výsledek reálně rozbít.
+- **Pokračovat se smí, jen když se shodnou obě vrstvy:** inspektor cíl nevidí
+  **a** plánovač po upozornění DONE odvolá a pojmenuje zbývající kroky.
+
+Inspektorovi je v promptu výslovně řečeno, že „ne" znamená „nepotvrzeno" a je
+to bezpečná odpověď. Asymetrie je vědomá: špatné „ano" potichu ukončí
+nedokončenou úlohu a zkazí měřené číslo, špatné „ne" stojí jedno volání CEO a
+zapíše se.
+
+`success` v záznamu běhu **záměrně neměním**. Nové aditivní pole
+`done_checks` v `runs/*.json`: `{replan_index, verdict, inspector_reason,
+insisted, plan_after}`, kde `verdict` je `confirmed` / `denied` / `unknown` /
+`skipped` / `off`. Viz otevřené otázky — je to metodické rozhodnutí, ne
+technické.
+
+Nový přepínač `done_visual_check` (default `true`) v `server.py`,
+`web/config.js`, checkbox v `web/index.html`. Nové testy
+`tests/test_goal_check.py` (20 případů, bez robota a bez LeRobota) — včetně
+prvního pokrytí `parse_goal_flag()`, což je parser, na kterém teď visí
+výsledek běhu.
+
+### Co jsem zvažoval a zavrhl
+
+- **Při `denied` přepnout `success` na `False`.** Tím by se hlavní měřená
+  veličina diplomky předala do rukou malého VLM: jedna zmatená odpověď by
+  shodila prokazatelně povedený běh. Existující kód drží stejnou opatrnost v
+  opačném směru (`goal_done` od inspektora se uzná jen tehdy, když i krok
+  uspěl — „jedno zmatené GOAL: yes nesmí samo ukončit běh"). Zůstávám u
+  zápisu do dat; přepnutí je jednořádková změna, ale je to **tvoje**
+  metodické rozhodnutí, ne moje.
+- **Ověřovat stejně i `["ABORT"]`.** Není symetrické: „cíl je splněný" je
+  otázka, na kterou se dá z fotky odpovědět, „žádná posloupnost dovedností
+  odsud nevede k cíli" nikoli. ABORT navíc končí jako neúspěch, tedy v
+  konzervativním směru — nenafukuje výsledek.
+- **Pořizovat kvůli kontrole nový snímek vždy.** Snímky po ruce jsou čerstvé
+  (u re-plánu z právě proběhlé verifikace) a použít u úvodního plánu **tentýž
+  obrázek**, ze kterého plánoval CEO, je metodicky lepší: rozpor pak měří
+  neshodu modelů, ne rozdíl mezi dvěma fotkami.
+- **Startovat kvůli kontrole daemona, když neběží** (úvodní DONE při vypnuté
+  `planner_vision`). Znamenalo by to sáhnout na robota a kamery tam, kde se
+  dnes nesáhne. Bez snímků se DONE bere jako dnes a zapíše se `unknown`.
+
+### Otevřené otázky
+
+- **Jak často je DONE halucinace?** To je teď měřitelné (`done_checks`) a je
+  to samo o sobě výsledek do diplomky: kolik „úspěchů" orchestrace stojí na
+  neověřeném tvrzení plánovače.
+- Kolikrát plánovač po upozornění DONE **odvolá**, a dokončí pak úloha
+  doopravdy? Jestli skoro vždy odvolá a pak stejně selže, je kontrola jen
+  drahá.
+- Má se `success` u `denied` + `insisted` počítat jinak? Viz výše — návrh:
+  vyhodnotit obě varianty nad týmiž daty, když už jsou obě v záznamu.
+
+### Co potřebuje ověření na reálném hardwaru (uživatel)
+
+1. **Jestli inspektor neříká „ne" příliš často.** To je hlavní riziko: každé
+   „ne" stojí jedno volání CEO navíc a v případě, kdy plánovač couvne, běh
+   pokračuje tam, kde dřív skončil. Pozná se to v `done_checks` —
+   `verdict: "denied"` u běhů, které ve skutečnosti hotové byly. Kdyby se to
+   dělo, nejjednodušší ústupek je `done_visual_check: false`.
+2. **Že se ti při `denied` + odvolaném DONE robot nechová divoce** — je to
+   jediný případ, kdy tahle změna mění, co robot fyzicky dělá.
+3. **Že nové pole `done_checks` neshodí tvoje analytické skripty** (je
+   aditivní, ale ověř).
+4. Nejlevnější sanity check: pusť běh na scéně, kde je cíl **evidentně už
+   splněný**, a druhý na scéně, kde evidentně není, a jen se podívej, co
+   `done_checks` říká. Na to nepotřebuješ ani dokončený trénink.
+
+---
+
 ## 2026-09-07 — Kontrola plánu proti čidlu zátěže (grounded plan check)
 
 ### Co jsem zkoumal
