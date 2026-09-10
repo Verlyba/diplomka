@@ -11,6 +11,164 @@ Větev se nikdy nemerguje sama; revizi a merge do `main` dělá uživatel ručn�
 
 ---
 
+## 2026-09-10 (c) — Plánovač dostane zpátky vlastní paměť (`planner_memory`)
+
+### Co jsem zkoumal
+
+Hledal jsem, co orchestrace **zahazuje** oproti monolitu. Rámec z minulého
+záznamu říká, že orchestrace serializuje spojitý latentní stav do symbolů a
+platí za to propustností. Zajímalo mě, jestli se něco z toho nezahazuje
+zbytečně — tedy jestli se něco neztrácí, aniž by za to systém cokoli dostal.
+
+Ztrácí, a je to překvapivě velká věc: **plánovač je mezi voláními úplně bez
+paměti.** `_build_replan_context()` mu při každém re-plánu složí kontext z
+`PROGRESS THIS RUN` (výsledky kroků), verdiktu inspektora, stavu gripperu a
+fotky. Co tam **není**, je cokoli o jeho vlastních dřívějších rozhodnutích:
+`ceo_reasoning` z `_create_plan()` se vypíše do UI a **zahodí se**. Při
+re-plánu č. 3 tedy malý lokální model neví, že už dvakrát něco naplánoval,
+co to bylo, ani proč to zvolil. Odvozuje strategii pokaždé znovu z pytle
+verdiktů.
+
+Monolitická VLA tuhle kontinuitu má zadarmo — je to prostě její skrytý stav.
+Orchestrace ji rozbila a nic za to nedostala. To je čistá ztráta, ne výměna.
+
+A je to zároveň nejlevnější dostupný útok na dokumentovaný problém „malý
+lokální LLM navrhne identický re-plán". Kód na to dnes reaguje až **potom**
+(loop-guard `plan == previous_remaining`, který při druhém identickém plánu
+běh ukončí) — tedy detekcí a zabitím běhu, ne prevencí. Přitom nejzřejmější
+příčina toho, že model navrhne totéž, je, že **neví, že to už navrhl**.
+
+### Co jsem změnil
+
+Dvě čisté funkce v `orchestrator.py` + zapojení:
+
+**1. `format_planner_memory(history, total_attempts)`** — vyrenderuje do
+kontextu re-plánu blok:
+
+```
+YOUR OWN EARLIER DECISIONS IN THIS RUN (what you already proposed, and why):
+  plan 1 (attempts 1-2): ["a", "b", "c"] — "Předmět leží vlevo od cíle."
+  plan 2 (attempt 3): ["home", "a"] — "Rameno skončilo v divné poloze."
+These are your own past decisions, not measurements — the outcomes listed
+above are. If you propose one of these sequences again, say in your REASONING
+line what has changed since it was tried; otherwise choose a different one.
+```
+
+**Blok neopisuje výsledky kroků.** Čísla pokusů (`attempts 1-2`) jsou tatáž
+čísla, kterými je očíslovaný soupis `PROGRESS THIS RUN` o pár řádků výš,
+takže párování je přesné a stojí nula tokenů navíc. To je záměrné: požadavek
+„CEO dostává jen to nejnutnější" platí i tady.
+
+**2. `plan_repeat_index(plan, history)`** — kolikátý dřívější plán v tomhle
+běhu je s tímhle identický, nebo `None`. **Jenom se zaznamenává.** Nic
+neblokuje, nic nepřepisuje, nevyvolává žádný re-dotaz. Viz níž.
+
+**3. `Orchestrator._remember_plan()`** volané z `_plan_grounded()` na obou
+návratových cestách. Sentinely `["DONE"]` / `["ABORT"]` se do paměti
+nezapisují — nejsou to vyzkoušené posloupnosti, ale koncové verdikty, a už
+jsou v `done_checks`.
+
+**4. Nové aditivní pole `plan_history` v `runs/*.json`:** `{plan, reasoning,
+first_attempt, repeat_of}` za každý přijatý plán. `first_attempt` je číslo
+pokusu, které dostane nejbližší další spuštěný krok, takže **plány jdou
+spárovat s `steps[].attempt`**. Je to nezávislé na `plan_checks` (ty se plní
+jen při zapnutém `plan_state_check`), takže rozhodovací stopa pomalé vrstvy
+je v datech kompletní i v ablacích.
+
+**Klíčová vlastnost: počet volání CEO se nemění ani o jedno.** Tahle změna
+nepřidává žádné volání pomalé vrstvy, jen dává víc informací do volání, které
+se stejně děje. Metodicky je to důležité — měřená veličina „kolik volání
+plánovače stojí jeden běh" zůstává srovnatelná s předchozími běhy, a přesto
+jde o zásah do kvality plánování. V nejčistší podobě to je ten dvourychlostní
+argument: **levná vrstva (účetnictví orchestrátoru) obsluhuje drahou.**
+
+Nový přepínač `planner_memory` (default `true`) v `server.py`,
+`web/config.js`, checkbox v `web/index.html`; `false` reprodukuje **přesně**
+dosavadní chování. Nové testy `tests/test_plan_memory.py` (19 případů, bez
+robota, LeRobota i LM Studia).
+
+Diff je **čistě aditivní** (110 přidaných řádků, 0 smazaných) a **nemění
+fyzické chování robota vůbec** — mění se jen text promptu a zapisovaná data.
+To je vědomé: bez hardwaru nemám jak ověřit nic, co by robot udělal jinak.
+
+### Proč `repeat_of` NENÍ vzkříšení zavrženého `plan_repeat_conflict()`
+
+Tohle chci mít napsané výslovně, protože se to na první pohled podobá tomu,
+co bylo 2026-09-08 zavrženo a revertováno. Zavržená kontrola tvrdila
+**„od minulého pokusu se nic nezměnilo, takže zopakovaný plán je smyčka"** —
+tedy odvozovala stav prostředí z účetnictví orchestrátoru, což je přesně to,
+co se dělat nesmí. `plan_repeat_index()` netvrdí o prostředí nic: říká jen
+**„tenhle plán už jsi v tomhle běhu jednou navrhl"**, což je vlastnost výstupů
+modelu, ne světa. A hlavně **nic nerozhoduje** — zopakovaný plán se spustí
+úplně stejně jako předtím, jen se u něj zapíše číslo a vypíše INFO řádek.
+Věta v promptu opakování taky nezakazuje, jen si k němu říká o zdůvodnění;
+změněná scéna je legitimní důvod zkusit totéž znovu.
+
+Původní tvrdý loop-guard (`plan == previous_remaining`, druhé opakování ukončí
+běh) zůstává **beze změny**. Na ten jsem záměrně nesáhl.
+
+### Co jsem zvažoval a zavrhl
+
+- **Při `repeat_of` vyzvat plánovač k opravě** (jako to dělá
+  `plan_state_conflict`). Stálo by to volání CEO navíc a rozbilo by to tu
+  vlastnost výše (počet volání beze změny), a to za přínos, který zatím nikdo
+  nezměřil. Až budou v datech čísla o tom, jak často se plány opakují, dá se
+  to rozhodnout na podkladech.
+- **Posílat plánovači i jeho odůvodnění k plánům, které vedly k `["DONE"]`.**
+  Bez užitku: DONE končí běh (nebo ho `_settle_done()` zvrátí a plán se
+  zaznamená až v té odvolané podobě, což je ta správná).
+- **Zkrátit `PROGRESS THIS RUN` a nechat jen paměť plánů.** Lákavé kvůli
+  úspornosti kontextu, ale špatně: `PROGRESS` jsou **měření**, paměť plánů
+  jsou **rozhodnutí modelu**. Kdyby se to slilo do jednoho soupisu, ztratil by
+  se ten rozdíl a model by mohl začít brát vlastní dřívější úvahu jako důkaz
+  o světě. Proto to jsou dva bloky a poslední věta bloku ten rozdíl explicitně
+  pojmenovává.
+- **Přenášet paměť plánů mezi běhy.** Nepatří to sem: každý běh diplomky je
+  nezávislý pokus a mezi-běhová paměť by z něj udělala učící se systém, jehož
+  výsledky by nešly porovnat s baseline. (Jako samostatná kapitola by to
+  zajímavé bylo, ale je to jiný experiment.)
+- **Zapisovat do paměti i plány zamítnuté `plan_state_conflict()`** (tedy tu
+  první, neopravenou verzi). Zvažoval jsem to — je to zajímavé jako data —
+  ale do promptu by to patřit nemělo (model by dostával zpátky svůj vlastní
+  výrok, který mu už jednou byl vyvrácen) a v `plan_checks` už ta data jsou.
+
+### Otevřené otázky
+
+- **Sníží paměť počet identických re-plánů?** Teď je to měřitelné:
+  `plan_history[].repeat_of` říká, kolikrát se plán v běhu zopakoval. Ablace
+  `planner_memory: true/false` nad toutéž úlohou dá přímé srovnání.
+- **Nezhorší delší kontext kvalitu odpovědí malého modelu?** Reálné riziko —
+  gemma-4-e4b má omezené okno a k tomu dostává fotky. Blok je krátký (≤ 6
+  řádků při `max_replans: 5`), ale jestli se ukáže, že model po jeho přidání
+  začne vracet horší nebo nevalidní JSON, je to samo o sobě výsledek: znamenalo
+  by to, že tahle třída modelů neunese ani takhle levnou paměť.
+- **Využije model odůvodnění, nebo jen slugy?** Pozná se to podle toho, jestli
+  se v `REASONING` řádcích po re-plánu začnou objevovat odkazy na dřívější
+  úvahu. Kdyby ne, dala by se paměť zkrátit jen na plány (levnější kontext).
+- Je `first_attempt` dost na spárování plánů s kroky, nebo se hodí i explicitní
+  index re-plánu? Zatím to vypadá, že `first_attempt` je přesnější (váže se na
+  skutečné spuštění, ne na čítač).
+
+### Co potřebuje ověření na reálném hardwaru (uživatel)
+
+1. **Že plánovač po přidání bloku pořád vrací platné JSON pole.** Tohle je
+   jediné reálné riziko celé změny a projeví se hned — v logu jako „CEO
+   nevrátil platné JSON pole" u re-plánů (u úvodního plánu se blok nepřidává,
+   takže tam se nic změnit nemůže). Kdyby se to dělo, `planner_memory: false`
+   to vrátí přesně do dnešního stavu.
+2. **Jak blok vypadá v tvém reálném kontextu.** Nejlevnější sanity check:
+   pusť běh, nech ho jednou selhat a podívej se do logu na to, co šlo do
+   plánovače při re-plánu — čísla `attempts N-M` musí sedět na řádky
+   `PROGRESS THIS RUN` nad nimi.
+3. **Že nové pole `plan_history` v `runs/*.json` neshodí tvoje analytické
+   skripty** (je aditivní, ale ověř).
+4. Ablace na jeden večer: tatáž úloha 2× s `planner_memory: true` a 2× s
+   `false`, a porovnat, kolikrát plánovač navrhl plán, který už jednou navrhl
+   (`plan_history[].repeat_of`). Počet volání CEO na běh by se mezi
+   podmínkami měnit **neměl** — pokud se mění, je to samo o sobě zajímavé.
+
+---
+
 ## 2026-09-10 (b) — Adaptivní orchestrace: rozvaha + první krok (kalibrace prahů z telemetrie)
 
 Tenhle záznam nevznikl v noční rutině, ale z rozhovoru s uživatelem, který
