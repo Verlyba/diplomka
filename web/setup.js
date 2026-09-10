@@ -525,6 +525,16 @@ let isFormDirty = false;
     });
   }
 
+  const calibBtn = document.getElementById('btn-calibration');
+  if (calibBtn) {
+    calibBtn.addEventListener('click', () => {
+      // Čte se to, co je uložené v config.json — ne rozeditovaný formulář:
+      // tabulka má ukazovat prahy, se kterými ty běhy v telemetrii doopravdy
+      // proběhly, ne hodnotu, kterou uživatel právě píše do políčka.
+      refreshCalibration();
+    });
+  }
+
   setupModalEvents();
   await fetchProjects();
   setupProjectEvents();
@@ -1305,4 +1315,102 @@ function renderModalCheckpoints(checkpoints, stepSlug) {
 
     container.appendChild(card);
   });
+}
+
+/* ── Naměřeno vs. nastaveno (kalibrace prahů z telemetrie) ───────────── */
+
+const CALIB_VERDICT = {
+  ok: { text: 'leží v naměřené mezeře', color: 'var(--green)' },
+  too_low: { text: 'příliš nízko — protokol skoro nikdy nespustí', color: 'var(--red)' },
+  too_high: { text: 'příliš vysoko — protokol spustí i za pohybu', color: 'var(--red)' },
+  insufficient_data: { text: 'málo běhů', color: 'var(--muted)' },
+  unknown: { text: 'nelze posoudit', color: 'var(--muted)' },
+};
+
+function calibNum(value) {
+  if (value === null || value === undefined) return '—';
+  const abs = Math.abs(value);
+  return abs !== 0 && abs < 10 ? value.toFixed(2) : String(Math.round(value));
+}
+
+async function refreshCalibration() {
+  const host = document.getElementById('calibration-out');
+  const status = document.getElementById('calibration-status');
+  if (!host) return;
+  if (status) { status.textContent = 'Čtu telemetrii…'; status.style.color = 'var(--muted)'; }
+  let report;
+  try {
+    const resp = await fetch('/api/calibration');
+    report = await resp.json();
+  } catch (err) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ Server neběží — telemetrii nejde načíst.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (!report.ok) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ ' + (report.error || 'Neznámá chyba'); status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (status) {
+    status.textContent = `${report.runs_total} běhů v telemetry/ · minimum pro výpočet: ${report.min_runs}`;
+    status.style.color = 'var(--muted)';
+  }
+  renderCalibration(host, report);
+}
+
+function renderCalibration(host, report) {
+  host.innerHTML = '';
+  if (!report.steps || !report.steps.length) {
+    host.innerHTML = '<div class="dataset-empty">V telemetry/ zatím nejsou žádná data. '
+      + 'Pusť aspoň jeden běh orchestrace a načti znovu.</div>';
+    return;
+  }
+
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%; border-collapse:collapse; font-size:13px';
+  const head = document.createElement('tr');
+  ['krok', 'veličina', 'nastaveno', 'naměřená mezera', 'návrh', 'verdikt'].forEach((label, i) => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    th.style.cssText = 'text-align:' + (i < 2 ? 'left' : 'right')
+      + '; padding:4px 8px; border-bottom:1px solid var(--border); color:var(--muted); font-weight:600';
+    if (i === 5) th.style.textAlign = 'left';
+    head.appendChild(th);
+  });
+  table.appendChild(head);
+
+  report.checks.forEach((c) => {
+    const tr = document.createElement('tr');
+    const verdict = CALIB_VERDICT[c.verdict] || CALIB_VERDICT.unknown;
+    const band = c.band_low === null || c.band_high === null
+      ? '—' : `${calibNum(c.band_low)} – ${calibNum(c.band_high)}`;
+    const cells = [
+      { text: c.scope, align: 'left' },
+      { text: c.label, align: 'left', title: c.note || '' },
+      { text: calibNum(c.configured), align: 'right' },
+      { text: band, align: 'right' },
+      { text: calibNum(c.suggested), align: 'right' },
+      { text: `${verdict.text} (${c.runs}/${c.min_runs} běhů)`, align: 'left', color: verdict.color },
+    ];
+    cells.forEach((cell) => {
+      const td = document.createElement('td');
+      td.textContent = cell.text;
+      if (cell.title) td.title = cell.title;
+      td.style.cssText = `text-align:${cell.align}; padding:4px 8px; border-bottom:1px solid var(--border)`;
+      if (cell.color) td.style.color = cell.color;
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+  host.appendChild(table);
+
+  const steps = document.createElement('div');
+  steps.style.cssText = 'margin-top:10px; color:var(--muted); font-size:12px';
+  steps.textContent = 'Kroky v telemetrii: ' + report.steps.map((s) => {
+    const reasons = Object.entries(s.end_reasons || {})
+      .map(([k, v]) => `${k} ${v}×`).join(', ') || 'bez ukončení';
+    return `${s.step} (${s.runs} běhů, ${s.attempts} pokusů — ${reasons})`;
+  }).join(' · ');
+  host.appendChild(steps);
 }

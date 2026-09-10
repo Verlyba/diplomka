@@ -85,6 +85,11 @@ const DEFAULTS = {
   protocol_b_stability_slope: 30.0,
   holding_limit_ma: 20,
   gripper_state_in_context: true,
+
+  // Kolik proběhlých běhů musí být v telemetry/, než kalibrační tabulka
+  // („naměřeno vs. nastaveno") vydá u dané veličiny verdikt. Neovlivňuje běh
+  // robota — jen to, odkdy se ta čísla berou vážně.
+  calibration_min_runs: 3,
 };
 
 /** Načte konfiguraci: nejdřív backend (autorita), jinak localStorage. */

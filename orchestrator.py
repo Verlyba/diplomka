@@ -1818,6 +1818,14 @@ class Orchestrator:
                 # serial port) — a single hardware hiccup shouldn't zero out
                 # an otherwise fine trial.
                 reason = None
+                # Wall-clock window of this attempt, recorded so a run can be
+                # joined against the daemon's telemetry/*.jsonl afterwards
+                # (those rows carry absolute `t`). Without it the two files
+                # cannot be lined up per step, which is what stops
+                # calibrate_protocols.py from separating "the load rose and
+                # the grasp actually held" from "the load rose while the jaws
+                # closed on nothing" — that label only exists on this side.
+                step_started = time.time()
                 for attempt in (1, 2):
                     try:
                         if self.daemon is None:
@@ -1844,6 +1852,7 @@ class Orchestrator:
                                           f"krok '{step}' znovu.")
                         self.daemon.stop()
                         self.daemon = None
+                step_ended = time.time()
                 self.emit("step", index=index, step=step, phase="executed", reason=reason)
 
                 # 3) physical validation + visual inspector
@@ -1952,7 +1961,9 @@ class Orchestrator:
                                      # non-observation), `outcome` is what
                                      # tells the two apart in the analysis.
                                      "outcome": outcome,
-                                     "reflex_retry": action == "retry"})
+                                     "reflex_retry": action == "retry",
+                                     "t_start": round(step_started, 3),
+                                     "t_end": round(step_ended, 3)})
                 self.emit("step", index=index, step=step, phase="verified",
                           success=success, tag=tag, reason=reason, attempt=att_num,
                           insp_reason=insp_reason, conflict=conflict)

@@ -11,6 +11,181 @@ Větev se nikdy nemerguje sama; revizi a merge do `main` dělá uživatel ručn�
 
 ---
 
+## 2026-09-10 (b) — Adaptivní orchestrace: rozvaha + první krok (kalibrace prahů z telemetrie)
+
+Tenhle záznam nevznikl v noční rutině, ale z rozhovoru s uživatelem, který
+přišel s otázkou: **co kdyby se orchestrační schéma měnilo podle úlohy, nebo
+bylo nějak adaptivní?** Zapisuju obojí — rozvahu i to, co z ní bylo rovnou
+zapracované.
+
+### Rámec: co orchestrace kupuje a za co
+
+Monolitická VLA (text-conditioned policy) drží celou úlohu v jednom spojitém
+latentním stavu. Orchestrace ten stav v každém kroku **serializuje do
+symbolů** (slug dovednosti, tag, `SUCCESS` / `[unclear]`), čímž propustnost
+mezi vrstvami klesne o několik řádů. Na oplátku vznikne **kontrolovatelnost**
+(existuje místo, kde se dá zeptat „povedlo se to?") a **zotavení** (existuje
+místo, kde se dá rozhodnout jinak).
+
+Adaptivní schéma je pak otázka: *kde v téhle úloze se ta výměna propustnosti
+za ověřitelnost vyplatí, a kde ne.* To je obhajitelná výzkumná otázka, ne
+inženýrský tuning.
+
+### Čtyři úrovně adaptivity (rozvaha, ne plán prací)
+
+**0 — už existuje.** Katalog nese příznaky `grasp` / `reset` a orchestrátor
+podle nich mění ověřovací schéma za běhu (protokol B u úchopu, A u homingu,
+u zbytku nic). Všechno níž je zobecnění téhle jedné myšlenky.
+
+**1 — adaptivní parametry, fixní topologie.** Prahy a limity odvozené z dat
+místo z ruky. Vědecky nejméně vzrušující, prakticky největší dopad — a je to
+to, co se dnes zapracovalo (viz níž).
+
+**2 — CEO nevydá plán, ale *smlouvu*.** Pomalá vrstva by při plánování vydala
+i per-step kritérium úspěchu a očekávané režimy selhání; rychlá vrstva je pak
+jen vykonává. Čistě dvourychlostní argument: drahý model na **specifikaci**,
+levný na **exekuci té specifikace**. Vyřešilo by to i ruční psaní
+`verify_hint` v `projects/*.json`. Riziko: ground truth by se přesunula do
+nejméně spolehlivé vrstvy — muselo by to být aditivní k fyzickým protokolům,
+ne místo nich.
+
+**3 — adaptivní rozpočet ověřování (meta-reasoning).** Orchestrátor si během
+běhu drží odhad spolehlivosti každého kanálu a podle toho utrácí pomalou
+vrstvu. Formálně bounded rationality / anytime algorithms — citovatelné.
+`reflex_retry_decision()` z dnešní noční rutiny je první políčko téhle
+úrovně („když levný důkaz nic netvrdí, nevolej drahou vrstvu").
+
+**4 — adaptivní topologie.** Schéma si podle měřitelných vlastností úlohy
+(počet fází, je tam úchop, je cíl vizuálně ověřitelný, je selhání vratné)
+vybere samo sebe z: monolit / orchestrace bez ověřování / s ověřováním /
+s re-plánováním. Nejzajímavější a experimentálně nejnebezpečnější — viz
+varování níž.
+
+### Proč je adaptivita zajímavá zrovna u robotiky
+
+Tři věci, které u textového agenta nemají obdobu:
+
+1. **Nevratnost není uniformní.** Minutý nájezd se zopakuje zadarmo; vyražení
+   předmětu z dosahu nebo puštění křehkého objektu ne. Ověřování by se mělo
+   utrácet úměrně nevratnosti kroku. Fyzikálně nejzřejmější osa adaptivity,
+   jakou tahle doména má — a nikdo ji nedělá.
+2. **Latence má fyzickou cenu.** Zatímco schéma přemýšlí, svět se hýbe.
+   „Kolik ověřování si můžu dovolit" je vlastnost úlohy, ne konfigurace.
+3. **Pozorovatelnost je per-krok jiná.** Úchop má silovou signaturu, položení
+   vizuální, nájezd kinematickou. Fixní schéma si musí vybrat jednu — přesně
+   proto se muselo protokolu A zakázat ukončovat `grasp`.
+
+### Metodické varování (patří do diplomky, ne do kódu)
+
+Adaptivní schéma je **nadmnožina** toho, co se měří. Tvrzení „adaptivní >
+fixní" potřebuje napřed změřené fixní varianty, jinak není vůči čemu. Při
+reálném počtu běhů, který zvládne jeden člověk s jedním ramenem, přidané
+stupně volnosti sežerou statistickou sílu dřív, než z nich něco vyleze.
+Doporučení: **současné schéma zůstává fixní jako měřený artefakt**,
+adaptivita je navržená-ale-neměřená kapitola.
+
+Zajímavý důsledek: `plan_checks`, `done_checks` a `steps[].outcome` jsou samy
+o sobě **měřením toho, kde je fixní schéma špatně** — tedy empirickým
+podkladem pro „tady by adaptivita pomohla", aniž by se musela postavit.
+
+### Co se z toho zapracovalo (úroveň 1)
+
+Uživatel souhlasil s kritérii odvozenými z dat a zadal k tomu tři podmínky:
+aplikace musí umět **nastavit výchozí hodnoty**, musí **vyžadovat nějaký
+počet běhů** pro platný výpočet a musí **zobrazovat naměřené hodnoty proti
+nastaveným** kvůli debugování. Všechny tři jsou splněné.
+
+Nový `calibrate_protocols.py` (stdlib, bez LeRobota i bez robota) čte
+`telemetry/*.jsonl`, které daemon zapisuje už dnes, a staví tabulku
+„naměřeno vs. nastaveno" pro `protocol_a_threshold_rad`,
+`protocol_b_stability_slope`, `protocol_b_limit_ma` a `holding_limit_ma`.
+Nový endpoint `GET /api/calibration` + panel v Nastavení pod ukončovacími
+protokoly. Nový klíč `calibration_min_runs` (default 3).
+
+**Skript ani endpoint nic nezapisují.** Prahy se nesmí měnit uprostřed
+měřené série, aniž by o tom experimentátor věděl — aplikovat návrh je pořád
+ruční editace v Nastavení. Celá cesta je tím pádem read-only a nemůže rozbít
+běžící experimenty.
+
+Jak se odvozuje návrh: u prahů, které mají oddělit dva režimy téže veličiny
+(klid vs. pohyb, plató vs. stoupání, prázdné čelisti vs. držení), se vezme
+spodní a horní okraj naměřené mezery a návrh je jejich **geometrický
+průměr** — střed mezery na logaritmické škále. Není to odhadnutá konstanta:
+mezera je naměřená a její střed je jediné místo stejně vzdálené od obou chyb
+(práh tak nízko, že protokol nikdy nespustí, × tak vysoko, že spustí
+uprostřed pohybu). Aritmetický průměr by u režimů vzdálených o řád skončil
+těsně pod horním okrajem, tedy prakticky na hranici pohybu.
+
+`holding_limit_ma` je jediný práh, u kterého jde „drží / nedrží" oštítkovat
+bez inspektora: klidové tiky **před prvním krokem běhu** mají prázdné
+čelisti, klidové tiky **hned po kroku ukončeném protokolem B** něco drží.
+Štítek plyne z pořadí událostí, ne z prahu, který se kalibruje.
+
+`calibration_min_runs` je tvrdá pojistka: dokud krok nemá tolik běhů,
+nevydá se u něj **ani verdikt, ani návrh**. Default 3 není doporučená
+velikost vzorku, ale nejmenší *n*, při kterém je medián doopravdy prostřední
+pozorování a ne průměr dvou krajních — spodní hranice, pod kterou nemá smysl
+počítat nic. Reálně si ji uživatel nastaví výš, na to je to pole v UI.
+
+### Co jsem zvažoval a zavrhl
+
+- **Automaticky aplikovat spočtené prahy.** Tiše by to změnilo význam každého
+  pozdějšího běhu. Kdyby to uživatel chtěl, správná podoba je přepínač +
+  zápis skutečně použitých prahů do `runs/*.json`, ne tichá aplikace.
+- **Per-step override prahů (`steps[].protocol_*`, jako už je `timeout_s`).**
+  Architektonicky je tohle ta pravá „adaptivní" podoba a katalog na ni má
+  strukturu. Zavrženo pro teď: prahy jdou do daemona jako CLI argumenty při
+  startu a daemon přežívá celý běh, takže by se per-step hodnoty musely
+  posílat protokolem `SET_TASK` — zásah do rozhraní, které drží reálný
+  hardware, bez možnosti ho tady ověřit. Až po tomhle měřicím kroku.
+- **Navrhovat i `protocol_b_limit_ma`.** Nejde to poctivě: sevření předmětu a
+  průjezd proudu při zavírání naprázdno se v naměřených hodnotách překrývají
+  (viz komentáře u `PROTOCOL_B_GRACE_S` — potvrzený úchop s nárůstem 108 ležel
+  mezi falešnými spuštěními 72 a 139). Z telemetrie samotné je oddělit nelze;
+  chybí nezávislý štítek „tenhle úchop se povedl", který zná až inspektor.
+  Tabulka proto u téhle veličiny jen popisuje, co se naměřilo.
+- **Odvozovat `protocol_b_grace_s` a patience.** Šlo by to (doba do odeznění
+  rozjezdového transientu), ale bez okna, které bych si musel vymyslet, to
+  nevyjde. Nechávám na příště.
+
+### Co se přidalo navíc (a proč)
+
+`steps[].t_start` / `t_end` v `runs/*.json` — aditivní časové okno každého
+pokusu. Nepoužívá to zatím nic, a je to vědomé: bez něj **nejde spárovat
+`runs/*.json` s `telemetry/*.jsonl` po krocích**, a právě to párování je
+jediná cesta k nezávislému štítku „úchop se povedl", který dnes chybí
+kalibraci protokolu B. Data, která se nezaznamenají teď, se zpětně
+nedoberou — každý běh bez toho pole je běh, který na lepší kalibraci nepůjde
+použít.
+
+### Otevřené otázky
+
+- Sedí návrhy na reálné telemetrii, nebo jsou mezery tak široké, že je návrh
+  bezcenný? U prahu protokolu A je mezera podle komentářů v kódu obrovská
+  (šum ~0.5 vs. pohyb v desítkách), takže tam je hlavní hodnota v **kontrole,
+  že nastavená hodnota vůbec leží v mezeře**, ne v samotném čísle.
+- Kolik běhů je doopravdy potřeba, než se rozdělení ustálí? To se dá zjistit
+  jen tak, že se `calibration_min_runs` postupně zvedá a kouká se, jestli se
+  návrh hýbe.
+- Stojí za to párování `runs` × `telemetry` (viz `t_start` / `t_end`), nebo
+  je jednodušší nechat uživatele pár úchopů ručně oštítkovat?
+
+### Co potřebuje ověření na reálném hardwaru (uživatel)
+
+1. **Že tabulka vůbec něco ukáže** — závisí na tom, že daemon telemetrii
+   opravdu píše (`--telemetry-log` není `off`) a že `telemetry/` není prázdné.
+2. **Jestli verdikty dávají smysl u prahů, o kterých víš, že jsou dobře.**
+   Nejlevnější sanity check: podívej se na tabulku po pár běhů, které
+   proběhly bez problémů — tam musí být všude „leží v naměřené mezeře".
+   Kdyby ne, je špatně kalibrace, ne tvoje nastavení.
+3. **Jestli `holding_limit_ma` návrh sedí** s tím, co ti vyšlo z
+   `measure_gripper_current.py`. Ty dvě čísla mají spolu souviset a je to
+   nezávislá kontrola obojího.
+4. Nová pole `t_start` / `t_end` v `runs/*.json` jsou aditivní, ale ověř, že
+   ti přes ně analytické skripty neprojdou jinak.
+
+---
+
 ## 2026-09-10 — „Nikdo to neviděl" přestává být selhání (OUTCOME_UNCERTAIN)
 
 ### Co jsem zkoumal

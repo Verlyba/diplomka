@@ -304,6 +304,33 @@
         <div class="note warn">Baseline (monolitický model) běží vždy s <b>vypnutými oběma
           protokoly</b> — končí jen časovým limitem. Tohle nastavení se ho proto netýká, platí jen
           pro orchestraci.</div>
+
+        <h3 style="margin-top:20px">Naměřeno vs. nastaveno <span style="font-weight:400;color:var(--muted);font-size:13px">(kontrola prahů z telemetrie)</span></h3>
+        <p style="color:var(--muted);font-size:13px;margin-top:0">
+          Prahy výše jsou ručně nastavená čísla. Daemon přitom při každém běhu zapisuje do
+          <code class="inline">telemetry/</code> přesně ty veličiny, proti kterým se ty prahy
+          porovnávají — pohyb kloubů mezi snímky, nárůst zátěže gripperu, sklon toho nárůstu.
+          Tahle tabulka je přečte zpátky a ukáže, <b>kde nastavená hodnota leží vůči tomu, co se
+          doopravdy naměřilo</b>. Nic nepřepisuje: hodnoty si přepiš nahoře sám, až se rozhodneš.</p>
+        <div class="grid" style="margin-top:10px">
+          <label class="field" title="Dokud daný krok nemá aspoň tolik proběhlých běhů v telemetrii, tabulka u něj neukáže verdikt ani návrh — prahy se nemají ladit podle jednoho náhodného pokusu.">Minimum běhů pro výpočet
+            <input data-key="calibration_min_runs" type="number" step="1" min="1">
+          </label>
+        </div>
+        <div style="margin-top:10px; display:flex; align-items:center; gap:10px">
+          <button type="button" id="btn-calibration" class="secondary" style="padding:6px 14px">↻ Načíst z telemetrie</button>
+          <span id="calibration-status" style="font-size:13px; color:var(--muted)"></span>
+        </div>
+        <div id="calibration-out" style="margin-top:12px"></div>
+        <div class="note">Návrh se počítá jako <b>střed mezery mezi dvěma naměřenými režimy</b> na
+          logaritmické škále — u prahu pohybu je dolním okrajem klidový šum čidla a horním skutečný
+          pohyb ramene, u prahu „něco drží" zátěž v klidu s prázdnými čelistmi a zátěž v klidu hned
+          po potvrzeném úchopu. Není to odhad: mezera je naměřená a její střed je jediné místo
+          stejně vzdálené od obou chyb (práh tak nízko, že protokol nikdy nespustí, × tak vysoko,
+          že spustí uprostřed pohybu). U <b>nárůstu zátěže pro ukončení kroku</b> se návrh záměrně
+          nepočítá — sevření předmětu a průjezd proudu při zavírání naprázdno se u tohohle
+          hardwaru v naměřených hodnotách překrývají, takže je z telemetrie samotné oddělit nejde.
+          Tam tabulka jen ukazuje, co se naměřilo.</div>
       </fieldset>
 
       <div class="row">
