@@ -16,6 +16,7 @@ orchestration page needs:
     POST /api/stop       stop the running orchestration
     GET  /api/status     is something running right now
     GET  /api/runs       list the saved run logs
+    GET  /api/runs/consistency  did the settings stay identical across runs
     GET  /api/calibration  measured protocol A/B values vs. the configured ones
     GET  /api/events     server-sent events stream (log / plan / step / ...)
 
@@ -41,6 +42,7 @@ from urllib.parse import urlparse, parse_qs
 
 import calibrate_protocols as calib
 import orchestrator as orch
+import run_consistency as consistency
 
 HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
@@ -666,6 +668,19 @@ class Handler(BaseHTTPRequestHandler):
             files = sorted((f.name for f in runs_dir.glob("*.json")), reverse=True) \
                 if runs_dir.exists() else []
             self._send_json({"runs": files[:50]})
+        elif path == "/api/runs/consistency":
+            # "Nastavení jsem mezi běhy neměnil" je tvrzení o minulosti, které
+            # si nikdo nepamatuje přesně — a přitom na něm stojí platnost
+            # srovnání baseline vs. orchestrace. Tohle ho ověří ze záznamů.
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                runs = consistency.load_runs(HERE / "runs")
+                if qs.get("all", ["0"])[0] != "1":
+                    runs = consistency.filter_by_task(runs, load_config().get("task_slug", ""))
+                runs = consistency.take_last(runs, int(qs.get("last", ["0"])[0] or 0))
+                self._send_json({"ok": True, **consistency.compare(runs)})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/calibration":
             # Read-only on purpose: this endpoint measures, it never writes a
             # threshold back. Changing a protocol threshold mid-series would

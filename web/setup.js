@@ -535,6 +535,11 @@ let isFormDirty = false;
     });
   }
 
+  const consistencyBtn = document.getElementById('btn-consistency');
+  if (consistencyBtn) consistencyBtn.addEventListener('click', () => refreshConsistency());
+  const consistencyAll = document.getElementById('chk-consistency-all');
+  if (consistencyAll) consistencyAll.addEventListener('change', () => refreshConsistency());
+
   setupModalEvents();
   await fetchProjects();
   setupProjectEvents();
@@ -1413,4 +1418,85 @@ function renderCalibration(host, report) {
     return `${s.step} (${s.runs} běhů, ${s.attempts} pokusů — ${reasons})`;
   }).join(' · ');
   host.appendChild(steps);
+}
+
+/* ── Stabilita nastavení mezi běhy ────────────────────────────────────── */
+
+async function refreshConsistency() {
+  const host = document.getElementById('consistency-out');
+  const status = document.getElementById('consistency-status');
+  if (!host) return;
+  const all = document.getElementById('chk-consistency-all');
+  if (status) { status.textContent = 'Čtu záznamy běhů…'; status.style.color = 'var(--muted)'; }
+  let report;
+  try {
+    const resp = await fetch('/api/runs/consistency' + (all && all.checked ? '?all=1' : ''));
+    report = await resp.json();
+  } catch (err) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ Server neběží — záznamy nejde načíst.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (!report.ok) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ ' + (report.error || 'Neznámá chyba'); status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (status) { status.textContent = `porovnáno ${report.n} běhů`; status.style.color = 'var(--muted)'; }
+  renderConsistency(host, report);
+}
+
+function renderConsistency(host, report) {
+  host.innerHTML = '';
+  if (!report.n) {
+    host.innerHTML = '<div class="dataset-empty">Žádné záznamy běhů se zaznamenanou konfigurací. '
+      + 'Pusť orchestraci a zkus to znovu.</div>';
+    return;
+  }
+
+  const verdict = document.createElement('div');
+  verdict.style.cssText = 'font-weight:600; padding:8px 0';
+  if (report.stable) {
+    verdict.textContent = `✓ Stabilní — napříč ${report.n} běhy se nezměnil jediný klíč rozhodný pro měřené schéma.`;
+    verdict.style.color = 'var(--green)';
+  } else {
+    verdict.textContent = `⚠ Nastavení se mezi běhy měnilo — rozhodných rozdílů: ${report.decisive_differences}.`
+      + ' Běhy před změnou a po ní se nesmí sčítat do jednoho čísla.';
+    verdict.style.color = 'var(--red)';
+  }
+  host.appendChild(verdict);
+
+  if (report.runs_without_settings && report.runs_without_settings.length) {
+    const legacy = document.createElement('div');
+    legacy.style.cssText = 'color:var(--muted); font-size:12px; padding-bottom:6px';
+    legacy.textContent = `${report.runs_without_settings.length} záznamů nemá uloženou konfiguraci `
+      + '(starší formát) — o těch se nedá říct ani že sedí, ani že ne.';
+    host.appendChild(legacy);
+  }
+
+  if (!report.differences.length) return;
+
+  const list = document.createElement('div');
+  list.style.cssText = 'font-size:13px; margin-top:6px';
+  report.differences.forEach((diff) => {
+    const block = document.createElement('div');
+    block.style.cssText = 'padding:6px 0; border-top:1px solid var(--border)';
+
+    const title = document.createElement('div');
+    title.textContent = (diff.decisive ? '! ' : '') + diff.key;
+    title.style.cssText = 'font-weight:600; color:' + (diff.decisive ? 'var(--red)' : 'var(--muted)');
+    block.appendChild(title);
+
+    diff.values.forEach((group) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'color:var(--muted); padding-left:14px';
+      const value = group.missing ? '(klíč v záznamu chybí)' : JSON.stringify(group.value);
+      const shown = group.runs.slice(0, 4).join(', ');
+      const more = group.runs.length > 4 ? ` (+${group.runs.length - 4} dalších)` : '';
+      row.textContent = `${value} — ${group.runs.length}×: ${shown}${more}`;
+      block.appendChild(row);
+    });
+    list.appendChild(block);
+  });
+  host.appendChild(list);
 }

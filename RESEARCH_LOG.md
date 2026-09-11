@@ -170,8 +170,60 @@ použít.
 - Stojí za to párování `runs` × `telemetry` (viz `t_start` / `t_end`), nebo
   je jednodušší nechat uživatele pár úchopů ručně oštítkovat?
 
+### Dodatek: stabilita nastavení mezi běhy
+
+Uživatel k tomu doplnil tvrdý požadavek: **nastavení se nesmí měnit ani mezi
+běhy**, protože se v diplomce porovnává baseline s orchestrací a jednotlivé
+pokusy orchestrace by jinak měly každý jiné nastavení. To je správně a je to
+přesně důvod, proč je celá kalibrační cesta jen čtecí.
+
+Jenže „nastavení jsem neměnil" je **tvrzení o minulosti, které si nikdo
+nepamatuje přesně** — a je to táž chyba, na kterou doplatil zavržený
+`plan_repeat_conflict()` (2026-09-08): tvrdit něco o skutečnosti z paměti
+místo ze záznamu. Naštěstí záznam existuje: `_save_run()` ukládá do každého
+`runs/<id>.json` celou konfiguraci běhu i katalog kroků. Jen to nikdo nečetl
+zpátky.
+
+Nový `run_consistency.py` (stdlib, jen `runs/*.json`) + `GET
+/api/runs/consistency` + panel v Nastavení. Porovná konfigurace napříč běhy a
+vypíše, co se lišilo. Klíč je označený jako **rozhodný**, pokud se dostane
+(a) na příkazovou řádku daemona, (b) do řídicí smyčky orchestrátoru, nebo
+(c) do promptu některého z modelů — seznam je odvozený čtením `Daemon.start()`
+a `run()`, ne odhadnutý. Nerozhodné rozdíly (cesty, port robota) se vypíšou
+taky, jen stabilitu neshodí; nic se neschovává.
+
+Detaily, které se ukázaly jako podstatné:
+
+- **Per-step `timeout_s` z katalogu se porovnává stejně jako globální prahy**
+  (jako `krok[grab].timeout_s`). Je to hodnota, která rozhoduje, kdy se krok
+  usekne — její změna mezi běhy je úplně stejně zásadní jako změna prahu, a
+  přitom ji zapisuje existující tlačítko „Spustit teď" u časových limitů.
+- **Chybějící klíč není shoda s výchozí hodnotou.** Běh z doby před přidáním
+  přepínače ho v konfiguraci nemá; hlásí se to jako rozdíl, ne se tiše
+  dopočítává default.
+- **Běhy bez zaznamenané konfigurace** (starší formát) se počítají zvlášť —
+  stabilitu ani nepotvrzují, ani nevyvracejí.
+- **`calibration_min_runs` se ignoruje**, protože neovlivňuje jediný řádek
+  toho, co dělá robot. Jinak by každé přenastavení kalibrační tabulky
+  vypadalo jako změna experimentu.
+- Filtr podle `task_slug` je default: běhy jiné úlohy se liší skoro ve všem a
+  byl by to šum, ne nález.
+
+V UI je zároveň vypsané, **kudy se nastavení mezi běhy vůbec může změnit**:
+ruční editace v Nastavení, přepnutí projektu, tlačítko „Spustit teď" u
+časových limitů (píše `timeout_s` do `config.json`) a ruční editace
+`config.json`. Kalibrační tabulka ani tenhle přehled mezi nimi nejsou.
+
+Pozn.: `runs/*.json` píše jen `Orchestrator._save_run()`, takže tenhle přehled
+pokrývá **orchestrační větev**. Baseline se přes orchestrátor nepouští.
+
 ### Co potřebuje ověření na reálném hardwaru (uživatel)
 
+0. **Pusť kontrolu stability na svých dosavadních běhách.** Je to čtecí a
+   okamžité, a pokud ti vyhlásí rozdíly, je lepší to vědět teď než při psaní
+   výsledků. Čekej, že starší běhy budou mít rozdíly v klíčích, které
+   přibyly v posledních nocích (`uncertain_retry`, `plan_state_check`,
+   `done_visual_check`) — to je správné chování, ne chyba.
 1. **Že tabulka vůbec něco ukáže** — závisí na tom, že daemon telemetrii
    opravdu píše (`--telemetry-log` není `off`) a že `telemetry/` není prázdné.
 2. **Jestli verdikty dávají smysl u prahů, o kterých víš, že jsou dobře.**

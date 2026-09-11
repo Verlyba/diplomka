@@ -333,6 +333,36 @@
           Tam tabulka jen ukazuje, co se naměřilo.</div>
       </fieldset>
 
+      <fieldset>
+        <legend>Stabilita nastavení mezi běhy</legend>
+        <p style="color:var(--muted);font-size:13px;margin-top:0">
+          V diplomce porovnáváš baseline s orchestračním schématem. Aby to srovnání něco
+          znamenalo, musí <b>všechny běhy orchestrace proběhnout se stejným nastavením</b> —
+          jinak se neporovnávají dvě schémata, ale hromada různě nastavených variant jednoho
+          z nich. Každý běh si přitom do <code class="inline">runs/&lt;id&gt;.json</code> ukládá
+          celou konfiguraci, se kterou proběhl. Tohle ji přečte zpátky a řekne, jestli se něco
+          mezi běhy změnilo — nemusíš si to pamatovat.</p>
+        <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+          <button type="button" id="btn-consistency" class="secondary" style="padding:6px 14px">↻ Zkontrolovat záznamy běhů</button>
+          <label class="checkline" style="margin:0" title="Jinak se porovnávají jen běhy aktuálního projektu — běhy jiné úlohy se logicky liší skoro ve všem a byl by to jen šum.">
+            <input type="checkbox" id="chk-consistency-all"> <span>i ostatní projekty</span>
+          </label>
+          <span id="consistency-status" style="font-size:13px; color:var(--muted)"></span>
+        </div>
+        <div id="consistency-out" style="margin-top:12px"></div>
+        <div class="note">Vykřičníkem jsou označené klíče <b>rozhodné pro měřené schéma</b> — ty,
+          které se dostanou na příkazovou řádku inferenčního daemona, do řídicí smyčky
+          orchestrátoru, nebo do promptu některého z modelů. Změna takového klíče uprostřed série
+          znamená, že se běhy před ní a po ní <b>nesmí sčítat do jednoho čísla</b>. Ostatní rozdíly
+          (cesty, port robota) se vypíšou taky, ale na chování měřené smyčky vliv nemají.</div>
+        <div class="note warn">Kalibrační tabulka výš ani tenhle přehled <b>nikdy nic nepřepisují</b>.
+          Nastavení mezi běhy může změnit jen: ruční úprava tady v Nastavení, přepnutí projektu,
+          tlačítko <b>„Spustit teď"</b> u časových limitů kroků (zapisuje
+          <code class="inline">timeout_s</code> do <code class="inline">config.json</code>) a ruční
+          editace <code class="inline">config.json</code>. Během měřené série nedělej ani jedno —
+          a tímhle přehledem si to potom ověř.</div>
+      </fieldset>
+
       <div class="row">
         <button id="save" class="primary" type="button">Uložit konfiguraci</button>
         <button id="reset" type="button">Vrátit výchozí</button>
