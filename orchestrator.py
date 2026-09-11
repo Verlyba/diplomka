@@ -14,6 +14,7 @@ condition being measured, not application infrastructure.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -125,16 +126,13 @@ VERIFY_PROMPT_RULES = (
     "  [target_moved]     the target object shifted out of reach\n"
     "  [unclear]          photo is unclear, blurry, or occluded — INCLUDING the target spot being hidden behind the robot's own arm/gripper\n"
     "  [unknown_failure]  other severe failure\n\n"
-    "OUTPUT FORMAT — exactly three lines, in this order:\n"
-    "1. ONE line beginning with \"REASONING:\" describing what you actually see in the photo relative to the "
-    "expected outcome (one sentence — this is shown to the operator and fed to the re-planner on failure, so it "
-    "must say what's wrong, not just repeat the tag).\n"
-    "2. ONE line \"GOAL: yes\" or \"GOAL: no\" — is the OVERALL GOAL (not just this step) fully achieved in the "
-    "photo right now? Answer 'yes' only if you can actually SEE the finished end state; if unsure, answer 'no'.\n"
-    "3. The LAST line: ONLY the tag — it must match what the REASONING line just said.\n\n"
+    "OUTPUT FORMAT\n"
+    "First write ONE line beginning with \"REASONING:\" describing what you actually see in the photo relative to "
+    "the expected outcome (one sentence — this is shown to the operator and fed to the re-planner on failure, so "
+    "it must say what's wrong, not just repeat the tag).\n"
+    "Then, on the LAST line, output ONLY the tag — it must match what the REASONING line just said.\n\n"
     "Example:\n"
     "REASONING: The gripper is open and hovering well above the target location, not near the object — the arm approached the wrong place.\n"
-    "GOAL: no\n"
     "[object_missed]"
 )
 
@@ -265,27 +263,6 @@ def parse_reasoning_sentence(text: str) -> str:
             if res:
                 return res
     return ""
-
-
-def parse_goal_flag(text: str) -> bool | None:
-    """Read the inspector's optional 'GOAL: yes|no' line.
-
-    None means the model didn't answer it (or answered something unparseable),
-    which is deliberately indistinguishable from "no opinion" — the caller
-    treats that as "no information" and changes nothing. A small local VLM
-    dropping one line of a three-line format must not break verification, so
-    this never raises and never guesses.
-    """
-    for line in text.splitlines():
-        stripped = line.strip().strip('*"` ')
-        if not stripped.upper().startswith("GOAL:"):
-            continue
-        answer = stripped[len("GOAL:"):].strip().strip('.*"` ').upper()
-        if answer.startswith("YES"):
-            return True
-        if answer.startswith("NO"):
-            return False
-    return None
 
 
 # Physical evidence channel (robot's own sensors) — see fuse_evidence().
@@ -437,6 +414,7 @@ class Daemon:
             cmd.append("--no-protocol-b")
         cmd.append(f"--protocol-a.threshold={float(cfg.get('protocol_a_threshold_rad', 0.005))}")
         cmd.append(f"--protocol-a.patience={int(cfg.get('protocol_a_patience', 5))}")
+        cmd.append(f"--protocol-a.grace={float(cfg.get('protocol_a_grace_s', 1.0))}")
         cmd.append(f"--protocol-b.limit={float(cfg.get('protocol_b_limit_ma', 250))}")
         cmd.append(f"--protocol-b.patience={int(cfg.get('protocol_b_patience', 3))}")
         cmd.append(f"--protocol-b.grace={float(cfg.get('protocol_b_grace_s', 0.75))}")
@@ -842,7 +820,15 @@ def list_trained_checkpoints(cfg: dict, step_slug: str | None = None) -> list[di
             dir_name = model_dir.name
             
             if step_slug:
-                if not (dir_name.startswith(f"{task_slug}_{step_slug}") or f"_{step_slug}_" in dir_name):
+                # Scoped to THIS project's task_slug on purpose — a bare
+                # substring match on step_slug (dropped) matched ANY other
+                # project's checkpoint sharing the same step name (e.g.
+                # "test_2_homing_act" for a "homing" step), letting the UI
+                # offer a completely unrelated project's model to pin. Our own
+                # naming convention (task_slug_step_slug[_Nep]_policy, see
+                # step_output_dir()) always starts with task_slug_step_slug,
+                # so startswith() alone already covers every case we produce.
+                if not dir_name.startswith(f"{task_slug}_{step_slug}"):
                     continue
             else:
                 step_slugs = [s.get("slug") for s in cfg.get("steps", []) if s.get("slug")]
@@ -1203,12 +1189,20 @@ class Orchestrator:
         return False, "[unknown_failure]"
 
     def _verify(self, step_slug: str, images_b64: list[str], plan: list[str] | None = None,
-                step_index: int = 0, stop_reason: str = "") -> tuple[bool, str, str, bool | None, list[str]]:
-        """(success, tag, reasoning, goal_satisfied, images_used).
+                step_index: int = 0, stop_reason: str = "") -> tuple[bool, str, str, list[str]]:
+        """(success, tag, reasoning, images_used).
 
-        goal_satisfied is the inspector's read on the OVERALL task, not this
-        step: True/False when it answered, None when it didn't (see
-        parse_goal_flag) — callers must treat None as "no information".
+        The inspector judges only THIS step — whether the overall task goal
+        is already satisfied is the CEO planner's call (its own system prompt
+        already makes this check at every plan/re-plan), not something asked
+        of the inspector here. An earlier version also had the inspector
+        answer a separate "GOAL: yes/no" line and let a "yes" end the run
+        early; in practice the small local VLM conflated "this step matches
+        its own expected outcome" with "the whole task is done" — it once
+        answered GOAL: yes right after a successful grasp step, ending a run
+        as SUCCESS before the object had even reached its destination. Pulled
+        entirely rather than just ignored, so the inspector isn't asked a
+        question it demonstrably can't answer reliably.
 
         images_used is returned because an [unclear] verdict makes this method
         take a FRESH snapshot and re-ask; the caller must keep that newer
@@ -1299,7 +1293,6 @@ class Orchestrator:
                       message=f"VLM inspektor ({model}) odpovídá: „{raw_reply}\"")
             success, tag = self._read_verdict(raw_reply)
             reasoning = parse_reasoning_sentence(raw_reply)
-            goal_done = parse_goal_flag(raw_reply)
             if reasoning:
                 self.emit("log", level="INFO", message=f"Odůvodnění inspektora: „{reasoning}“")
 
@@ -1317,7 +1310,47 @@ class Orchestrator:
                 break
             images_b64 = fresh
             self.emit("snapshot", images=fresh, step=step_slug)
-        return success, tag, reasoning, goal_done, images_b64
+        return success, tag, reasoning, images_b64
+
+    def _preload_plan_policies(self, plan: list[str]) -> None:
+        """Warm the daemon's policy cache for every skill in `plan` up front.
+
+        SET_POLICY hot-swaps used to always reload weights from disk, even
+        when a step reuses a model already loaded earlier in the SAME run
+        (e.g. a re-plan's homing -> retry -> homing sequence reloads the exact
+        same homing checkpoint each time). inference_daemon.py's load_policy()
+        now caches by path for the daemon's lifetime (one process per run —
+        see its docstring), so a repeat swap is just switching a reference.
+        This method front-loads that cost: every unique checkpoint the plan
+        could need gets pushed into the cache here, before any of them is
+        actually needed, so later per-step swaps (including the very first
+        one) hit cache instead of paying a fresh disk+GPU load mid-run. Cheap
+        because these are small ACT checkpoints (~50M params) — for a task
+        with few, large policies this trade would need reconsidering.
+
+        No-ops when no daemon session exists yet (e.g. planner_vision=False,
+        or skip_planner) — the step loop's own lazy daemon.start()/
+        set_policy() calls handle the first load exactly as before this
+        existed; forcing an early daemon start here would duplicate that
+        already-tested lifecycle/retry logic for no benefit in that case.
+        """
+        if self.daemon is None:
+            return
+        cfg = self.cfg
+        seen: set[str] = set()
+        for slug in plan:
+            if slug in (PLAN_DONE, PLAN_ABORT):
+                continue
+            path = step_output_dir(cfg, slug)
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                self.daemon.set_policy(path)
+            except Exception as e:
+                self.emit("log", level="WARN",
+                          message=f"Přednačtení modelu pro krok '{slug}' selhalo ({e}) — "
+                                  "načte se až v okamžiku, kdy na něj dojde řada.")
 
     # -- the loop ----------------------------------------------------------
     def run(self, instruction: str) -> dict:
@@ -1326,6 +1359,12 @@ class Orchestrator:
         replans = 0
         started = time.time()
         self.results = []
+        self.plans = []
+        # Fixed for the run's whole lifetime so every image this run saves —
+        # planning photos and per-step verification photos alike — lands
+        # under one shared folder, addressable from runs/<run_id>.json
+        # (_save_run reuses the same id as the filename).
+        self._run_id = time.strftime("%Y%m%d-%H%M%S")
 
         try:
             self.emit("state", state="PLANNING")
@@ -1354,6 +1393,9 @@ class Orchestrator:
                 images_b64=initial_images or None)
             plan = self._resolve_plan(raw_plan)
             self.emit("plan", steps=plan, reasoning=ceo_reasoning)
+            self.plans.append({"replan": 0, "raw_plan": raw_plan, "plan": plan,
+                               "ceo_reasoning": ceo_reasoning,
+                               "image_paths": self._save_images(initial_images, "plan_r0")})
 
             if plan == [PLAN_DONE]:
                 self.emit("log", level="INFO",
@@ -1364,6 +1406,8 @@ class Orchestrator:
             if not plan:
                 self.emit("log", level="WARN", message="Plán je prázdný — konec.")
                 return self._finish(True, started)
+
+            self._preload_plan_policies(plan)
 
             index = 0
             while index < len(plan):
@@ -1478,14 +1522,14 @@ class Orchestrator:
                 # "physical only" ablation) is deliberately distinct from
                 # NOIMG (camera broken) — the first is an experimental
                 # condition, the second is a real fault.
-                v_success, v_tag, v_reason, goal_done = False, "", "", None
+                v_success, v_tag, v_reason = False, "", ""
                 if cfg.get("skip_inspector"):
                     vis = "SKIPPED"
                 elif images:
                     # `images` is reassigned on purpose: on an [unclear]
                     # verdict _verify() re-snapshots, and the re-plan below
                     # must reason about that fresher frame, not the stale one.
-                    v_success, v_tag, v_reason, goal_done, images = self._verify(
+                    v_success, v_tag, v_reason, images = self._verify(
                         step, images, plan=plan, step_index=index, stop_reason=reason or "")
                     vis = "SUCCESS" if v_success else ("UNCLEAR" if v_tag == UNCLEAR_TAG else "FAIL")
                 else:
@@ -1516,25 +1560,21 @@ class Orchestrator:
                                      "success": success, "tag": tag, "reason": reason,
                                      "insp_reason": insp_reason,
                                      "phys": phys, "vis": vis, "conflict": conflict,
-                                     "goal_seen_by_vlm": goal_done})
+                                     "image_paths": self._save_images(
+                                         images or [], f"verify_{step}_att{att_num}")})
                 self.emit("step", index=index, step=step, phase="verified",
                           success=success, tag=tag, reason=reason, attempt=att_num,
                           insp_reason=insp_reason, conflict=conflict)
 
                 if success:
-                    # The inspector is the layer with eyes, so it is also the
-                    # one best placed to notice the overall goal is already
-                    # satisfied — possibly earlier than the plan expected (a
-                    # step can achieve the end state as a side effect). Only
-                    # honoured when this step also succeeded, so a single
-                    # confused "GOAL: yes" cannot end a run on its own, and
-                    # recorded in the run summary so these runs stay
-                    # auditable/filterable when the results are analysed.
-                    if goal_done:
-                        self.emit("log", level="INFO",
-                                  message="Inspektor potvrdil splnění celkového cíle — běh končí, "
-                                          "aniž by se dojel zbytek plánu.")
-                        return self._finish(True, started, goal_early_exit=True)
+                    # Whether the OVERALL goal is already satisfied (possibly
+                    # early, as a side effect of this step) is the CEO
+                    # planner's call, not the inspector's — see _verify()'s
+                    # docstring for why that was pulled out of here entirely.
+                    # The planner already re-checks this at every re-plan
+                    # (after any failure) and can output ["DONE"] there; a
+                    # run that succeeds all the way through just walks the
+                    # plan to its natural end, which is correct too.
                     index += 1
                     continue
 
@@ -1554,6 +1594,9 @@ class Orchestrator:
                 raw_plan, ceo_reasoning = self._create_plan(context, images_b64=images or None)
                 plan = self._resolve_plan(raw_plan)
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
+                self.plans.append({"replan": replans, "raw_plan": raw_plan, "plan": plan,
+                                   "ceo_reasoning": ceo_reasoning, "failed_step": step, "tag": tag,
+                                   "image_paths": self._save_images(images, f"plan_r{replans}")})
 
                 if plan == [PLAN_DONE]:
                     self.emit("log", level="INFO",
@@ -1603,9 +1646,10 @@ class Orchestrator:
                 # per re-plan — pure duplication in the live view.
                 if plan_replaced_by_fallback:
                     self.emit("plan", steps=plan, replan=replans)
-                index = 0
                 if not plan:
                     raise RuntimeError("Re-plán vrátil prázdný plán.")
+                self._preload_plan_policies(plan)
+                index = 0
 
             # Reaching here means the *current* plan was walked to completion
             # by successful increments only (the while-loop's only way out
@@ -1626,18 +1670,36 @@ class Orchestrator:
                 self.daemon.stop()
                 self.daemon = None
 
-    def _finish(self, success: bool, started: float, error: str = "",
-                goal_early_exit: bool = False) -> dict:
+    def _save_images(self, images_b64: list[str], prefix: str) -> list[str]:
+        """Decode and write camera frames under images/<run_id>/, return their
+        paths (relative to HERE, forward-slashed) for embedding in runs/*.json.
+
+        Photos otherwise only ever existed as a live SSE 'snapshot' event and
+        as the base64 blob sent to the LLM/VLM for one HTTP call — gone the
+        moment the browser tab closes, with no way to later check what the
+        CEO or the inspector actually saw when a decision looks wrong.
+        """
+        if not images_b64:
+            return []
+        out_dir = HERE / "images" / self._run_id
+        paths: list[str] = []
+        for i, b64 in enumerate(images_b64):
+            name = f"{prefix}_{i}.jpg" if len(images_b64) > 1 else f"{prefix}.jpg"
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / name).write_bytes(base64.b64decode(b64))
+                paths.append(str((out_dir / name).relative_to(HERE)).replace("\\", "/"))
+            except Exception as e:
+                self.emit("log", level="WARN", message=f"Uložení snímku '{name}' selhalo: {e}")
+        return paths
+
+    def _finish(self, success: bool, started: float, error: str = "") -> dict:
         summary = {
             "success": success,
             "error": error,
             "duration_s": round(time.time() - started, 1),
-            # True when the run ended because the inspector reported the
-            # overall goal already satisfied, rather than by walking the plan
-            # to its end — kept in the raw data so these runs can be told
-            # apart (or filtered out) during analysis.
-            "goal_early_exit": goal_early_exit,
             "steps": self.results,
+            "plans": self.plans,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")
         self.emit("finished", **summary)
@@ -1645,11 +1707,16 @@ class Orchestrator:
         return summary
 
     def _save_run(self, summary: dict) -> None:
-        """Append the run to runs/<timestamp>.json — the raw thesis data."""
+        """Append the run to runs/<run_id>.json — the raw thesis data.
+
+        Reuses self._run_id (set at the top of run()) rather than a fresh
+        timestamp, so the filename matches the images/<run_id>/ folder the
+        same run's photos were saved under.
+        """
         try:
             runs = HERE / "runs"
             runs.mkdir(exist_ok=True)
-            name = time.strftime("%Y%m%d-%H%M%S") + ".json"
+            name = self._run_id + ".json"
             payload = dict(summary)
             payload["config"] = {k: v for k, v in self.cfg.items() if k != "steps"}
             payload["catalog"] = step_catalog(self.cfg)

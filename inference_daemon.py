@@ -201,6 +201,28 @@ PROTOCOL_A_PATIENCE = 5        # consecutive frames, used for |reset steps
 # per-protocol distinction, not a guess: same physical signal, just a
 # modestly longer patience window for the noisier of the two cases.
 PROTOCOL_A_GRASP_PATIENCE_EXTRA = 5   # extra consecutive frames on top of PROTOCOL_A_PATIENCE, for |grasp steps
+# Confirmed on real telemetry (2026-09-06): a grasp step can end in well
+# under a second (0.56s, 0.89s observed) with the gripper joint essentially
+# frozen at its starting position — the settle counter reached full patience
+# before the policy's approach motion ever got going. Velocity-based settling
+# (see use_velocity_settle below) measures tick-to-tick joint movement, and
+# early in a trajectory that movement can be small/smooth enough to read as
+# "stopped" even though the arm hasn't started reaching for anything yet —
+# the same overlap problem PROTOCOL_B_GRACE_S was introduced for. Same fix:
+# don't let the settle counter's result end the step until enough time has
+# passed for a genuine attempt to be underway. Only gates velocity-settle
+# steps (grasp/reset) — ordinary steps settle against their own predicted
+# target, not raw velocity, so they aren't subject to this failure mode.
+PROTOCOL_A_GRACE_S = 1.0       # seconds since SET_TASK before Protocol A may end a |reset step
+# Confirmed on the same 2026-09-06 telemetry as above that grace + patience
+# alone still isn't the right completion signal for a GRASP step even before
+# either fix: "joints stopped moving" is equally true of "finished closing on
+# the object" and "parked without ever attempting to close" — it can't tell
+# those apart, because closing the gripper isn't what it measures. Protocol A
+# no longer ends a |grasp step at all (see the settle-check branch below);
+# only Protocol B (actual gripper load) or the step timeout can. Reset is the
+# one case where "the arm stopped moving" IS the whole success criterion —
+# there's nothing else to confirm — so it keeps this path.
 PROTOCOL_B_LOAD_LIMIT = 250.0  # mA rise over the idle baseline (see idle_load_baseline)
 # A closing gripper draws a brief current spike while it's actively moving,
 # whether or not anything ends up between the jaws — a single tick over
@@ -250,6 +272,14 @@ robot = None
 policy = None
 preprocessor = None
 postprocessor = None
+# Every (policy, preprocessor, postprocessor) this process has ever loaded,
+# keyed by the raw policy_path SET_POLICY was given — kept for the process's
+# whole lifetime (one daemon per orchestration run, see the module docstring),
+# so a step that reuses a checkpoint already seen earlier in the SAME run
+# (a re-plan revisiting a step, or orchestrator.py's own _preload_plan_policies)
+# swaps to it instantly instead of reloading from disk. Small ACT checkpoints
+# only, deliberately no eviction — see load_policy()'s comment for the tradeoff.
+_policy_cache: dict[str, tuple] = {}
 obs_features = None
 dataset_features: dict = {}
 action_keys: list[str] = []
@@ -351,8 +381,20 @@ def resolve_policy_dir(path: str) -> str:
 
 
 def load_policy(policy_path: str, dev: str) -> None:
-    """Load a pretrained policy plus its pre/post-processing pipelines."""
+    """Load a pretrained policy plus its pre/post-processing pipelines.
+
+    Checks `_policy_cache` first. Caching trades VRAM for swap latency — safe
+    to leave unbounded here because this project's checkpoints are small ACT
+    models (~50M params each, a few hundred MB); a task with few but large
+    policies (e.g. a VLA) would need an eviction policy instead of "keep
+    everything for the process's lifetime".
+    """
     global policy, preprocessor, postprocessor, current_policy_path
+    if policy_path in _policy_cache:
+        policy, preprocessor, postprocessor = _policy_cache[policy_path]
+        current_policy_path = policy_path
+        log.info("Policy '%s' restored from cache onto %s.", policy_path, dev)
+        return
     resolved = resolve_policy_dir(policy_path)
     cfg = PreTrainedConfig.from_pretrained(resolved)
     cfg.pretrained_path = resolved
@@ -366,6 +408,7 @@ def load_policy(policy_path: str, dev: str) -> None:
         log.warning("Processor pipelines unavailable (%s) — using raw select_action.", e)
         preprocessor, postprocessor = None, None
     current_policy_path = policy_path
+    _policy_cache[policy_path] = (policy, preprocessor, postprocessor)
     log.info("Policy '%s' loaded from %s onto %s.", cfg.type, resolved, dev)
 
 
@@ -708,7 +751,7 @@ def stdin_reader(max_seconds: float) -> None:
 def main() -> None:
     global state, active_task, active_is_grasp, active_is_reset, device, simulated, use_triggers
     global use_protocol_a, use_protocol_b
-    global PROTOCOL_A_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_A_GRASP_PATIENCE_EXTRA, PROTOCOL_B_LOAD_LIMIT, PROTOCOL_B_PATIENCE, PROTOCOL_B_GRACE_S, PROTOCOL_B_STABILITY_SLOPE
+    global PROTOCOL_A_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_A_GRASP_PATIENCE_EXTRA, PROTOCOL_A_GRACE_S, PROTOCOL_B_LOAD_LIMIT, PROTOCOL_B_PATIENCE, PROTOCOL_B_GRACE_S, PROTOCOL_B_STABILITY_SLOPE
     global idle_load_baseline, _baseline_samples, _load_history, _telemetry_log_fh
 
     ap = argparse.ArgumentParser(description="Persistent inference daemon")
@@ -756,6 +799,10 @@ def main() -> None:
                     default=PROTOCOL_A_GRASP_PATIENCE_EXTRA,
                     help="Protocol A: EXTRA consecutive settled frames on top of --protocol-a.patience "
                          f"for |grasp steps (default {PROTOCOL_A_GRASP_PATIENCE_EXTRA}).")
+    ap.add_argument("--protocol-a.grace", dest="protocol_a_grace", type=float,
+                    default=PROTOCOL_A_GRACE_S,
+                    help="Protocol A: seconds after SET_TASK before it may end a |reset step, to skip "
+                         f"the pre-motion settle-counter false start (default {PROTOCOL_A_GRACE_S}).")
     ap.add_argument("--protocol-b.limit", dest="protocol_b_limit", type=float,
                     default=PROTOCOL_B_LOAD_LIMIT,
                     help="Protocol B: gripper current rise over the idle baseline, in mA "
@@ -784,6 +831,7 @@ def main() -> None:
     PROTOCOL_A_THRESHOLD = args.protocol_a_threshold
     PROTOCOL_A_PATIENCE = args.protocol_a_patience
     PROTOCOL_A_GRASP_PATIENCE_EXTRA = args.protocol_a_grasp_patience_extra
+    PROTOCOL_A_GRACE_S = args.protocol_a_grace
     PROTOCOL_B_LOAD_LIMIT = args.protocol_b_limit
     PROTOCOL_B_PATIENCE = args.protocol_b_patience
     PROTOCOL_B_GRACE_S = args.protocol_b_grace
@@ -851,6 +899,7 @@ def main() -> None:
             log.info("Telemetrie se loguje do %s", log_path)
             _log_telemetry(event="daemon_start", policy_path=args.policy_path,
                            protocol_a_threshold=PROTOCOL_A_THRESHOLD, protocol_a_patience=PROTOCOL_A_PATIENCE,
+                           protocol_a_grace_s=PROTOCOL_A_GRACE_S,
                            protocol_b_limit=PROTOCOL_B_LOAD_LIMIT, protocol_b_patience=PROTOCOL_B_PATIENCE,
                            protocol_b_grace_s=PROTOCOL_B_GRACE_S)
         except Exception as e:
@@ -959,6 +1008,13 @@ def main() -> None:
             else:
                 deltas = np.abs(target[:n_pos] - joints[:n_pos])
             settled = settled + 1 if bool(np.all(deltas < PROTOCOL_A_THRESHOLD)) else 0
+            # See PROTOCOL_A_GRACE_S above: only |reset can end on this signal,
+            # and only a velocity-settle step (both |reset and |grasp measure
+            # velocity, for the telemetry value even though |grasp can no
+            # longer end this way) risks reading "hasn't started yet" as
+            # "already stopped" — an ordinary step's target-tracking settle is
+            # a distance-to-target measurement, not subject to it.
+            grace_elapsed_a = (not use_velocity_settle) or (time.time() - task_started_at) >= PROTOCOL_A_GRACE_S
             prev_joints = joints.copy()
             settle_patience = PROTOCOL_A_PATIENCE + (PROTOCOL_A_GRASP_PATIENCE_EXTRA if active_is_grasp else 0)
 
@@ -1005,7 +1061,7 @@ def main() -> None:
                 reason = (f"Protokol B (zátěž gripperu {load:.0f}, nárůst {rise:.0f} "
                           f"nad klid {baseline:.0f} > limit {PROTOCOL_B_LOAD_LIMIT:.0f}, "
                           f"usazeno slope {load_slope:.0f}, drženo {grasp_hold}/{PROTOCOL_B_PATIENCE} snímků)")
-            elif use_triggers and use_protocol_a and settled >= settle_patience:
+            elif use_triggers and use_protocol_a and not active_is_grasp and settled >= settle_patience and grace_elapsed_a:
                 max_d = float(np.max(deltas)) if deltas.size else 0.0
                 basis = "klouby se přestaly hýbat" if use_velocity_settle else "klouby dosedly na predikci"
                 reason = f"Protokol A ({basis}, max pohyb {max_d:.5f}/tik, drženo {settled}/{settle_patience})"
