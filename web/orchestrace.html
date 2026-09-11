@@ -68,7 +68,47 @@
   </section>
 
   <section class="block">
-    <h2>Schéma běhu</h2>
+    <h2>Co je s čím propojené</h2>
+    <div class="block-body">
+      <p>Schéma komponent: které procesy spolu mluví a <b>jakým kanálem</b>. Podstatné je, že to
+        nejsou moduly jednoho programu — jsou to <b>tři samostatné procesy</b> (prohlížeč, server
+        s orchestrátorem, inferenční daemon) plus externí LM Studio, a každá dvojice je propojená
+        něčím jiným: HTTP, server-sent events, roury podprocesu, sériový port.</p>
+      <div class="diagram-card narrow">
+        <img src="schema-komponenty.svg" alt="Schéma komponent orchestrace a kanálů mezi nimi">
+      </div>
+      <div class="note">Obě schémata na téhle stránce jsou vektorová (SVG) a generuje je
+        <code class="inline">make_diagrams.py</code> z jednoho seznamu komponent a zpráv — takže
+        když se schéma změní, přegeneruje se, místo aby se ručně překreslovalo a zastarávalo.
+        Pro diplomku je otevři přímo (<a href="schema-komponenty.svg">komponenty</a>,
+        <a href="schema-sekvence.svg">sekvence</a>) a vlož jako vektor: zvětšení ani tisk je
+        nerozostří. Jsou záměrně na bílém pozadí, ne v tmavém vzhledu appky.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Sekvence jednoho běhu</h2>
+    <div class="block-body">
+      <p>Totéž v čase: kdo komu co posílá a v jakém pořadí, s doslovnými řetězci protokolu. Plná
+        šipka je příkaz nebo volání, čárkovaná odpověď, šedá je větev, která proběhne jen za
+        určité podmínky (rozpor plánu s čidlem, <code class="inline">["DONE"]</code>,
+        <code class="inline">[unclear]</code>).</p>
+      <div class="diagram-card wide">
+        <img src="schema-sekvence.svg" alt="Sekvenční diagram jednoho běhu orchestrace">
+      </div>
+      <div class="note">Čtyři zprávy stojí za zvláštní pozornost, protože v nich je celé jádro
+        schématu: <code class="inline">SET_TASK</code> nese příznaky
+        <code class="inline">|grasp</code> / <code class="inline">|reset</code>, podle kterých
+        daemon vybere ukončovací protokol; <code class="inline">[STATUS] TASK_DONE</code> nese
+        <b>důvod</b> ukončení, ze kterého orchestrátor odvodí fyzický důkaz; dotaz na inspektora
+        obsahuje <b>i ten fyzický důkaz</b>, aby uměl rozlišit, co kamera nevidí; a
+        <code class="inline">fuse_evidence()</code> ty dva kanály teprve spojí. Podrobný řídicí tok
+        téhož běhu — včetně všech rozcestníků — je v dalším bloku.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Schéma běhu — řídicí tok</h2>
     <div class="block-body">
       <p style="color:var(--muted);font-size:13px;margin-top:0">Schéma odpovídá skutečné řídicí
         smyčce <code class="inline">Orchestrator.run()</code>. U každého uzlu je uvedená funkce
