@@ -17,14 +17,13 @@ mluvit jen záznam, ne vzpomínka.
 CO JE „ROZHODNÉ"
 ----------------
 Vypíšou se **všechny** klíče, které se mezi běhy liší — nic se neschovává.
-Část z nich je navíc označená jako rozhodná pro měřené schéma, a to podle
-jednoho pravidla: je to klíč, který se dostane buď (a) na příkazovou řádku
-inferenčního daemona, (b) do řídicí smyčky orchestrátoru, nebo (c) do promptu
-některého z modelů. Změna takového klíče uprostřed série znamená, že se běhy
-před ní a po ní nesmí sčítat do jednoho čísla.
+Většina z nich je navíc označená jako rozhodná pro měřené schéma: změna
+takového klíče uprostřed série znamená, že se běhy před ní a po ní nesmí
+sčítat do jednoho čísla.
 
-Klíče mimo tenhle seznam (cesty, port robota, věci kolem trénování) se taky
-vypíšou, ale jako vedlejší — na chování měřené smyčky nemají vliv.
+Rozhodné je **všechno kromě** vyjmenovaných výjimek (cesty, věci kolem
+nahrávání a trénování, nastavení kalibrační tabulky) — viz NON_DECISIVE_KEYS,
+kde je i vysvětlené, proč zrovna takhle a ne obráceně.
 
 POUŽITÍ
 -------
@@ -45,41 +44,35 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNS_DIR = HERE / "runs"
 
-# (a) klíče, které jdou na příkazovou řádku inferenčního daemona
-#     (viz Daemon.start() a cameras_json() v orchestrator.py)
-_DAEMON_KEYS = {
-    "robot_type", "robot_id", "robot_port", "device", "fps",
-    "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
-    "protocol_a_grasp_patience_extra",
-    "protocol_b_enabled", "protocol_b_limit_ma", "protocol_b_patience",
-    "protocol_b_grace_s", "protocol_b_stability_slope",
-    "camera_name", "camera_index", "camera_width", "camera_height", "camera_fps",
-    "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
+# Rozhodné je VŠECHNO KROMĚ těchhle klíčů — tedy obráceně, než by člověk čekal.
+#
+# Seznam rozhodných klíčů by byl kratší a čitelnější, ale má fatální vadu:
+# musel by se ručně doplňovat pokaždé, když do schématu přibude přepínač. Ten,
+# kdo ho zapomene doplnit, nedostane chybu — dostane tiché „STABILNÍ" o sérii,
+# která stabilní nebyla. To je nejhorší možná chyba, jakou tenhle skript může
+# udělat, protože se projeví až jako neplatné číslo v diplomce.
+#
+# Obrácený seznam selhává na bezpečnou stranu: nový klíč je rozhodný, dokud ho
+# někdo vědomě neprohlásí za nepodstatný. Nejhorší následek je řádek navíc ve
+# výpisu. (Reálný důkaz, že to není teoretická obava: `planner_memory` přibyl
+# pár hodin po napsání tohohle skriptu a whitelistu by propadl. Totéž
+# `policy_path` u kroku — tedy KTERÝ checkpoint se spustí.)
+NON_DECISIVE_KEYS = {
+    # prostředí a cesty — na chování měřené smyčky nemají vliv
+    "python", "output_root",
+    # nahrávání demonstrací a trénink: proběhlo dávno před během
+    "data_strategy", "episodes", "resume_episodes", "reset_time_s",
+    "policy_type", "train_steps", "batch_size", "save_freq",
+    "teleop_type", "teleop_port", "teleop_id",
+    "baseline_datasets",
+    # ovlivňuje jen kalibrační tabulku v Nastavení, ne jediný řádek toho,
+    # co dělá robot
+    "calibration_min_runs",
 }
-# (b) klíče, podle kterých se větví řídicí smyčka orchestrátoru
-_LOOP_KEYS = {
-    "max_replans", "episode_time_s",
-    "plan_state_check", "done_visual_check", "uncertain_retry",
-    "skip_planner", "skip_inspector",
-    "planner_vision", "planner_reasoning", "gripper_state_in_context",
-    "protocol_b_deadband_frac", "holding_limit_ma",
-}
-# (c) klíče, které se dostanou do promptu některého z modelů
-_PROMPT_KEYS = {
-    "llm_model", "vlm_model", "llm_timeout_s", "lm_url",
-    "task_slug", "task_description", "scene_description",
-}
-DECISIVE_KEYS = _DAEMON_KEYS | _LOOP_KEYS | _PROMPT_KEYS
 
-# Vlastnosti kroků z `catalog`, které mají na měřenou smyčku stejný vliv jako
-# konfigurační klíče (timeout_s ukončuje krok, grasp/reset volí protokol,
-# description/verify_hint jdou do promptů).
-DECISIVE_STEP_FIELDS = ("timeout_s", "grasp", "reset", "description", "verify_hint")
-
-# Klíče, které se mění samy od sebe a o nastavení nic neříkají — nemá smysl
-# je hlásit jako rozdíl. `calibration_min_runs` sem patří proto, že ovlivňuje
-# jen kalibrační tabulku v Nastavení, ne jediný řádek toho, co dělá robot.
-IGNORED_KEYS = {"calibration_min_runs"}
+# Totéž pro pole kroků v `catalog`. `slug` je identita kroku (je v názvu
+# klíče), `train_steps` je záležitost tréninku.
+NON_DECISIVE_STEP_FIELDS = {"slug", "train_steps"}
 
 
 def load_runs(directory: Path) -> list[dict]:
@@ -117,9 +110,7 @@ def settings_of(run: dict) -> dict:
     cfg = payload.get("config")
     flat: dict = {}
     if isinstance(cfg, dict):
-        for key, value in cfg.items():
-            if key not in IGNORED_KEYS:
-                flat[key] = value
+        flat.update(cfg)
     catalog = payload.get("catalog")
     if isinstance(catalog, list):
         for step in catalog:
@@ -128,16 +119,16 @@ def settings_of(run: dict) -> dict:
             slug = step.get("slug")
             if not slug:
                 continue
-            for field in DECISIVE_STEP_FIELDS:
-                if field in step:
-                    flat[f"krok[{slug}].{field}"] = step[field]
+            for field, value in step.items():
+                if field != "slug":
+                    flat[f"krok[{slug}].{field}"] = value
     return flat
 
 
 def _is_decisive(key: str) -> bool:
     if key.startswith("krok["):
-        return key.rsplit(".", 1)[-1] in DECISIVE_STEP_FIELDS
-    return key in DECISIVE_KEYS
+        return key.rsplit(".", 1)[-1] not in NON_DECISIVE_STEP_FIELDS
+    return key not in NON_DECISIVE_KEYS
 
 
 def _hashable(value):

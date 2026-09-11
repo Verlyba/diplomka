@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from run_consistency import (DECISIVE_KEYS, compare, filter_by_task,
+from run_consistency import (NON_DECISIVE_KEYS, compare, filter_by_task,
                              settings_of, take_last)
 
 failures = []
@@ -49,10 +49,13 @@ flat = settings_of(run("a.json"))
 check("zplosteni zna globalni klic", flat["protocol_b_limit_ma"], 250)
 check("zplosteni zna per-step timeout", flat["krok[grab].timeout_s"], 8.0)
 check("zplosteni zna priznak uchopu", flat["krok[grab].grasp"], True)
-# calibration_min_runs ovlivnuje jen tabulku v Nastaveni, ne chovani robota —
-# nesmi se hlasit jako rozdil, jinak by kazde precteni kalibrace vypadalo
-# jako zmena experimentu.
-check("kalibracni klic se ignoruje", "calibration_min_runs" in flat, False)
+# calibration_min_runs ovlivnuje jen tabulku v Nastaveni, ne chovani robota.
+# Vypise se (nic se neschovava), ale stabilitu shodit nesmi — jinak by kazde
+# prenastaveni kalibracni tabulky vypadalo jako zmena experimentu.
+check("kalibracni klic je videt", "calibration_min_runs" in flat, True)
+calib_only = compare([run("1.json"), run("2.json", {"calibration_min_runs": 8})])
+check("kalibracni klic stabilitu neshodi", calib_only["stable"], True)
+check("kalibracni klic se presto vypise", len(calib_only["differences"]), 1)
 
 
 # ── Stabilni serie ──────────────────────────────────────────────────────────
@@ -146,13 +149,40 @@ check("nulovy orez nechava vse", len(take_last(series, 0)), 5)
 check("orez vetsi nez pocet behu nevadi", len(take_last(series, 99)), 5)
 
 
-# ── Seznam rozhodnych klicu odpovida tomu, co kod opravdu cte ───────────────
+# ── Rozhodne je vsechno krome vyjimek ───────────────────────────────────────
 for key in ("protocol_a_threshold_rad", "protocol_b_limit_ma", "protocol_b_grace_s",
             "max_replans", "uncertain_retry", "plan_state_check", "done_visual_check",
-            "skip_planner", "skip_inspector", "llm_model", "vlm_model"):
-    if key not in DECISIVE_KEYS:
-        failures.append((f"klic {key} chybi mezi rozhodnymi", False, True))
-print(f"ok   vsechny kontrolovane klice jsou mezi rozhodnymi ({len(DECISIVE_KEYS)} celkem)")
+            "skip_planner", "skip_inspector", "llm_model", "vlm_model",
+            "planner_memory", "baseline_policy_path"):
+    if key in NON_DECISIVE_KEYS:
+        failures.append((f"klic {key} je chybne mezi nerozhodnymi", True, False))
+print(f"ok   vsechny kontrolovane klice jsou rozhodne ({len(NON_DECISIVE_KEYS)} vyjimek celkem)")
+
+# Tohle je ta vlastnost, kvuli ktere je seznam obraceny: prepinac, ktery v
+# dobe psani skriptu jeste neexistoval, MUSI byt rozhodny sam od sebe. Jinak
+# by serie, do ktere nekdo uprostred pridal novy prepinac, vyhlasila
+# "STABILNI" — a to je chyba, ktera se projevi az jako neplatne cislo.
+future = compare([run("1.json"), run("2.json", {"uplne_novy_prepinac_2027": True})])
+check("neznamy budouci prepinac je rozhodny", future["decisive_differences"], 1)
+check("neznamy budouci prepinac shodi stabilitu", future["stable"], False)
+
+# Kterou politiku krok spustil, je to nejrozhodnejsi vubec — a je to pole
+# katalogu, ne konfigurace.
+policy = compare([
+    run("1.json"),
+    run("2.json", catalog=[CATALOG[0], {**CATALOG[1], "policy_path": "outputs/jiny_model"}]),
+])
+check("zmena checkpointu kroku je rozhodna", policy["decisive_differences"], 1)
+check("zmena checkpointu kroku je pojmenovana",
+      policy["differences"][0]["key"], "krok[grab].policy_path")
+
+# train_steps u kroku je naopak zalezitost treninku, ne behu.
+train = compare([
+    run("1.json"),
+    run("2.json", catalog=[CATALOG[0], {**CATALOG[1], "train_steps": 30000}]),
+])
+check("train_steps kroku neni rozhodny", train["stable"], True)
+check("train_steps kroku se presto vypise", len(train["differences"]), 1)
 
 print()
 if failures:

@@ -344,11 +344,26 @@ zpátky.
 
 Nový `run_consistency.py` (stdlib, jen `runs/*.json`) + `GET
 /api/runs/consistency` + panel v Nastavení. Porovná konfigurace napříč běhy a
-vypíše, co se lišilo. Klíč je označený jako **rozhodný**, pokud se dostane
-(a) na příkazovou řádku daemona, (b) do řídicí smyčky orchestrátoru, nebo
-(c) do promptu některého z modelů — seznam je odvozený čtením `Daemon.start()`
-a `run()`, ne odhadnutý. Nerozhodné rozdíly (cesty, port robota) se vypíšou
-taky, jen stabilitu neshodí; nic se neschovává.
+vypíše, co se lišilo. Nerozhodné rozdíly (cesty, věci kolem tréninku) se
+vypíšou taky, jen stabilitu neshodí; nic se neschovává.
+
+**Rozhodné je všechno kromě vyjmenovaných výjimek** — a tohle obrácení je to
+nejdůležitější rozhodnutí celého skriptu. První verze měla seznam rozhodných
+klíčů: kratší, čitelnější, a odvozený přímo čtením `Daemon.start()` a `run()`.
+Má ale fatální vadu — musel by se ručně doplňovat pokaždé, když do schématu
+přibude přepínač, a kdo to zapomene, nedostane chybu, ale **tiché „STABILNÍ"
+o sérii, která stabilní nebyla**. To je nejhorší chyba, jakou tenhle skript
+umí udělat, protože se projeví až jako neplatné číslo ve výsledcích.
+
+Že to není teoretická obava, se ukázalo do hodiny: při pushi téhle změny už
+na větvi ležel commit `planner_memory` z noční rutiny, a whitelistu by ten
+nový přepínač propadl. Totéž `policy_path` u kroku — tedy **který checkpoint
+se v tom kroku doopravdy spustil**, což je vůbec nejrozhodnější hodnota, jaká
+v záznamu je. Obrácený seznam selhává na bezpečnou stranu: nový klíč je
+rozhodný, dokud ho někdo vědomě neprohlásí za nepodstatný, a nejhorší
+následek je řádek navíc ve výpisu. Test na to je přímo v
+`tests/test_run_consistency.py` (vymyšlený „přepínač z roku 2027" musí
+stabilitu shodit sám od sebe).
 
 Detaily, které se ukázaly jako podstatné:
 
