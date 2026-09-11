@@ -11,7 +11,8 @@ projects/
 # Lokální nastavení nástrojů (obsahuje absolutní cesty k tomuhle stroji)
 .claude/
 
-# Záznamy běhů orchestrace + fotky z plánování a ověřování kroků (CEO/VLM)
+# Záznamy běhů orchestrace + fotky z plánování a ověřování kroků (CEO/VLM),
+# navázané na jednotlivé pokusy (images/<run_id>/)
 runs/*.json
 images/
 

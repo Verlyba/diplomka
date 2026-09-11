@@ -16,6 +16,8 @@ orchestration page needs:
     POST /api/stop       stop the running orchestration
     GET  /api/status     is something running right now
     GET  /api/runs       list the saved run logs
+    GET  /api/runs/consistency  did the settings stay identical across runs
+    GET  /api/calibration  measured protocol A/B values vs. the configured ones
     GET  /api/events     server-sent events stream (log / plan / step / ...)
 
 Note: this server is a thin shell on purpose. The scheme being measured lives
@@ -38,7 +40,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import calibrate_protocols as calib
 import orchestrator as orch
+import run_consistency as consistency
 
 HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
@@ -129,13 +133,28 @@ DEFAULT_CONFIG: dict = {
     # planner behaviour
     "planner_vision": True,
     "planner_reasoning": True,
+    "plan_state_check": True,
+    "done_visual_check": True,
+    "uncertain_retry": True,
+    "planner_memory": True,
+    # Snímky scény se ukládají do images/<run_id>/ a odkazují se z
+    # steps[].images — jediný vizuální důkaz k verdiktu inspektora.
+    "save_images": True,
     # step termination protocols — task- and hardware-specific, hence togglable
     "protocol_a_enabled": True,
-    "protocol_a_threshold_rad": 0.005,
+    "protocol_a_threshold_rad": 0.5,
     "protocol_a_patience": 5,
+    "protocol_a_grasp_patience_extra": 5,
     "protocol_b_enabled": True,
-    "protocol_b_limit_ma": 280,
-    "holding_limit_ma": 50,
+    "protocol_b_limit_ma": 250,
+    "protocol_b_patience": 3,
+    "protocol_b_grace_s": 0.75,
+    "protocol_b_deadband_frac": 0.25,
+    "protocol_b_stability_slope": 30.0,
+    "holding_limit_ma": 20,
+    # Kolik běhů musí být v telemetrii, než kalibrace vydá verdikt (viz
+    # calibrate_protocols.py). Nemá vliv na běh robota, jen na tu tabulku.
+    "calibration_min_runs": 3,
     "gripper_state_in_context": True,
 }
 
@@ -292,7 +311,10 @@ def create_project(slug: str, description: str) -> dict:
                        "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
                        "fps", "lm_url", "llm_model", "vlm_model",
                        "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
-                       "protocol_b_enabled", "protocol_b_limit_ma", "holding_limit_ma"):
+                       "protocol_a_grasp_patience_extra",
+                       "protocol_b_enabled", "protocol_b_limit_ma", "protocol_b_patience",
+                       "protocol_b_grace_s", "protocol_b_deadband_frac", "protocol_b_stability_slope",
+                       "holding_limit_ma"):
             if hw_key in current_cfg:
                 new_cfg[hw_key] = current_cfg[hw_key]
 
@@ -650,6 +672,33 @@ class Handler(BaseHTTPRequestHandler):
             files = sorted((f.name for f in runs_dir.glob("*.json")), reverse=True) \
                 if runs_dir.exists() else []
             self._send_json({"runs": files[:50]})
+        elif path == "/api/runs/consistency":
+            # "Nastavení jsem mezi běhy neměnil" je tvrzení o minulosti, které
+            # si nikdo nepamatuje přesně — a přitom na něm stojí platnost
+            # srovnání baseline vs. orchestrace. Tohle ho ověří ze záznamů.
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                runs = consistency.load_runs(HERE / "runs")
+                if qs.get("all", ["0"])[0] != "1":
+                    runs = consistency.filter_by_task(runs, load_config().get("task_slug", ""))
+                runs = consistency.take_last(runs, int(qs.get("last", ["0"])[0] or 0))
+                self._send_json({"ok": True, **consistency.compare(runs)})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
+        elif path == "/api/calibration":
+            # Read-only on purpose: this endpoint measures, it never writes a
+            # threshold back. Changing a protocol threshold mid-series would
+            # silently change what every later run means, so applying a
+            # suggestion stays a deliberate edit in Nastavení.
+            try:
+                cfg = load_config()
+                min_runs = int(cfg.get("calibration_min_runs",
+                                       calib.DEFAULT_MIN_RUNS) or calib.DEFAULT_MIN_RUNS)
+                report = calib.analyze(calib.read_telemetry(HERE / "telemetry"),
+                                       cfg, min_runs)
+                self._send_json({"ok": True, **report})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/events":
             self._stream_events()
         else:

@@ -203,6 +203,21 @@
           <label class="checkline" title="Plánovač nejdřív popíše, co vidí, teprve pak vydá plán">
             <input data-key="planner_reasoning" type="checkbox"> Nechat plánovač uvažovat nahlas
           </label>
+          <label class="checkline" title="Před spuštěním plánu se jeho první krok porovná s čidlem zátěže gripperu: úchop, když robot už něco drží (nebo naopak přenos/položení s prázdnými čelistmi), je rozpor a plánovač dostane jednu cílenou výzvu k opravě. Trvá-li na svém, plán se stejně spustí a rozpor se zapíše do záznamu běhu.">
+            <input data-key="plan_state_check" type="checkbox"> Kontrolovat plán proti stavu gripperu
+          </label>
+          <label class="checkline" title="Prohlásí-li plánovač cíl za splněný ([&quot;DONE&quot;]), zeptá se orchestrátor nejdřív inspektora, jestli splněný cíl na snímku opravdu vidí. Když ne, dostane plánovač jednu výzvu k přehodnocení — trvá-li na svém, běh skončí jako úspěšný, ale rozpor se zapíše do záznamu běhu (done_checks). Bez téhle kontroly je DONE jediné tvrzení v celém schématu, které nikdo neověřuje, a přitom rozhoduje o výsledku běhu.">
+            <input data-key="done_visual_check" type="checkbox"> Ověřovat „cíl splněn" u inspektora
+          </label>
+          <label class="checkline" title="Když inspektor ze snímku nedokáže rozhodnout a zároveň k tomuhle typu kroku neexistuje fyzický důkaz (žádný protokol A/B), nikdo netvrdí, že krok selhal — jen ho nikdo neviděl. Místo drahého re-plánu, do kterého by plánovač nedostal žádnou novou informaci, se krok jednou zopakuje. Druhá neprůkazná kontrola téhož kroku v řadě se už bere jako selhání a jde na re-plán. Vypnuto = neprůkazný krok se rovnou počítá jako selhání (chování před touhle volbou).">
+            <input data-key="uncertain_retry" type="checkbox"> Nevyhodnotitelný krok zopakovat místo re-plánu
+          </label>
+          <label class="checkline" title="Plánovač je mezi voláními bez paměti: při každém re-plánu odvozuje strategii znovu jen z výsledků kroků a neví, co už sám navrhl ani proč. Tahle volba mu do kontextu re-plánu přidá stručný seznam jeho vlastních dosavadních plánů i s jeho odůvodněními, spárovaný přes čísla pokusů se soupisem PROGRESS THIS RUN. Nestojí to žádné volání plánovače navíc — jen víc informací v tom, které se stejně děje. Vypnuto = chování před touhle volbou.">
+            <input data-key="planner_memory" type="checkbox"> Připomínat plánovači jeho vlastní dřívější plány
+          </label>
+          <label class="checkline" title="Snímky, ze kterých inspektor rozhodoval, se uloží do images/<run_id>/ a z každého pokusu se na ně odkazuje polem steps[].images. Bez toho existují snímky jen jako base64 v živém přenosu do prohlížeče a se zavřením stránky mizí — u sporného pokusu pak nejde zpětně posoudit, jestli se spletl inspektor, nebo čidlo. Složka má stejný název jako záznam běhu (runs/<run_id>.json).">
+            <input data-key="save_images" type="checkbox"> Ukládat snímky k jednotlivým pokusům
+          </label>
         </div>
         <div class="note">Model plánovače dostává snímek scény <b>před prvním plánem</b> (aby viděl
           skutečný výchozí stav a nevymýšlel plán naslepo) i <b>při re-plánu po selhání</b> (stejný
@@ -231,6 +246,9 @@
           <label class="field">Počet snímků v klidu
             <input data-key="protocol_a_patience" type="number" step="1" min="1">
           </label>
+          <label class="field" title="Přidá se k počtu snímků v klidu jen u kroků označených jako úchop — sevření obvykle ještě chvíli drncá i po dosednutí ramene">Úchop: navíc snímků v klidu
+            <input data-key="protocol_a_grasp_patience_extra" type="number" step="1" min="0">
+          </label>
         </div>
         <div class="note"><b>Protokol A</b> ukončí krok, když se všechny klouby (kromě gripperu)
           mezi dvěma po sobě jdoucími snímky pohnou o míň než uvedený práh, a vydrží tak zadaný
@@ -256,6 +274,9 @@
           </label>
           <label class="field">Nárůst zátěže nad klid — práh „něco drží" (0-1000)
             <input data-key="holding_limit_ma" type="number" step="5" min="0">
+          </label>
+          <label class="field" title="Nárůst zátěže se musí ustálit (|sklon| pod touto hodnotou), než se počítá jako držení — odliší plató po sevření od proudu, který ještě prudce stoupá">Max. sklon nárůstu zátěže pro „ustáleno"
+            <input data-key="protocol_b_stability_slope" type="number" step="5" min="0">
           </label>
           <label class="checkline" title="Hodnotu zátěže dostane plánovač jako informaci, jestli robot něco drží">
             <input data-key="gripper_state_in_context" type="checkbox"> Hlásit stav gripperu plánovači
@@ -289,6 +310,63 @@
         <div class="note warn">Baseline (monolitický model) běží vždy s <b>vypnutými oběma
           protokoly</b> — končí jen časovým limitem. Tohle nastavení se ho proto netýká, platí jen
           pro orchestraci.</div>
+
+        <h3 style="margin-top:20px">Naměřeno vs. nastaveno <span style="font-weight:400;color:var(--muted);font-size:13px">(kontrola prahů z telemetrie)</span></h3>
+        <p style="color:var(--muted);font-size:13px;margin-top:0">
+          Prahy výše jsou ručně nastavená čísla. Daemon přitom při každém běhu zapisuje do
+          <code class="inline">telemetry/</code> přesně ty veličiny, proti kterým se ty prahy
+          porovnávají — pohyb kloubů mezi snímky, nárůst zátěže gripperu, sklon toho nárůstu.
+          Tahle tabulka je přečte zpátky a ukáže, <b>kde nastavená hodnota leží vůči tomu, co se
+          doopravdy naměřilo</b>. Nic nepřepisuje: hodnoty si přepiš nahoře sám, až se rozhodneš.</p>
+        <div class="grid" style="margin-top:10px">
+          <label class="field" title="Dokud daný krok nemá aspoň tolik proběhlých běhů v telemetrii, tabulka u něj neukáže verdikt ani návrh — prahy se nemají ladit podle jednoho náhodného pokusu.">Minimum běhů pro výpočet
+            <input data-key="calibration_min_runs" type="number" step="1" min="1">
+          </label>
+        </div>
+        <div style="margin-top:10px; display:flex; align-items:center; gap:10px">
+          <button type="button" id="btn-calibration" class="secondary" style="padding:6px 14px">↻ Načíst z telemetrie</button>
+          <span id="calibration-status" style="font-size:13px; color:var(--muted)"></span>
+        </div>
+        <div id="calibration-out" style="margin-top:12px"></div>
+        <div class="note">Návrh se počítá jako <b>střed mezery mezi dvěma naměřenými režimy</b> na
+          logaritmické škále — u prahu pohybu je dolním okrajem klidový šum čidla a horním skutečný
+          pohyb ramene, u prahu „něco drží" zátěž v klidu s prázdnými čelistmi a zátěž v klidu hned
+          po potvrzeném úchopu. Není to odhad: mezera je naměřená a její střed je jediné místo
+          stejně vzdálené od obou chyb (práh tak nízko, že protokol nikdy nespustí, × tak vysoko,
+          že spustí uprostřed pohybu). U <b>nárůstu zátěže pro ukončení kroku</b> se návrh záměrně
+          nepočítá — sevření předmětu a průjezd proudu při zavírání naprázdno se u tohohle
+          hardwaru v naměřených hodnotách překrývají, takže je z telemetrie samotné oddělit nejde.
+          Tam tabulka jen ukazuje, co se naměřilo.</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Stabilita nastavení mezi běhy</legend>
+        <p style="color:var(--muted);font-size:13px;margin-top:0">
+          V diplomce porovnáváš baseline s orchestračním schématem. Aby to srovnání něco
+          znamenalo, musí <b>všechny běhy orchestrace proběhnout se stejným nastavením</b> —
+          jinak se neporovnávají dvě schémata, ale hromada různě nastavených variant jednoho
+          z nich. Každý běh si přitom do <code class="inline">runs/&lt;id&gt;.json</code> ukládá
+          celou konfiguraci, se kterou proběhl. Tohle ji přečte zpátky a řekne, jestli se něco
+          mezi běhy změnilo — nemusíš si to pamatovat.</p>
+        <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+          <button type="button" id="btn-consistency" class="secondary" style="padding:6px 14px">↻ Zkontrolovat záznamy běhů</button>
+          <label class="checkline" style="margin:0" title="Jinak se porovnávají jen běhy aktuálního projektu — běhy jiné úlohy se logicky liší skoro ve všem a byl by to jen šum.">
+            <input type="checkbox" id="chk-consistency-all"> <span>i ostatní projekty</span>
+          </label>
+          <span id="consistency-status" style="font-size:13px; color:var(--muted)"></span>
+        </div>
+        <div id="consistency-out" style="margin-top:12px"></div>
+        <div class="note">Vykřičníkem jsou označené klíče <b>rozhodné pro měřené schéma</b> — ty,
+          které se dostanou na příkazovou řádku inferenčního daemona, do řídicí smyčky
+          orchestrátoru, nebo do promptu některého z modelů. Změna takového klíče uprostřed série
+          znamená, že se běhy před ní a po ní <b>nesmí sčítat do jednoho čísla</b>. Ostatní rozdíly
+          (cesty, port robota) se vypíšou taky, ale na chování měřené smyčky vliv nemají.</div>
+        <div class="note warn">Kalibrační tabulka výš ani tenhle přehled <b>nikdy nic nepřepisují</b>.
+          Nastavení mezi běhy může změnit jen: ruční úprava tady v Nastavení, přepnutí projektu,
+          tlačítko <b>„Spustit teď"</b> u časových limitů kroků (zapisuje
+          <code class="inline">timeout_s</code> do <code class="inline">config.json</code>) a ruční
+          editace <code class="inline">config.json</code>. Během měřené série nedělej ani jedno —
+          a tímhle přehledem si to potom ověř.</div>
       </fieldset>
 
       <div class="row">

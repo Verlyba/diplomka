@@ -525,6 +525,21 @@ let isFormDirty = false;
     });
   }
 
+  const calibBtn = document.getElementById('btn-calibration');
+  if (calibBtn) {
+    calibBtn.addEventListener('click', () => {
+      // Čte se to, co je uložené v config.json — ne rozeditovaný formulář:
+      // tabulka má ukazovat prahy, se kterými ty běhy v telemetrii doopravdy
+      // proběhly, ne hodnotu, kterou uživatel právě píše do políčka.
+      refreshCalibration();
+    });
+  }
+
+  const consistencyBtn = document.getElementById('btn-consistency');
+  if (consistencyBtn) consistencyBtn.addEventListener('click', () => refreshConsistency());
+  const consistencyAll = document.getElementById('chk-consistency-all');
+  if (consistencyAll) consistencyAll.addEventListener('change', () => refreshConsistency());
+
   setupModalEvents();
   await fetchProjects();
   setupProjectEvents();
@@ -1305,4 +1320,183 @@ function renderModalCheckpoints(checkpoints, stepSlug) {
 
     container.appendChild(card);
   });
+}
+
+/* ── Naměřeno vs. nastaveno (kalibrace prahů z telemetrie) ───────────── */
+
+const CALIB_VERDICT = {
+  ok: { text: 'leží v naměřené mezeře', color: 'var(--green)' },
+  too_low: { text: 'příliš nízko — protokol skoro nikdy nespustí', color: 'var(--red)' },
+  too_high: { text: 'příliš vysoko — protokol spustí i za pohybu', color: 'var(--red)' },
+  insufficient_data: { text: 'málo běhů', color: 'var(--muted)' },
+  unknown: { text: 'nelze posoudit', color: 'var(--muted)' },
+};
+
+function calibNum(value) {
+  if (value === null || value === undefined) return '—';
+  const abs = Math.abs(value);
+  return abs !== 0 && abs < 10 ? value.toFixed(2) : String(Math.round(value));
+}
+
+async function refreshCalibration() {
+  const host = document.getElementById('calibration-out');
+  const status = document.getElementById('calibration-status');
+  if (!host) return;
+  if (status) { status.textContent = 'Čtu telemetrii…'; status.style.color = 'var(--muted)'; }
+  let report;
+  try {
+    const resp = await fetch('/api/calibration');
+    report = await resp.json();
+  } catch (err) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ Server neběží — telemetrii nejde načíst.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (!report.ok) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ ' + (report.error || 'Neznámá chyba'); status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (status) {
+    status.textContent = `${report.runs_total} běhů v telemetry/ · minimum pro výpočet: ${report.min_runs}`;
+    status.style.color = 'var(--muted)';
+  }
+  renderCalibration(host, report);
+}
+
+function renderCalibration(host, report) {
+  host.innerHTML = '';
+  if (!report.steps || !report.steps.length) {
+    host.innerHTML = '<div class="dataset-empty">V telemetry/ zatím nejsou žádná data. '
+      + 'Pusť aspoň jeden běh orchestrace a načti znovu.</div>';
+    return;
+  }
+
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%; border-collapse:collapse; font-size:13px';
+  const head = document.createElement('tr');
+  ['krok', 'veličina', 'nastaveno', 'naměřená mezera', 'návrh', 'verdikt'].forEach((label, i) => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    th.style.cssText = 'text-align:' + (i < 2 ? 'left' : 'right')
+      + '; padding:4px 8px; border-bottom:1px solid var(--border); color:var(--muted); font-weight:600';
+    if (i === 5) th.style.textAlign = 'left';
+    head.appendChild(th);
+  });
+  table.appendChild(head);
+
+  report.checks.forEach((c) => {
+    const tr = document.createElement('tr');
+    const verdict = CALIB_VERDICT[c.verdict] || CALIB_VERDICT.unknown;
+    const band = c.band_low === null || c.band_high === null
+      ? '—' : `${calibNum(c.band_low)} – ${calibNum(c.band_high)}`;
+    const cells = [
+      { text: c.scope, align: 'left' },
+      { text: c.label, align: 'left', title: c.note || '' },
+      { text: calibNum(c.configured), align: 'right' },
+      { text: band, align: 'right' },
+      { text: calibNum(c.suggested), align: 'right' },
+      { text: `${verdict.text} (${c.runs}/${c.min_runs} běhů)`, align: 'left', color: verdict.color },
+    ];
+    cells.forEach((cell) => {
+      const td = document.createElement('td');
+      td.textContent = cell.text;
+      if (cell.title) td.title = cell.title;
+      td.style.cssText = `text-align:${cell.align}; padding:4px 8px; border-bottom:1px solid var(--border)`;
+      if (cell.color) td.style.color = cell.color;
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+  host.appendChild(table);
+
+  const steps = document.createElement('div');
+  steps.style.cssText = 'margin-top:10px; color:var(--muted); font-size:12px';
+  steps.textContent = 'Kroky v telemetrii: ' + report.steps.map((s) => {
+    const reasons = Object.entries(s.end_reasons || {})
+      .map(([k, v]) => `${k} ${v}×`).join(', ') || 'bez ukončení';
+    return `${s.step} (${s.runs} běhů, ${s.attempts} pokusů — ${reasons})`;
+  }).join(' · ');
+  host.appendChild(steps);
+}
+
+/* ── Stabilita nastavení mezi běhy ────────────────────────────────────── */
+
+async function refreshConsistency() {
+  const host = document.getElementById('consistency-out');
+  const status = document.getElementById('consistency-status');
+  if (!host) return;
+  const all = document.getElementById('chk-consistency-all');
+  if (status) { status.textContent = 'Čtu záznamy běhů…'; status.style.color = 'var(--muted)'; }
+  let report;
+  try {
+    const resp = await fetch('/api/runs/consistency' + (all && all.checked ? '?all=1' : ''));
+    report = await resp.json();
+  } catch (err) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ Server neběží — záznamy nejde načíst.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (!report.ok) {
+    host.innerHTML = '';
+    if (status) { status.textContent = '✗ ' + (report.error || 'Neznámá chyba'); status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (status) { status.textContent = `porovnáno ${report.n} běhů`; status.style.color = 'var(--muted)'; }
+  renderConsistency(host, report);
+}
+
+function renderConsistency(host, report) {
+  host.innerHTML = '';
+  if (!report.n) {
+    host.innerHTML = '<div class="dataset-empty">Žádné záznamy běhů se zaznamenanou konfigurací. '
+      + 'Pusť orchestraci a zkus to znovu.</div>';
+    return;
+  }
+
+  const verdict = document.createElement('div');
+  verdict.style.cssText = 'font-weight:600; padding:8px 0';
+  if (report.stable) {
+    verdict.textContent = `✓ Stabilní — napříč ${report.n} běhy se nezměnil jediný klíč rozhodný pro měřené schéma.`;
+    verdict.style.color = 'var(--green)';
+  } else {
+    verdict.textContent = `⚠ Nastavení se mezi běhy měnilo — rozhodných rozdílů: ${report.decisive_differences}.`
+      + ' Běhy před změnou a po ní se nesmí sčítat do jednoho čísla.';
+    verdict.style.color = 'var(--red)';
+  }
+  host.appendChild(verdict);
+
+  if (report.runs_without_settings && report.runs_without_settings.length) {
+    const legacy = document.createElement('div');
+    legacy.style.cssText = 'color:var(--muted); font-size:12px; padding-bottom:6px';
+    legacy.textContent = `${report.runs_without_settings.length} záznamů nemá uloženou konfiguraci `
+      + '(starší formát) — o těch se nedá říct ani že sedí, ani že ne.';
+    host.appendChild(legacy);
+  }
+
+  if (!report.differences.length) return;
+
+  const list = document.createElement('div');
+  list.style.cssText = 'font-size:13px; margin-top:6px';
+  report.differences.forEach((diff) => {
+    const block = document.createElement('div');
+    block.style.cssText = 'padding:6px 0; border-top:1px solid var(--border)';
+
+    const title = document.createElement('div');
+    title.textContent = (diff.decisive ? '! ' : '') + diff.key;
+    title.style.cssText = 'font-weight:600; color:' + (diff.decisive ? 'var(--red)' : 'var(--muted)');
+    block.appendChild(title);
+
+    diff.values.forEach((group) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'color:var(--muted); padding-left:14px';
+      const value = group.missing ? '(klíč v záznamu chybí)' : JSON.stringify(group.value);
+      const shown = group.runs.slice(0, 4).join(', ');
+      const more = group.runs.length > 4 ? ` (+${group.runs.length - 4} dalších)` : '';
+      row.textContent = `${value} — ${group.runs.length}×: ${shown}${more}`;
+      block.appendChild(row);
+    });
+    list.appendChild(block);
+  });
+  host.appendChild(list);
 }

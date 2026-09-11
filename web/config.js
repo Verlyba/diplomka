@@ -60,6 +60,21 @@ const DEFAULTS = {
   // Plánovač: posílat mu snímky scény a nechat ho nejdřív popsat, co vidí.
   planner_vision: true,
   planner_reasoning: true,
+  // Než se plán spustí, porovná se jeho první krok s čidlem zátěže gripperu
+  // (drží / nedrží). Při rozporu se plánovač jednou vyzve k opravě.
+  plan_state_check: true,
+  // Když plánovač prohlásí cíl za splněný (["DONE"]), zeptá se orchestrátor
+  // nejdřív inspektora, jestli to na snímku opravdu vidí.
+  done_visual_check: true,
+  // Krok, který se nepodařilo vyhodnotit (inspektor „nevidím" a žádný fyzický
+  // důkaz), se jednou zopakuje bez volání plánovače — nikdo netvrdí, že selhal.
+  uncertain_retry: true,
+  // Při re-plánu dostane plánovač i seznam plánů, které v tomhle běhu sám
+  // navrhl, a své vlastní odůvodnění k nim. Nestojí to žádné volání navíc.
+  planner_memory: true,
+  // Snímky, na kterých inspektor rozhodoval, se ukládají do images/<run_id>/
+  // a z každého pokusu se na ně odkazuje. Bez toho existují jen v prohlížeči.
+  save_images: true,
 
   // Ukončovací protokoly kroku. Správné hodnoty závisí na úloze i hardwaru
   // (jiný gripper, jiný předmět, úloha bez úchopu), proto jsou obě metody
@@ -67,13 +82,20 @@ const DEFAULTS = {
   protocol_a_enabled: true,
   protocol_a_threshold_rad: 0.5,
   protocol_a_patience: 5,
+  protocol_a_grasp_patience_extra: 5,
   protocol_b_enabled: true,
-  protocol_b_limit_ma: 280,
+  protocol_b_limit_ma: 250,
   protocol_b_patience: 3,
   protocol_b_grace_s: 0.75,
   protocol_b_deadband_frac: 0.25,
-  holding_limit_ma: 50,
+  protocol_b_stability_slope: 30.0,
+  holding_limit_ma: 20,
   gripper_state_in_context: true,
+
+  // Kolik proběhlých běhů musí být v telemetry/, než kalibrační tabulka
+  // („naměřeno vs. nastaveno") vydá u dané veličiny verdikt. Neovlivňuje běh
+  // robota — jen to, odkdy se ta čísla berou vážně.
+  calibration_min_runs: 3,
 };
 
 /** Načte konfiguraci: nejdřív backend (autorita), jinak localStorage. */
