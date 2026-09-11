@@ -136,6 +136,7 @@ DEFAULT_CONFIG: dict = {
     "plan_state_check": True,
     "done_visual_check": True,
     "uncertain_retry": True,
+    "planner_memory": True,
     # step termination protocols — task- and hardware-specific, hence togglable
     "protocol_a_enabled": True,
     "protocol_a_threshold_rad": 0.5,

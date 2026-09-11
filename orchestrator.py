@@ -542,6 +542,68 @@ PLAN_STATE_CORRECTION = (
 )
 
 
+# ── Planner memory (the slow layer's own decision trace) ───────────────────
+
+def plan_repeat_index(plan: list[str], history: list[dict]) -> int | None:
+    """1-based position of an earlier proposal identical to `plan`, else None.
+
+    Recorded only — this gates nothing, blocks nothing and triggers no re-ask.
+    An identical plan can be a perfectly legitimate second attempt in a scene
+    that the failed attempt itself changed, and a check that decided otherwise
+    would be inferring the state of the world from the orchestrator's own
+    bookkeeping (see the reverted plan_repeat_conflict). What this answers is a
+    different, purely internal question — how often does the small planner
+    cycle through the same few sequences — which is a property of its outputs,
+    not a claim about the workspace.
+    """
+    for i, entry in enumerate(history, 1):
+        if entry.get("plan") == plan:
+            return i
+    return None
+
+
+def format_planner_memory(history: list[dict], total_attempts: int) -> str:
+    """Render the planner's own earlier plans in this run, or "".
+
+    The planner is the one layer in the scheme that is called rarely and
+    statelessly: every re-plan re-derives a strategy from a flat list of step
+    verdicts with no record of what it already decided, or why. A monolithic
+    policy carries that continuity in its latent state for free; orchestration
+    serialises the state into symbols and then dropped the planner's own
+    reasoning on the floor along with everything else. Handing it back costs
+    nothing measurable — no extra call to the slow layer, a handful of lines of
+    context — and it is the cheapest available attack on the documented failure
+    mode of a small local model proposing the same plan over again.
+
+    The attempt numbers line each plan up with the PROGRESS THIS RUN listing
+    exactly, so the outcomes are not repeated here.
+    """
+    if not history:
+        return ""
+    lines = ["YOUR OWN EARLIER DECISIONS IN THIS RUN (what you already proposed, and why):"]
+    for i, entry in enumerate(history, 1):
+        first = int(entry.get("first_attempt") or 0)
+        if i < len(history):
+            last = int(history[i].get("first_attempt") or (total_attempts + 1)) - 1
+        else:
+            last = total_attempts
+        if last < first:
+            span = "not executed"
+        elif last == first:
+            span = f"attempt {first}"
+        else:
+            span = f"attempts {first}-{last}"
+        plan_str = json.dumps(entry.get("plan") or [], ensure_ascii=False)
+        reason = (entry.get("reasoning") or "").strip()
+        why = f' — "{reason}"' if reason else ""
+        lines.append(f"  plan {i} ({span}): {plan_str}{why}")
+    lines.append(
+        "These are your own past decisions, not measurements — the outcomes listed above are. If "
+        "you propose one of these sequences again, say in your REASONING line what has changed "
+        "since it was tried; otherwise choose a different one.")
+    return "\n".join(lines)
+
+
 # ── The inference daemon, seen from the orchestrator side ───────────────────
 
 class Daemon:
@@ -1127,6 +1189,12 @@ class Orchestrator:
         # — a DONE is what ends a run as a success, so how often the two layers
         # disagree about it is a headline number, not a diagnostic detail.
         self.done_checks: list[dict] = []
+        # Every plan the planner actually proposed in this run, with its own
+        # one-sentence reasoning. The planner is stateless between calls, so
+        # without this each re-plan re-derives a strategy with no memory of the
+        # ones it already chose. Also raw thesis data: `first_attempt` joins
+        # each plan to steps[].attempt. See format_planner_memory().
+        self.plan_history: list[dict] = []
 
     def stop(self) -> None:
         self._stop.set()
@@ -1257,6 +1325,14 @@ class Orchestrator:
             insp = r.get("insp_reason")
             note = f" — {insp}" if insp else ""
             lines.append(f"  {i}. {r['step']} -> {verdict}  (ended: {ended}){note}")
+
+        # Placed right after the outcomes it refers to: the attempt numbers in
+        # the block are the same numbers as the lines above, which is what
+        # lets the plans stay outcome-free instead of restating all of it.
+        if self.cfg.get("planner_memory", True):
+            memory = format_planner_memory(self.plan_history, len(self.results))
+            if memory:
+                lines += ["", memory]
 
         if unobserved:
             insp_line = (
@@ -1440,6 +1516,7 @@ class Orchestrator:
         # skip_planner is the fixed-order ablation — there is no planner to
         # correct, and re-asking would return the same hard-coded list.
         if not self.cfg.get("plan_state_check", True) or self.cfg.get("skip_planner"):
+            self._remember_plan(plan, reasoning)
             return plan, reasoning
 
         holding = self._holding_state()
@@ -1469,7 +1546,31 @@ class Orchestrator:
             plan, reasoning = plan2, (reasoning2 or reasoning)
 
         self.plan_checks.append(record)
+        self._remember_plan(plan, reasoning)
         return plan, reasoning
+
+    def _remember_plan(self, plan: list[str], reasoning: str) -> None:
+        """Add an adopted plan to the planner's own decision trace.
+
+        Sentinel-only answers are left out on purpose: ["DONE"] / ["ABORT"] are
+        terminal verdicts, not sequences that were tried, and they are already
+        recorded in done_checks. Handing them back as "a plan you proposed"
+        would only add context the planner has to ignore.
+        """
+        if self.cfg.get("skip_planner") or not plan:
+            return
+        if plan in ([PLAN_DONE], [PLAN_ABORT]):
+            return
+        entry = {"plan": list(plan), "reasoning": reasoning or "",
+                 # The attempt number the next executed step will get, so the
+                 # plan can be joined to steps[].attempt afterwards.
+                 "first_attempt": len(self.results) + 1,
+                 "repeat_of": plan_repeat_index(list(plan), self.plan_history)}
+        self.plan_history.append(entry)
+        if entry["repeat_of"]:
+            self.emit("log", level="INFO",
+                      message=f"Plánovač navrhl plán, který v tomhle běhu už jednou navrhl "
+                              f"(plán {entry['repeat_of']}) — zaznamenáno, běh pokračuje.")
 
     def _verify_goal(self, images_b64: list[str]) -> tuple[bool | None, str]:
         """Ask the inspector one question: is the OVERALL goal achieved right now?
@@ -1750,6 +1851,7 @@ class Orchestrator:
         self.results = []
         self.plan_checks = []
         self.done_checks = []
+        self.plan_history = []
         self._uncertain_step = ""
         self._uncertain_repeats = 0
 
@@ -2110,6 +2212,7 @@ class Orchestrator:
             # above and are unaffected. See plan_state_conflict().
             "plan_checks": self.plan_checks,
             "done_checks": self.done_checks,
+            "plan_history": self.plan_history,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")
         self.emit("finished", **summary)

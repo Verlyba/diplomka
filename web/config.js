@@ -69,6 +69,9 @@ const DEFAULTS = {
   // Krok, který se nepodařilo vyhodnotit (inspektor „nevidím" a žádný fyzický
   // důkaz), se jednou zopakuje bez volání plánovače — nikdo netvrdí, že selhal.
   uncertain_retry: true,
+  // Při re-plánu dostane plánovač i seznam plánů, které v tomhle běhu sám
+  // navrhl, a své vlastní odůvodnění k nim. Nestojí to žádné volání navíc.
+  planner_memory: true,
 
   // Ukončovací protokoly kroku. Správné hodnoty závisí na úloze i hardwaru
   // (jiný gripper, jiný předmět, úloha bez úchopu), proto jsou obě metody

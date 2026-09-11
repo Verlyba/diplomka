@@ -212,6 +212,9 @@
           <label class="checkline" title="Když inspektor ze snímku nedokáže rozhodnout a zároveň k tomuhle typu kroku neexistuje fyzický důkaz (žádný protokol A/B), nikdo netvrdí, že krok selhal — jen ho nikdo neviděl. Místo drahého re-plánu, do kterého by plánovač nedostal žádnou novou informaci, se krok jednou zopakuje. Druhá neprůkazná kontrola téhož kroku v řadě se už bere jako selhání a jde na re-plán. Vypnuto = neprůkazný krok se rovnou počítá jako selhání (chování před touhle volbou).">
             <input data-key="uncertain_retry" type="checkbox"> Nevyhodnotitelný krok zopakovat místo re-plánu
           </label>
+          <label class="checkline" title="Plánovač je mezi voláními bez paměti: při každém re-plánu odvozuje strategii znovu jen z výsledků kroků a neví, co už sám navrhl ani proč. Tahle volba mu do kontextu re-plánu přidá stručný seznam jeho vlastních dosavadních plánů i s jeho odůvodněními, spárovaný přes čísla pokusů se soupisem PROGRESS THIS RUN. Nestojí to žádné volání plánovače navíc — jen víc informací v tom, které se stejně děje. Vypnuto = chování před touhle volbou.">
+            <input data-key="planner_memory" type="checkbox"> Připomínat plánovači jeho vlastní dřívější plány
+          </label>
         </div>
         <div class="note">Model plánovače dostává snímek scény <b>před prvním plánem</b> (aby viděl
           skutečný výchozí stav a nevymýšlel plán naslepo) i <b>při re-plánu po selhání</b> (stejný
