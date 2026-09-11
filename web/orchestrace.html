@@ -27,25 +27,35 @@
       <p>Orchestrační schéma proto úlohu rozdělí mezi tři vrstvy. Každá dělá jen to, v čem je
         nejlepší, a protože se stav scény po každém kroku ověřuje, systém se z chyby umí zotavit
         přeplánováním místo toho, aby dojel celou trajektorii naslepo.</p>
+      <p>Podstatné je, že ty vrstvy jsou <b>různě rychlé a různě spolehlivé</b>, a schéma z toho
+        těží: plánovač je pomalý, drahý a volá se zřídka (start a re-plán), zatímco policy kroků
+        i inspektor jsou rychlé a běží pořád. Proto všechny kontroly míří <b>shora dolů</b> —
+        levné a měřené vrstvy auditují drahou, ne naopak.</p>
       <div class="roles">
         <div class="role">
-          <div class="n">vrstva 1</div>
+          <div class="n">vrstva 1 · pomalá, volá se zřídka</div>
           <h4>LLM plánovač („CEO")</h4>
-          <p>Dostane instrukci a katalog dovedností projektu. Vrátí čisté JSON pole ID kroků.
+          <p>Dostane cíl, popis scény, katalog dovedností, stav gripperu, snímek a — při re-plánu —
+            postup běhu i své vlastní dřívější plány. Vrátí větu odůvodnění a JSON pole ID kroků,
+            nebo <code class="inline">["DONE"]</code> / <code class="inline">["ABORT"]</code>. Je
+            to jediná vrstva, která odpovídá z promptu, ne z měření — tedy ta nejméně spolehlivá.
             Běží v LM Studiu.</p>
         </div>
         <div class="role">
-          <div class="n">vrstva 2</div>
+          <div class="n">vrstva 2 · rychlá, běží pořád</div>
           <h4>Per-step policy („svaly")</h4>
           <p>Malé ACT modely — jeden na každý krok. Trénují se z dílčích datasetů vzniklých
-            rozdělením jedné nahrávky. Za běhu je drží trvalý daemon a přepínají se výměnou vah.</p>
+            rozdělením jedné nahrávky. Za běhu je drží trvalý daemon a přepínají se výměnou vah.
+            Týž daemon zároveň měří <b>fyzický důkaz</b> o dokončení kroku (protokoly A/B) a
+            vlastní kamery.</p>
         </div>
         <div class="role">
-          <div class="n">vrstva 3</div>
+          <div class="n">vrstva 3 · rychlá, po každém kroku</div>
           <h4>VLM inspektor</h4>
-          <p>Po každém kroku dostane snímek scény a otázku, jestli krok dopadl. Vrací verdikt,
-            značku chyby, která řídí přeplánování, a jednovětné odůvodnění, co na snímku vidí —
-            to jde do souhrnu běhu i zpátky plánovači při re-plánu.</p>
+          <p>Po každém kroku dostane snímky, očekávaný výsledek a fyzické důkazy. Vrací verdikt,
+            značku chyby, odůvodnění a odpověď na otázku, jestli je splněný <b>celkový cíl</b>.
+            Jeho verdikt ale není konečný — spojí se s fyzickým důkazem (viz pravdivostní tabulka
+            níž), protože každý z těch dvou kanálů měří něco jiného.</p>
         </div>
       </div>
       <div class="note">Doporučení pro návrh kroků: do katalogu dovedností každé úlohy přidej i
@@ -60,103 +70,464 @@
   <section class="block">
     <h2>Schéma běhu</h2>
     <div class="block-body">
+      <p style="color:var(--muted);font-size:13px;margin-top:0">Schéma odpovídá skutečné řídicí
+        smyčce <code class="inline">Orchestrator.run()</code>. U každého uzlu je uvedená funkce
+        nebo protokolová zpráva, která ho v kódu realizuje, aby se dal krok po kroku dohledat.
+        Uzly s <b>čárkovaným zeleným rámečkem</b> jsou kontroly, kterými levné vrstvy auditují
+        drahý plánovač; <b>žluté</b> jsou rozcestníky.</p>
+
       <div class="flow">
+
+        <div class="phase">fáze 0 — inicializace</div>
         <div class="node io">
           <div class="t">Instrukce uživatele</div>
-          <div class="d">„ukliď kostku do krabice" — zadaná níže na této stránce</div>
+          <div class="d">volný text, např. „ukliď kostku do krabice" — zadaný níže na této stránce
+            <span class="k">POST /api/run → Orchestrator.run(instruction)</span></div>
         </div>
         <div class="arrow">▼</div>
         <div class="node">
-          <div class="t">1 · LLM plánovač — plán</div>
-          <div class="d">LM Studio vrátí JSON pole ID dovedností, např. ["pick_and_place"]</div>
+          <div class="t">0a · Start daemona a výchozí snímek</div>
+          <div class="d">Daemon se spustí s policy <i>prvního</i> kroku katalogu jen proto, aby
+            existovalo spojení ke kamerám, a vydá snímek výchozí scény. Proběhne jen když je
+            zapnuté <code class="inline">planner_vision</code> a není zapnuté
+            <code class="inline">skip_planner</code>; když se snímek nepodaří pořídit, daemon se
+            zase ukončí (jinak by držel sériový port) a plánuje se bez obrázku.
+            <span class="k">Daemon.start() → SNAP</span></div>
+        </div>
+
+        <div class="phase">fáze 1 — úvodní plán</div>
+        <div class="node">
+          <div class="t">1a · Kontext pro plánovač</div>
+          <div class="d">Cíl, popis scény, katalog dovedností s příznaky
+            <code class="inline">[grasp]</code> / <code class="inline">[RESET]</code>, věta o
+            zátěži gripperu (drží / nedrží) a výchozí snímek.
+            <span class="k">_build_initial_context() + _build_planner_prompt()</span></div>
         </div>
         <div class="arrow">▼</div>
         <div class="node">
-          <div class="t">2 · Resolver — validace a expanze</div>
-          <div class="d">Neznámá ID zahodí, cíl rozbalí na seřazené kroky: [grab_cube, move_to_box, release]</div>
+          <div class="t">1b · LLM plánovač („CEO")</div>
+          <div class="d">Vrátí jednu větu odůvodnění a na posledním řádku JSON pole ID kroků,
+            nebo <code class="inline">["DONE"]</code> (cíl už je splněný), nebo
+            <code class="inline">["ABORT"]</code> (odsud to nejde). Neparsovatelná odpověď se
+            jednou zopakuje s upřesněním formátu, teprve druhé selhání shodí běh.
+            <span class="k">_create_plan() → parse_json_array()</span></div>
         </div>
         <div class="arrow">▼</div>
-        <div class="loop">
-          <div class="label">smyčka přes kroky plánu</div>
-          <div class="node">
-            <div class="t">3 · Výměna modelu (SET_POLICY)</div>
-            <div class="d">Daemon vymění váhy policy — robot i kamera zůstávají připojené</div>
-          </div>
-          <div class="arrow">▼</div>
-          <div class="node">
-            <div class="t">4 · Exekuce (SET_TASK) + zámek úlohy</div>
-            <div class="d">Policy řídí robota na 30 Hz; do konce kroku se nepustí žádný další příkaz</div>
-          </div>
-          <div class="arrow">▼</div>
-          <div class="node">
-            <div class="t">5 · Ukončení kroku (protokol A / B)</div>
-            <div class="d">Dosednutí kloubů nebo proudová špička gripperu → TASK_DONE → zámek se odemkne</div>
-          </div>
-          <div class="arrow">▼</div>
-          <div class="node">
-            <div class="t">6 · Snímek scény (SNAP)</div>
-            <div class="d">Kameru vlastní daemon, takže snímek pro inspektora vydává on</div>
-          </div>
-          <div class="arrow">▼</div>
-          <div class="node">
-            <div class="t">7 · Verifikace VLM</div>
-            <div class="d">„Je kostka v gripperu?" → SUCCESS pokračuje, chybová značka spouští re-plán</div>
-          </div>
+        <div class="node">
+          <div class="t">1c · Resolver — validace a expanze</div>
+          <div class="d">Halucinovaná ID se zahodí a zalogují; ID celé úlohy se rozbalí na její
+            kroky v pořadí ze Setupu. Sentinely <code class="inline">DONE</code> /
+            <code class="inline">ABORT</code> projdou nedotčené, aby šlo „plánovač nechce nic
+            dělat" odlišit od „plánovač vrátil nesmysl" — obojí sem dřív dorazilo jako prázdný
+            seznam. <span class="k">_resolve_plan()</span></div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node audit">
+          <div class="t">1d · Audit plánu proti čidlu zátěže <span style="color:var(--muted);font-weight:400">(plan_state_check)</span></div>
+          <div class="d">Než se načte jakákoli policy, porovná se <b>první krok plánu</b> s jediným
+            bitem fyzického stavu — drží gripper něco, nebo ne. Hlásí se dva rozpory: robot něco
+            drží a plán začíná úchopem; robot nedrží nic a plán začíná krokem <i>za</i> posledním
+            úchopovým. Při rozporu se plánovač <b>jednou</b> vyzve k opravě a odpoví znovu.
+            <b>Plán se nikdy nepřepisuje</b> — trvá-li na svém, spustí se tak, jak ho navrhl, a
+            rozpor se zapíše. Čidlo mlčí (vrací <code class="inline">None</code>), když za celý
+            běh nevrátilo nenulovou hodnotu, když nárůst padne do pásma nejistoty kolem prahu,
+            nebo když je vypnuté <code class="inline">gripper_state_in_context</code>.
+            <span class="k">plan_state_conflict() → PLAN_STATE_CORRECTION → plan_checks[]</span></div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node decision">
+          <div class="t">1e · Rozcestník podle odpovědi plánovače</div>
+          <div class="d">Co plánovač vrátil, rozhoduje, jestli se vůbec něco spustí.</div>
           <div class="branch">
-            <div class="ok">✓ úspěch → další krok plánu</div>
-            <div class="fail">✗ neúspěch → nový plán s kontextem chyby (do limitu re-plánů z Setupu)</div>
+            <div class="ok">plán kroků → fáze 2</div>
+            <div class="hold"><code class="inline">["DONE"]</code> → kontrola 1f</div>
+            <div class="fail"><code class="inline">["ABORT"]</code> → konec chybou</div>
           </div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node audit">
+          <div class="t">1f · Ověření „cíl je splněný" u inspektora <span style="color:var(--muted);font-weight:400">(done_visual_check)</span></div>
+          <div class="d">Tohle je jediné tvrzení, které samo ukončí běh jako <b>úspěšný</b>, takže
+            se neuznává na slovo. Inspektor dostane snímky, které už jsou po ruce (u úvodního
+            plánu tytéž, ze kterých plánoval CEO — dva různé modely, tentýž obrázek), a odpoví
+            <code class="inline">GOAL: yes/no</code>. Asymetrie je záměrná: <b>zastavit smí jen
+            plánovač</b> (trvá-li na DONE, běh skončí jako DONE a rozpor se jen zapíše, aby
+            zmatený VLM neposlal robota manipulovat s hotovou scénou), <b>pokračovat se smí jen
+            při shodě obou vrstev</b>. Verdikt se zapisuje jako <code class="inline">confirmed</code>
+            / <code class="inline">denied</code> / <code class="inline">unknown</code> /
+            <code class="inline">skipped</code> / <code class="inline">off</code>.
+            <span class="k">_settle_done() → _verify_goal() → DONE_CORRECTION → done_checks[]</span></div>
+        </div>
+
+        <div class="phase">fáze 2 — smyčka přes kroky plánu</div>
+        <div class="loop">
+          <div class="label">pro každý krok plánu (index 0 … n)</div>
+          <div class="node">
+            <div class="t">2a · Výměna vah (SET_POLICY)</div>
+            <div class="d">Mění se jen model, ne proces — sériový port ani kamery nemění vlastníka.
+              Výměna na tutéž cestu je no-op, takže zopakování kroku nestojí nic.
+              <span class="k">Daemon.set_policy()</span></div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">2b · Exekuce (SET_TASK) + zámek úlohy</div>
+            <div class="d">Policy řídí robota na <code class="inline">fps</code> Hz; do konce kroku
+              se nepustí žádný další příkaz. Limit kroku je
+              <code class="inline">steps[].timeout_s</code> (spočtený z demonstrací), jinak
+              <code class="inline">episode_time_s</code>. Když daemon mezitím umře (zaseklý
+              sériový port), jednou se restartuje a krok se zkusí znovu — jeden hardwarový zádrhel
+              nemá vynulovat celý pokus.
+              <span class="k">SET_TASK:&lt;krok&gt;|grasp|reset|timeout=N</span></div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node decision">
+            <div class="t">2c · Ukončení kroku — co zámek odemkne</div>
+            <div class="d">Rozhoduje daemon, ne orchestrátor. Vyhodnocuje se v tomhle pořadí:</div>
+            <div class="branch">
+              <div class="ok"><b>Protokol B</b> — jen u kroků s příznakem <code class="inline">grasp</code></div>
+              <div class="hold"><b>Protokol A</b> — u libovolného kroku</div>
+              <div class="fail"><b>Časový limit</b> — pojistka, pak jde do daemona STOP</div>
+            </div>
+            <div class="d" style="margin-top:10px">Pozor na rozdíl, který se snadno přehlédne:
+              protokol A smí <b>ukončit pohyb</b> i u úchopového kroku (s delší trpělivostí a
+              včetně gripperu), ale orchestrátor ho u úchopu <b>neuzná jako důkaz úspěchu</b> —
+              tam rozhoduje jedině protokol B. „Klouby se zastavily" nerozliší sevřenou kostku od
+              zastavení s prázdnými čelistmi.
+              <span class="k">inference_daemon.py → TASK_DONE + reason</span></div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">2d · Snímek scény (SNAP)</div>
+            <div class="d">Kamery vlastní daemon, takže snímek pro inspektora vydává on — jeden za
+              každou nakonfigurovanou kameru. <span class="k">Daemon.snapshot()</span></div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">2e · Fyzický kanál — co říkají čidla robota</div>
+            <div class="d"><b>Úchopový krok:</b> ukončeno protokolem B →
+              <code class="inline">CONFIRM</code>; jinak <code class="inline">DENY</code>, ale
+              když nárůst skončil těsně pod prahem (v pásmu
+              <code class="inline">protocol_b_deadband_frac</code>) →
+              <code class="inline">UNCLEAR</code>, tedy měření příliš těsné na rozhodnutí.
+              <b>RESET krok:</b> ukončeno protokolem A → <code class="inline">CONFIRM</code>, jinak
+              <code class="inline">NONE</code>. <b>Ostatní kroky:</b>
+              <code class="inline">NONE</code> — pro jejich dokončení žádný fyzický signál
+              neexistuje. Pojistka: když čidlo zátěže za celý běh nevrátilo nenulovou hodnotu,
+              protokol B se nepoužije vůbec (plochá nula znamená „nečtu", ne „nic nedržím") a
+              rozhodne sám inspektor.</div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node">
+            <div class="t">2f · Vizuální kanál — VLM inspektor</div>
+            <div class="d">Dostane snímky, očekávaný výsledek kroku, pozici kroku v plánu a
+              <b>fyzické důkazy</b> (jak krok skončil, co říká zátěž) — aby uměl rozlišit, co
+              kamera nevidí. Vrací odůvodnění, <code class="inline">GOAL: yes/no</code> k celkovému
+              cíli a značku. <code class="inline">[unclear]</code> znamená „z tohohle snímku to
+              nepoznám", ne „selhalo to": pořídí se <b>nový snímek</b> a dotaz se jednou zopakuje.
+              Vypnutý inspektor (<code class="inline">skip_inspector</code>) dává
+              <code class="inline">SKIPPED</code> — to je experimentální podmínka a je záměrně
+              odlišené od <code class="inline">NOIMG</code>, což je rozbitá kamera.
+              <span class="k">_verify() → _read_verdict() + parse_goal_flag()</span></div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node audit">
+            <div class="t">2g · Fúze důkazů</div>
+            <div class="d">Oba kanály se vždy vyhodnotí a teprve pak spojí. Měří <b>různá
+              tvrzení</b>, takže ani jeden nesmí druhý přebít: fyzika ví, jestli jsou čelisti
+              zatížené, ale ne <i>co</i> drží ani jestli to skončilo na správném místě; kamera ví,
+              co kde je, ale prohrává s okluzí a nezměří sílu sevření. Rozpor se nezahazuje, ale
+              vrací zvlášť — „čelisti jsou zatížené, ale kamera nic drženého nevidí" je pro
+              plánovač i pro data cennější než holá značka. Úplná pravdivostní tabulka je níž.
+              <span class="k">fuse_evidence() → (success, tag, reason, conflict, outcome)</span></div>
+          </div>
+          <div class="arrow">▼</div>
+          <div class="node decision">
+            <div class="t">2h · Rozcestník podle výsledku fúze</div>
+            <div class="branch">
+              <div class="ok"><b>success</b> → viděl inspektor splněný celkový cíl
+                (<code class="inline">GOAL: yes</code>)? Ano → běh končí úspěchem, zbytek plánu se
+                nedojíždí (<code class="inline">goal_early_exit</code>). Ne → další krok plánu.</div>
+              <div class="hold"><b>uncertain</b> → nikdo nic nepozoroval. Krok se <b>jednou
+                zopakuje bez volání CEO</b>; druhá neprůkazná kontrola téhož kroku v řadě se bere
+                jako selhání. <span class="k">reflex_retry_decision()</span></div>
+              <div class="fail"><b>failure</b> → fáze 3 (re-plán)</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="phase">fáze 3 — re-plán po selhání</div>
+        <div class="node decision">
+          <div class="t">3a · Rozpočet re-plánů</div>
+          <div class="d"><code class="inline">replans += 1</code>; po překročení
+            <code class="inline">max_replans</code> běh končí chybou. Reflexní zopakování
+            neprůkazného kroku (2h) rozpočet <b>nečerpá</b> — nikdo netvrdil, že krok selhal.</div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node">
+          <div class="t">3b · Kontext selhání pro plánovač</div>
+          <div class="d">Postup celého běhu (co uspělo, co selhalo, čím to skončilo), očekávaný
+            výsledek posledního kroku, odůvodnění inspektora, případný <b>rozpor důkazů</b>
+            vypsaný doslova, stav gripperu a čerstvý snímek. Nepozorované pokusy se
+            <b>nepočítají</b> mezi selhání kroku — tvrdit plánovači „tenhle krok selhal 3×" o
+            krocích, které nikdo neviděl, by byl výrok o světě bez měření.
+            <span class="k">_build_replan_context(unobserved=…)</span></div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node">
+          <div class="t">3c · Vlastní paměť plánovače <span style="color:var(--muted);font-weight:400">(planner_memory)</span></div>
+          <div class="d">Plánovač je mezi voláními bez stavu: dřív nevěděl, co už sám v tomhle běhu
+            navrhl ani proč. Dostane proto zpátky seznam vlastních dřívějších plánů i s odůvodněním,
+            navázaný číslem pokusu na výpis postupu. Nestojí to žádné volání navíc.
+            <span class="k">format_planner_memory() → plan_history[]</span></div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node">
+          <div class="t">3d · Nový plán — týmiž kontrolami jako úvodní</div>
+          <div class="d">Znovu projde auditem proti čidlu (1d) i rozcestníkem DONE/ABORT (1e, 1f).
+            Vrátí-li plánovač prázdno, nasadí se záložní plán „od selhaného kroku dál".
+            <span class="k">_plan_grounded()</span></div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node audit">
+          <div class="t">3e · Pojistka proti smyčce</div>
+          <div class="d">Re-plán je nová strategie jen tehdy, když se liší od toho, co právě
+            selhalo. Jedno zopakování se toleruje a zaloguje, <b>druhé identické v řadě</b> běh
+            ukončí s jasným důvodem, místo aby se rozpočet re-plánů tiše protopil kopiemi jednoho
+            pokusu. Je to kontrola v kódu, ne v promptu — formulace promptu tuhle vlastnost malého
+            modelu spolehlivě nesrovná. <span class="k">plan == previous_remaining</span></div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node">
+          <div class="t">3f · Návrat do smyčky</div>
+          <div class="d"><code class="inline">index = 0</code> nad novým plánem → zpátky na 2a</div>
+        </div>
+
+        <div class="phase">konce běhu</div>
+        <div class="node exit-ok">
+          <div class="t">✓ success = true</div>
+          <div class="d">plán dojel celý · nebo plánovač řekl DONE (viz 1f) · nebo inspektor
+            potvrdil splněný cíl dřív, než plán došel (<code class="inline">goal_early_exit</code>)</div>
+        </div>
+        <div class="arrow">▼</div>
+        <div class="node exit-bad">
+          <div class="t">✗ success = false</div>
+          <div class="d">ABORT od plánovače · vyčerpaný rozpočet re-plánů · dvakrát identický
+            re-plán · zastaveno uživatelem · výjimka (daemon, LM Studio)</div>
         </div>
         <div class="arrow">▼</div>
         <div class="node io">
           <div class="t">Záznam běhu</div>
-          <div class="d">plán, kroky, důvody ukončení, verdikty a časy → <code class="inline">runs/&lt;čas&gt;.json</code></div>
+          <div class="d">Kompletní surová data pro diplomku → <code class="inline">runs/&lt;čas&gt;.json</code>.
+            Co přesně obsahuje, je v tabulce níž.
+            <span class="k">_save_run()</span></div>
         </div>
       </div>
     </div>
   </section>
 
   <section class="block">
-    <h2>Detaily, na kterých to stojí</h2>
+    <h2>Fúze důkazů — úplná pravdivostní tabulka</h2>
+    <div class="block-body">
+      <p>Jádro schématu: o výsledku kroku nerozhoduje jeden verdikt, ale spojení dvou nezávislých
+        kanálů. Tabulka je vyčerpávající — všech 18 kombinací je pokrytých testem
+        <code class="inline">tests/test_fusion.py</code>, takže platí i pro kombinace, které se na
+        skutečném robotu trefí jen zřídka.</p>
+      <div class="table-scroll">
+        <table class="matrix">
+          <tr>
+            <th>fyzika</th><th>inspektor</th><th>success</th><th>outcome</th><th>rozpor</th><th>proč</th>
+          </tr>
+          <tr><td>CONFIRM</td><td>SUCCESS</td><td class="y">true</td><td>success</td><td>—</td><td>oba se shodnou</td></tr>
+          <tr><td>DENY</td><td>FAIL</td><td class="n">false</td><td>failure</td><td>—</td><td>oba se shodnou</td></tr>
+          <tr class="sep"><td>CONFIRM</td><td>UNCLEAR</td><td class="y">true</td><td>success</td><td>—</td><td>nese fyzika; nerozhodný inspektor nesmí přebít měření</td></tr>
+          <tr><td>DENY</td><td>UNCLEAR</td><td class="n">false</td><td>failure</td><td>—</td><td>totéž opačným směrem</td></tr>
+          <tr class="sep"><td>CONFIRM</td><td>FAIL</td><td class="n">false</td><td>failure</td><td class="u">ano</td><td>vyhrává inspektor — drží se <i>něco</i>, ale on vidí konkrétní problém (třeba špatný předmět), a to protokol B principiálně nepozná</td></tr>
+          <tr><td>DENY</td><td>SUCCESS</td><td class="y">true</td><td>success</td><td class="u">ano</td><td>vyhrává inspektor — záchrana pozdě nebo plaše vyhodnoceného protokolu</td></tr>
+          <tr class="sep"><td>NONE</td><td>SUCCESS</td><td class="y">true</td><td>success</td><td>—</td><td rowspan="3">krok bez fyzického ukončovacího signálu (nájezd, přenos, položení) — rozhoduje sám snímek</td></tr>
+          <tr><td>NONE</td><td>FAIL</td><td class="n">false</td><td>failure</td><td>—</td></tr>
+          <tr><td>NONE</td><td>UNCLEAR</td><td class="n">false</td><td class="u">uncertain</td><td>—</td></tr>
+          <tr class="sep"><td>UNCLEAR</td><td>SUCCESS</td><td class="y">true</td><td>success</td><td>—</td><td rowspan="3">zátěž skončila v pásmu nejistoty kolem prahu — to není důkaz, takže se chová jako „žádná fyzika"</td></tr>
+          <tr><td>UNCLEAR</td><td>FAIL</td><td class="n">false</td><td>failure</td><td>—</td></tr>
+          <tr><td>UNCLEAR</td><td>UNCLEAR</td><td class="n">false</td><td class="u">uncertain</td><td>—</td></tr>
+          <tr class="sep"><td>CONFIRM</td><td>SKIPPED</td><td class="y">true</td><td>success</td><td>—</td><td rowspan="3">ablace „jen fyzika" (<code class="inline">skip_inspector</code>): žádná kontrola = žádná námitka</td></tr>
+          <tr><td>DENY</td><td>SKIPPED</td><td class="n">false</td><td>failure</td><td>—</td></tr>
+          <tr><td>NONE</td><td>SKIPPED</td><td class="y">true</td><td>success</td><td>—</td></tr>
+          <tr class="sep"><td>CONFIRM</td><td>NOIMG</td><td class="y">true</td><td>success</td><td>—</td><td rowspan="3">rozbitá kamera je <b>porucha</b>, ne nejednoznačný snímek — opakováním se nevyřeší, proto <i>není</i> uncertain</td></tr>
+          <tr><td>DENY</td><td>NOIMG</td><td class="n">false</td><td>failure</td><td>—</td></tr>
+          <tr><td>NONE</td><td>NOIMG</td><td class="n">false</td><td>failure</td><td>—</td></tr>
+        </table>
+      </div>
+      <div class="note"><b>Proč je <code class="inline">uncertain</code> zvlášť a ne prostě
+        selhání.</b> Ve dvou vyznačených buňkách <b>žádný kanál netvrdí, že krok dopadl špatně</b>
+        — fyzika pro tenhle typ kroku signál nemá a kamera říká „z tohohle snímku to nepoznám"
+        (a nový snímek už se zkusil). Zapsat to jako selhání by znamenalo vyrobit negativní důkaz
+        z chybějícího: zkreslí to data, tvrdí to plánovači něco, co nikdo nenaměřil, a utratí
+        volání pomalé vrstvy za situaci, ve které plánovač nedostane <i>žádnou</i> novou informaci.
+        Proto se místo toho krok jednou zopakuje bez CEO. <code class="inline">success</code>
+        zůstává <code class="inline">false</code> (nic se nepotvrdilo) — rozlišuje to až
+        <code class="inline">outcome</code>.</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Ukončovací protokoly — přesné podmínky</h2>
     <div class="block-body">
       <table class="plain">
         <tr>
-          <th style="width:190px">Mechanismus</th>
-          <th>K čemu je</th>
+          <th style="width:210px">Mechanismus</th>
+          <th>Přesná podmínka a proč</th>
         </tr>
         <tr>
           <td>Protokol A</td>
-          <td>Ukončení kroku dosednutím: rozdíl cílové a skutečné polohy pod 0,005 rad na všech
-            kloubech po 5 snímků za sebou znamená, že pohybová fáze skončila.</td>
+          <td>Krok skončí, když je „klid" po <code class="inline">protocol_a_patience</code> snímků
+            v řadě (u úchopu + <code class="inline">protocol_a_grasp_patience_extra</code>, protože
+            sevření po dosednutí ramene ještě chvíli drncá). <b>Co je „klid", závisí na typu
+            kroku:</b> u kroků <code class="inline">reset</code> a <code class="inline">grasp</code>
+            se měří <b>rychlost</b> — o kolik se kloub pohnul od minulého snímku; u ostatních
+            <b>odstup od predikce</b> policy. Rozdíl je ověřený na reálné telemetrii: u RESET kroku
+            se odstup od predikce neustálil, ani když rameno stálo bit po bitu 10+ sekund — byl to
+            šum predikce kolem držené pozice, ne pohyb. Gripper se do „klidu" nepočítá, <b>kromě</b>
+            úchopových kroků, kde je to naopak podstatné: rameno se zastaví dřív, než čelisti
+            dozavírají.</td>
+        </tr>
+        <tr>
+          <td>… jednotka prahu</td>
+          <td>Klíč se jmenuje <code class="inline">protocol_a_threshold_rad</code>, ale
+            <b>radiány to nejsou</b> — je to nativní jednotka polohy robota, u téhle sestavy SO-101
+            stupně (<code class="inline">use_degrees=true</code>). Název je historický a je
+            zachovaný kvůli zpětné kompatibilitě konfigurací. Výchozí 0,5 má rezervu nad šumem
+            enkodéru a je hluboko pod skutečným pohybem (desítky jednotek).</td>
         </tr>
         <tr>
           <td>Protokol B</td>
-          <td>Ukončení kroku kontaktem: zátěž serva gripperu (Present_Load) vzroste nad klidovou hodnotu
-            o víc než nastavený limit = objekt je sevřen. Ukončí úchopové kroky dřív, než by policy
-            „tlačila do prázdna".</td>
+          <td>Krok s příznakem <code class="inline">grasp</code> skončí, když jsou <b>současně</b>
+            splněné čtyři podmínky po <code class="inline">protocol_b_patience</code> snímků v řadě:
+            (1) klidová hodnota zátěže je změřená z dost vzorků, (2) uběhla
+            <code class="inline">protocol_b_grace_s</code> od startu kroku, (3) nárůst nad klid
+            přesáhl <code class="inline">protocol_b_limit_ma</code>, (4) nárůst se <b>ustálil</b> —
+            <code class="inline">|sklon| &lt; protocol_b_stability_slope</code>.</td>
+        </tr>
+        <tr>
+          <td>… proč tolik podmínek</td>
+          <td>Samotné „je to nad prahem" nestačí, a není to teorie: na reálné telemetrii vyskočil
+            proud gripperu nad práh hned v prvních snímcích kroku, ještě než se rameno stihlo
+            k předmětu přiblížit — z pouhého přejezdu do výchozí polohy trajektorie. A skutečný
+            potvrzený úchop (nárůst 108) ležel <b>mezi</b> dvěma falešnými spuštěními (72 a 139),
+            takže žádný práh ty dvě situace neoddělí. <b>Ochranná doba</b> obejde překryv tím, že
+            se protokol na začátku kroku vůbec nevyhodnocuje, a <b>podmínka ustálení</b> hledá
+            <i>plató</i> místo stoupající hrany — stoupající transient totiž po cestě nahoru
+            projde každou hodnotou, tedy i limitem.</td>
+        </tr>
+        <tr>
+          <td>Klidová hodnota</td>
+          <td>Surová hodnota registru serva není kalibrovaná na miliampéry, takže absolutní práh by
+            na jiném kusu hardwaru znamenal něco jiného. Porovnává se proto <b>nárůst nad klid</b>:
+            nezáleží, co znamená „0", jen jak daleko se čtení pohnulo. Klid se změří během první
+            čekací fáze běhu (čelisti prázdné) a pak se <b>zmrazí</b> — pozdější čekací fáze už
+            mohou být s předmětem v čelistech a nesmí klid vytáhnout nahoru.</td>
         </tr>
         <tr>
           <td>Zámek úlohy</td>
-          <td>Dokud krok neskončí, orchestrátor nepustí žádný další příkaz. Timeout kroku je
-            pojistka proti zaseknutí — po jeho vypršení jde do daemonu STOP.</td>
+          <td>Dokud krok neskončí, orchestrátor nepustí žádný další příkaz. Časový limit je
+            pojistka proti zaseknutí — po jeho vypršení jde do daemona STOP a krok se uzavře
+            důvodem „časový limit".</td>
         </tr>
         <tr>
           <td>Hot-swap vah</td>
           <td>Mezi kroky se mění jen model, ne proces: sériový port ani kamery nemění vlastníka,
-            takže se neztrácí čas restartem a nehrozí kolize na sběrnici.</td>
-        </tr>
-        <tr>
-          <td>Resolver plánu</td>
-          <td>Plán z LLM se validuje proti katalogu dovedností. Halucinovaná ID se zahodí a zaloguje;
-            ID celé úlohy se rozbalí na její kroky v pořadí ze setupu.</td>
-        </tr>
-        <tr>
-          <td>Re-plán</td>
-          <td>Po neúspěšné verifikaci dostane plánovač kontext selhání — postup dosavadního běhu,
-            značku chyby a odůvodnění inspektora ke každému kroku — a sestaví nový plán. Po
-            vyčerpání limitu re-plánů běh končí chybou.</td>
+            takže se neztrácí čas restartem a nehrozí kolize na sběrnici. Výměna na tutéž cestu
+            se vrací okamžitě.</td>
         </tr>
       </table>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Kontroly, kterými levné vrstvy auditují drahou</h2>
+    <div class="block-body">
+      <p>Plánovač je jediná vrstva, která odpovídá <b>z promptu</b>, ne z měření — a je to zároveň
+        ta nejméně spolehlivá (malý lokální model) a na jedno volání nejdražší. Všechny kontroly
+        níž proto míří shora dolů: levné a měřené vrstvy kontrolují drahou. Žádná z nich plán
+        nikdy nepřepíše — vždy jen vyzve k opravě a výsledek zapíše, protože deterministické
+        přepsání by při špatně nastaveném prahu umělo zablokovat běh a hlavně by zničilo právě to,
+        co je na tom měřitelné.</p>
+      <table class="plain">
+        <tr><th style="width:190px">Kontrola</th><th>Co hlídá a co se z ní dá vyčíst</th></tr>
+        <tr>
+          <td>plan_state_check</td>
+          <td>Plán proti čidlu zátěže, ještě než se načte policy (uzel 1d). Měřená veličina: <b>jak
+            často malý plánovač odporuje přímému měření a stačí na to jedna věta.</b> →
+            <code class="inline">plan_checks[]</code></td>
+        </tr>
+        <tr>
+          <td>done_visual_check</td>
+          <td>Tvrzení „cíl je splněný", které samo ukončí běh jako úspěšný (uzel 1f). Měřená
+            veličina: <b>kolik „úspěchů" orchestrace stojí na neověřeném tvrzení plánovače.</b> →
+            <code class="inline">done_checks[]</code></td>
+        </tr>
+        <tr>
+          <td>uncertain_retry</td>
+          <td>Neprůkazný krok se jednou zopakuje bez volání CEO (uzel 2h). Měřená veličina:
+            <b>kolikrát druhý pokus dopadl průkazně</b>, tedy kolik volání pomalé vrstvy se ušetřilo.
+            → <code class="inline">steps[].outcome</code>, <code class="inline">steps[].reflex_retry</code></td>
+        </tr>
+        <tr>
+          <td>planner_memory</td>
+          <td>Plánovač dostane zpátky vlastní dřívější plány a jejich odůvodnění (uzel 3c). Cílí na
+            zdokumentovanou vadu: model navrhne totéž znovu, protože neví, že to už navrhl. →
+            <code class="inline">plan_history[]</code></td>
+        </tr>
+        <tr>
+          <td>pojistka smyčky</td>
+          <td>Dvakrát za sebou identický re-plán běh ukončí (uzel 3e). Není vypínatelná — je to
+            poslední záchrana rozpočtu re-plánů.</td>
+        </tr>
+      </table>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Přepínače pro ablace</h2>
+    <div class="block-body">
+      <p>Každý z nich vypíná jednu součást schématu, takže se dá měřit, co doopravdy přidává.
+        Výchozí stav je všude „zapnuto" a vypnutí vždy reprodukuje chování, které schéma mělo před
+        jejím přidáním.</p>
+      <table class="plain">
+        <tr><th style="width:190px">Vypnuto</th><th>Co se stane</th></tr>
+        <tr><td>skip_planner</td><td>Žádné LLM — kroky se odjedou v pevném pořadí z katalogu. Audity nad plánovačem se přeskočí, protože není co auditovat.</td></tr>
+        <tr><td>skip_inspector</td><td>Žádný VLM — o kroku rozhoduje jen fyzika (a krok bez protokolu projde bez námitky).</td></tr>
+        <tr><td>planner_vision</td><td>Plánovač plánuje jen z textu, bez snímků. Vypne i pořízení výchozího snímku scény (uzel 0a).</td></tr>
+        <tr><td>planner_reasoning</td><td>Plánovač vrací holé JSON pole bez věty odůvodnění.</td></tr>
+        <tr><td>plan_state_check</td><td>Plán se nekonfrontuje s čidlem zátěže.</td></tr>
+        <tr><td>done_visual_check</td><td>DONE od plánovače ukončí běh jako úspěšný bez ověření snímkem.</td></tr>
+        <tr><td>uncertain_retry</td><td>Neprůkazný krok se rovnou počítá jako selhání a jde na re-plán.</td></tr>
+        <tr><td>planner_memory</td><td>Plánovač při re-plánu neví, co už sám navrhl.</td></tr>
+        <tr><td>gripper_state_in_context</td><td>Plánovač nedostane údaj o zátěži gripperu — a tím pádem se vypne i audit 1d, aby se nekáral za důkaz, který nikdy neviděl.</td></tr>
+        <tr><td>protocol_a_enabled / protocol_b_enabled</td><td>Příslušný protokol se nevyhodnocuje; kroky pak končí časovým limitem.</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Co se zapisuje do záznamu běhu</h2>
+    <div class="block-body">
+      <p>Jeden soubor na běh, <code class="inline">runs/&lt;čas&gt;.json</code>. Formát je
+        <b>aditivní</b> — nová pole přibývají, existující nemění význam, aby starší analýzy nad
+        hotovými daty dál platily.</p>
+      <table class="plain">
+        <tr><th style="width:190px">Pole</th><th>Obsah</th></tr>
+        <tr><td>success, error, duration_s</td><td>Hlavní měřená veličina, případná chyba a délka běhu.</td></tr>
+        <tr><td>goal_early_exit</td><td>Běh skončil proto, že inspektor viděl splněný cíl dřív, než plán došel — tyhle běhy jde při analýze odlišit nebo odfiltrovat.</td></tr>
+        <tr><td>steps[]</td><td>Jeden záznam na <b>pokus</b> (ne na krok plánu): krok, verdikt, značka, důvod ukončení, odůvodnění inspektora, <code class="inline">phys</code> / <code class="inline">vis</code> / <code class="inline">conflict</code> zvlášť, <code class="inline">outcome</code>, <code class="inline">reflex_retry</code> a časové okno <code class="inline">t_start</code> / <code class="inline">t_end</code>.</td></tr>
+        <tr><td>plan_checks[]</td><td>Jeden záznam na každý plán: co plánovač navrhl, co říkalo čidlo, byl-li rozpor a změnila-li výzva jeho názor.</td></tr>
+        <tr><td>done_checks[]</td><td>Jeden záznam na každé tvrzení „cíl je splněný": verdikt inspektora, jeho odůvodnění, trval-li plánovač na svém a co naplánoval potom.</td></tr>
+        <tr><td>plan_history[]</td><td>Posloupnost všech plánů běhu i s odůvodněním — tatáž data, která plánovač dostává zpátky jako paměť.</td></tr>
+        <tr><td>config, catalog</td><td>Celá konfigurace a katalog kroků, se kterými běh proběhl. Díky tomu jde zpětně ověřit, že se nastavení mezi běhy série <b>nezměnilo</b> (Setup → „Stabilita nastavení mezi běhy").</td></tr>
+      </table>
+      <div class="note">Vedle toho píše daemon <code class="inline">telemetry/&lt;čas&gt;.jsonl</code>
+        — jeden řádek na tik s polohou kloubů, zátěží, jejím sklonem a stavem obou protokolů. Z toho
+        se dá zpětně zkontrolovat, jestli jsou prahy protokolů nastavené rozumně (Setup →
+        „Naměřeno vs. nastaveno").</div>
     </div>
   </section>
 
@@ -170,6 +541,16 @@
         <code class="inline">inference_daemon.py</code> na stejné frekvenci. Baseline má jen
         vypnuté ukončovací protokoly a jeden model na celou úlohu. Rozdíl ve výsledcích je tedy
         rozdílem schémat, ne prostředí.</p>
+      <p>Zbývá třetí podmínka, na kterou se snadno zapomene: <b>nastavení se nesmí měnit ani mezi
+        jednotlivými běhy</b> orchestrační větve. Jinak se neporovnávají dvě schémata, ale hromada
+        různě nastavených variant jednoho z nich. Protože „nastavení jsem neměnil" je vzpomínka a
+        ne měření, ukládá si každý běh do svého záznamu celou konfiguraci — a v Setupu je přehled
+        <b>„Stabilita nastavení mezi běhy"</b>, který ze záznamů zpětně ověří, jestli se něco
+        nezměnilo, a případně řekne co a ve kterém běhu.</p>
+      <div class="note warn">Během měřené série proto neměň nastavení v Setupu, nepřepínej projekt
+        a nemačkej <b>„Spustit teď"</b> u časových limitů kroků — to zapisuje
+        <code class="inline">timeout_s</code> do konfigurace, a je to tedy změna schématu jako
+        každá jiná.</div>
     </div>
   </section>
 
