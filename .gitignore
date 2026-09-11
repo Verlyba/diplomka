@@ -14,6 +14,9 @@ projects/
 # Záznamy běhů orchestrace
 runs/*.json
 
+# Snímky scény z běhů, navázané na jednotlivé pokusy (images/<run_id>/)
+images/
+
 # Strukturovaná telemetrie z inference_daemon.py (load/slope/trend za tik)
 telemetry/
 

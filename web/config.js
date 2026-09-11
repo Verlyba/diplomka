@@ -72,6 +72,9 @@ const DEFAULTS = {
   // Při re-plánu dostane plánovač i seznam plánů, které v tomhle běhu sám
   // navrhl, a své vlastní odůvodnění k nim. Nestojí to žádné volání navíc.
   planner_memory: true,
+  // Snímky, na kterých inspektor rozhodoval, se ukládají do images/<run_id>/
+  // a z každého pokusu se na ně odkazuje. Bez toho existují jen v prohlížeči.
+  save_images: true,
 
   // Ukončovací protokoly kroku. Správné hodnoty závisí na úloze i hardwaru
   // (jiný gripper, jiný předmět, úloha bez úchopu), proto jsou obě metody

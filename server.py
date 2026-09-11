@@ -137,6 +137,9 @@ DEFAULT_CONFIG: dict = {
     "done_visual_check": True,
     "uncertain_retry": True,
     "planner_memory": True,
+    # Snímky scény se ukládají do images/<run_id>/ a odkazují se z
+    # steps[].images — jediný vizuální důkaz k verdiktu inspektora.
+    "save_images": True,
     # step termination protocols — task- and hardware-specific, hence togglable
     "protocol_a_enabled": True,
     "protocol_a_threshold_rad": 0.5,

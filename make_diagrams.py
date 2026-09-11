@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Vygeneruje dvě schémata orchestrace do SVG:
+Vygeneruje tři schémata orchestrace do SVG:
 
   web/schema-komponenty.svg  — CO je s ČÍM propojené a jakým kanálem
                                (procesy, roury, HTTP, SSE, sériový port, soubory)
+  web/schema-vyvojovy.svg    — CO SE DĚJE KDY: klasický vývojový diagram
+                               s drahami podle vrstev (nejčitelnější z těch tří)
   web/schema-sekvence.svg    — V JAKÉM POŘADÍ si ty komponenty posílají zprávy
                                během jednoho běhu, s doslovnými řetězci protokolu
 
@@ -12,11 +14,11 @@ přesné souřadnice se ručně neudržují. Takhle se přidání zprávy nebo p
 komponenty zapíše do seznamu níž a schéma se překreslí — což je podstatné,
 protože zastaralé schéma v diplomce je horší než žádné.
 
-Obě schémata jsou záměrně **na bílém pozadí s tmavým textem**, ne v tmavém
+Všechna jsou záměrně **na bílém pozadí s tmavým textem**, ne v tmavém
 vzhledu aplikace: cílem je tisk v diplomce. Ve stránce se proto zobrazují na
 bílé kartě.
 
-    python make_diagrams.py            # přepíše obě SVG ve web/
+    python make_diagrams.py            # přepíše všechna SVG ve web/
     python make_diagrams.py --check    # jen ověří, že se popisky vejdou
 
 Nepotřebuje nic než standardní knihovnu.
@@ -114,8 +116,8 @@ BOXES = [
      ["CEO — llm_model (pomalý, zřídka)",
       "inspektor — vlm_model (rychlý, často)",
       "jeden server, dva různé modely"], "ext"),
-    ("runs", COL_A, 450, W_STD, 62, "runs/<čas>.json",
-     ["záznam běhu — surová data práce"], "file"),
+    ("runs", COL_A, 450, W_STD, 74, "runs/<id>.json + images/<id>/",
+     ["záznam běhu a snímky k pokusům —", "obojí pod týmž run_id"], "file"),
     ("daemon", COL_B, 450, W_STD, 76, "inference_daemon.py",
      ["podproces, drží ACT policy kroků", "měří protokoly A/B"], "proc"),
     ("robot", COL_C, 450, W_C, 76, "Robot SO-101 + kamery",
@@ -137,7 +139,7 @@ LINKS = [
      ["zpět: emit() → EventBus → SSE"], "v"),
     ("orch", "lm", "HTTP (urllib): POST <lm_url>/chat/completions",
      ["{model, messages, image_url: base64 JPEG}"], "h"),
-    ("orch", "runs", "zapisuje na konci běhu", [], "v"),
+    ("orch", "runs", "záznam na konci, snímky průběžně", [], "v"),
     ("orch", "daemon", "roury podprocesu (stdin/stdout, řádkově)",
      ["→ SET_POLICY · SET_TASK · SNAP · STOP · QUIT",
       "← [STATUS] · [SNAPSHOT] · [TELEMETRY]"], "elbow"),
@@ -232,6 +234,7 @@ SEQ = [
     ("msg", "D", "O", "[STATUS] DAEMON_READY: mode=HARDWARE", "ret"),
     ("msg", "O", "D", "SNAP", ""),
     ("msg", "D", "O", "[SNAPSHOT] <base64 JPEG>", "ret"),
+    ("msg", "O", "F", "images/<id>/init_1.jpg — výchozí scéna", ""),
 
     ("phase", "FÁZE 1 — plán a jeho audit"),
     ("msg", "O", "C", "POST /chat/completions {llm_model}", ""),
@@ -258,6 +261,7 @@ SEQ = [
     ("msg", "V", "O", "REASONING + GOAL: yes|no + značka (SUCCESS / [unclear] / …)", "ret"),
     ("msg", "O", "D", "při [unclear]: SNAP znovu a dotaz zopakovat jednou", "opt"),
     ("self", "O", "fuse_evidence() → success · outcome · rozpor"),
+    ("msg", "O", "F", "images/<id>/a003_1.jpg — snímky, na kterých verdikt stojí", ""),
     ("self", "O", "uncertain → krok zopakovat bez volání CEO (reflex_retry_decision)"),
     ("endloop",),
 
@@ -268,7 +272,7 @@ SEQ = [
     ("phase", "KONEC BĚHU"),
     ("msg", "O", "D", "QUIT", ""),
     ("msg", "D", "R", "disconnect (port a kamery)", ""),
-    ("msg", "O", "F", "runs/<čas>.json — plán, kroky, fúze, audity, konfigurace", ""),
+    ("msg", "O", "F", "runs/<id>.json — kroky, fúze, audity, cesty ke snímkům", ""),
     ("msg", "O", "S", "emit(\"finished\", success, duration_s, …)", "ret"),
     ("msg", "S", "B", "SSE: finished → výsledek v prohlížeči", "ret"),
 ]
@@ -374,6 +378,178 @@ def diagram_sequence(check_only: bool = False) -> str:
     return svg(width, height, body)
 
 
+# ── Schéma 3: vývojový diagram s drahami podle vrstev ───────────────────────
+# Tohle je ta nejčitelnější podoba pro někoho, kdo nečte UML: klasické
+# "co se stane, a co když ne", jen rozdělené do sloupců podle toho, KTERÁ
+# VRSTVA to dělá. Sekvenční diagram říká totéž přesněji, ale hůř se čte.
+
+FLOW_LANES = [
+    ("l1", "Vrstva 1 — plánovač (CEO)", "pomalý, volá se jen na startu a při re-plánu"),
+    ("orch", "Orchestrátor", "řídicí logika, fúze důkazů, rozpočty"),
+    ("l2", "Vrstva 2 — policy kroku + čidla", "rychlá, běží po celou dobu kroku"),
+    ("l3", "Vrstva 3 — inspektor (VLM)", "rychlý, volá se po každém kroku"),
+]
+
+# (id, dráha, řádek, druh, [řádky textu])
+#   druh: start | end-ok | end-bad | proc | dec
+FLOW_NODES = [
+    ("start", "orch", 0, "start", ["Instrukce od uživatele"]),
+    ("boot", "l2", 1, "proc", ["Start daemona,", "snímek výchozí scény"]),
+    ("plan", "l1", 2, "proc", ["Naplánuj kroky", "z katalogu dovedností"]),
+    ("state", "orch", 3, "dec", ["Odporuje plán čidlu zátěže?"]),
+    ("fix", "l1", 4, "proc", ["Jedna cílená výzva", "k opravě plánu"]),
+    ("ans", "orch", 5, "dec", ["Co plánovač vrátil?"]),
+    ("goal", "l3", 6, "dec", ["Vidíš na snímku splněný cíl?"]),
+    ("swap", "l2", 7, "proc", ["Přepni váhy na model", "tohoto kroku (hot-swap)"]),
+    ("exec", "l2", 8, "proc", ["Spusť krok —", "policy řídí robota"]),
+    ("term", "l2", 9, "dec", ["Čím krok skončil?"]),
+    ("snap", "l2", 10, "proc", ["Pořiď snímek scény"]),
+    ("phys", "orch", 11, "proc", ["Fyzický důkaz podle", "typu kroku a důvodu konce"]),
+    ("insp", "l3", 12, "proc", ["Posuď krok ze snímku", "(+ dostaneš fyzický důkaz)"]),
+    ("fuse", "orch", 13, "proc", ["Fúze obou důkazů"]),
+    ("res", "orch", 14, "dec", ["Výsledek kroku?"]),
+    ("budget", "l1", 15, "dec", ["Zbývá rozpočet re-plánů?"]),
+    ("retry", "l2", 15, "proc", ["Zopakuj krok", "bez volání CEO"]),
+    ("replan", "l1", 16, "proc", ["Nový plán z kontextu", "selhání + vlastní paměti"]),
+    ("ok", "orch", 17, "end-ok", ["Konec — úspěch"]),
+    ("bad", "l1", 17, "end-bad", ["Konec — neúspěch"]),
+]
+
+# (z, do, popisek, druh trasy, parametr)
+#   "down"  svisle v téže dráze
+#   "elbow" dolů, vodorovně do cílové dráhy, dolů do jejího horního okraje
+#   "side"  bokem přes postranní kanál — pro zpětné skoky a dlouhé přeskoky;
+#           parametr je (strana, číslo kanálu), aby se dvě takové trasy
+#           nepřekryly
+FLOW_EDGES = [
+    ("start", "boot", "", "elbow", None),
+    ("boot", "plan", "", "elbow", None),
+    ("plan", "state", "", "elbow", None),
+    ("state", "fix", "ano — rozpor", "elbow", None),
+    ("fix", "ans", "plán se stejně spustí", "elbow", None),
+    ("state", "ans", "ne", "down", None),
+    ("ans", "goal", "[\"DONE\"]", "elbow", None),
+    ("ans", "swap", "plán kroků", "elbow", None),
+    ("ans", "bad", "[\"ABORT\"]", "side", ("left", 0)),
+    ("goal", "ok", "ano (nebo plánovač na DONE trvá)", "side", ("right", 2)),
+    ("goal", "state", "ne — plánovač DONE odvolá", "side", ("left", 2)),
+    ("swap", "exec", "", "down", None),
+    ("exec", "term", "", "down", None),
+    ("term", "snap", "protokol A · protokol B · časový limit", "down", None),
+    ("snap", "phys", "", "elbow", None),
+    ("phys", "insp", "", "elbow", None),
+    ("insp", "fuse", "", "elbow", None),
+    ("fuse", "res", "", "down", None),
+    ("res", "retry", "neprůkazné (poprvé)", "elbow", None),
+    ("retry", "exec", "zpět na spuštění kroku", "side", ("right", 1)),
+    ("res", "swap", "úspěch — zbývá krok", "side", ("right", 0)),
+    ("res", "ok", "úspěch — plán dojel", "down", None),
+    ("res", "budget", "selhání (i druhé neprůkazné v řadě)", "elbow", None),
+    ("budget", "replan", "ano", "down", None),
+    ("budget", "bad", "ne — vyčerpáno", "side", ("left", 1)),
+    ("replan", "state", "nový plán projde týmiž kontrolami", "side", ("left", 3)),
+]
+
+LANE_W = 270
+FLOW_ROW = 100
+FLOW_NODE_H = 54
+SIDE_W = 34          # rozteč postranních kanálů
+FLOW_LEFT = 30 + 4 * SIDE_W
+FLOW_TOP = 108
+
+
+def diagram_flow() -> str:
+    lane_i = {l[0]: i for i, l in enumerate(FLOW_LANES)}
+    nodes = {n[0]: n for n in FLOW_NODES}
+    max_row = max(n[2] for n in FLOW_NODES)
+    width = FLOW_LEFT + LANE_W * len(FLOW_LANES) + 4 * SIDE_W + 30
+    height = FLOW_TOP + (max_row + 1) * FLOW_ROW + 50
+    node_w = LANE_W - 40
+
+    def cx(node_id: str) -> float:
+        return FLOW_LEFT + LANE_W * lane_i[nodes[node_id][1]] + LANE_W / 2
+
+    def top(node_id: str) -> float:
+        return FLOW_TOP + nodes[node_id][2] * FLOW_ROW
+
+    def bottom(node_id: str) -> float:
+        return top(node_id) + FLOW_NODE_H
+
+    body: list[str] = []
+    body.append(text(30, 22, "Vývojový diagram běhu — co se děje kdy a kdo to dělá",
+                     14, INK, weight="bold"))
+    body.append(text(30, 38, "Sloupce jsou vrstvy schématu. Obdélník = akce, "
+                             "kosočtverec = rozhodnutí, zaoblený tvar = začátek/konec.",
+                     9.5, MUTED))
+
+    # Dráhy
+    for i, (_id, title, sub) in enumerate(FLOW_LANES):
+        x = FLOW_LEFT + LANE_W * i
+        body.append(rect(x, 56, LANE_W, height - 76, fill="#fafbfc" if i % 2 == 0 else "#ffffff",
+                         stroke=LINE, rx=4))
+        body.append(rect(x, 56, LANE_W, 40, fill=PANEL, stroke=LINE, rx=4))
+        body.append(text(x + LANE_W / 2, 73, title, 10.5, INK, anchor="middle", weight="bold"))
+        body.append(text(x + LANE_W / 2, 87, sub, 8.5, MUTED, anchor="middle"))
+
+    # Hrany se kreslí pod uzly, aby šipka nešla přes text
+    for src, dst, label, kind, param in FLOW_EDGES:
+        x1, x2 = cx(src), cx(dst)
+        if kind == "down":
+            y1, y2 = bottom(src), top(dst)
+            body.append(line(x1, y1, x1, y2, stroke=INK, sw=1.2, marker="a"))
+            if label:
+                body.append(text(x1 + 8, (y1 + y2) / 2 + 3, label, 9, MUTED))
+        elif kind == "elbow":
+            y1, y2 = bottom(src), top(dst)
+            y_mid = y2 - 22
+            body.append(line(x1, y1, x1, y_mid, stroke=INK, sw=1.2))
+            body.append(line(x1, y_mid, x2, y_mid, stroke=INK, sw=1.2))
+            body.append(line(x2, y_mid, x2, y2, stroke=INK, sw=1.2, marker="a"))
+            if label:
+                anchor = "start" if x2 > x1 else "end"
+                body.append(text(x1 + (8 if x2 > x1 else -8), y_mid - 6, label, 9, MUTED,
+                                 anchor=anchor))
+        else:  # side
+            side, slot = param
+            ya = top(src) + FLOW_NODE_H / 2
+            yb = top(dst) + FLOW_NODE_H / 2
+            if side == "left":
+                xa = cx(src) - node_w / 2
+                xb = cx(dst) - node_w / 2
+                chan = FLOW_LEFT - 12 - slot * SIDE_W
+            else:
+                xa = cx(src) + node_w / 2
+                xb = cx(dst) + node_w / 2
+                chan = FLOW_LEFT + LANE_W * len(FLOW_LANES) + 12 + slot * SIDE_W
+            body.append(line(xa, ya, chan, ya, stroke=MUTED, sw=1.2))
+            body.append(line(chan, ya, chan, yb, stroke=MUTED, sw=1.2))
+            body.append(line(chan, yb, xb, yb, stroke=MUTED, sw=1.2, marker="a"))
+            if label:
+                anchor = "end" if side == "left" else "start"
+                off = -8 if side == "left" else 8
+                body.append(text(xa + off, ya - 8, label, 9, MUTED, anchor=anchor))
+
+    # Uzly
+    for nid, lane, row, kind, lines_ in FLOW_NODES:
+        x, y = cx(nid) - node_w / 2, top(nid)
+        cxx, cyy = cx(nid), y + FLOW_NODE_H / 2
+        if kind == "dec":
+            pts = f"{cxx:.1f},{y:.1f} {x + node_w:.1f},{cyy:.1f} {cxx:.1f},{y + FLOW_NODE_H:.1f} {x:.1f},{cyy:.1f}"
+            body.append(f'<polygon points="{pts}" fill="#fdf6e3" stroke="{INK}" stroke-width="1.2"/>')
+        elif kind in ("start", "end-ok", "end-bad"):
+            fill = {"start": PANEL, "end-ok": "#eaf5ec", "end-bad": "#fbecec"}[kind]
+            body.append(rect(x, y, node_w, FLOW_NODE_H, fill=fill, stroke=INK,
+                             rx=FLOW_NODE_H / 2, sw=1.2))
+        else:
+            body.append(rect(x, y, node_w, FLOW_NODE_H, fill="#ffffff", stroke=INK, rx=4, sw=1.2))
+        first = cyy + 4 - (len(lines_) - 1) * 7
+        for i, ln in enumerate(lines_):
+            body.append(text(cxx, first + i * 14, ln, 10, INK, anchor="middle",
+                             weight="bold" if kind in ("start", "end-ok", "end-bad") else "normal"))
+
+    return svg(width, height, body)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Vygeneruje SVG schémata orchestrace")
     ap.add_argument("--check", action="store_true",
@@ -386,6 +562,7 @@ def main() -> int:
 
     WEB.mkdir(exist_ok=True)
     for name, content in (("schema-komponenty.svg", diagram_components()),
+                          ("schema-vyvojovy.svg", diagram_flow()),
                           ("schema-sekvence.svg", diagram_sequence())):
         path = WEB / name
         path.write_text(content, encoding="utf-8")

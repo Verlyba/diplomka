@@ -77,22 +77,42 @@
       <div class="diagram-card narrow">
         <img src="schema-komponenty.svg" alt="Schéma komponent orchestrace a kanálů mezi nimi">
       </div>
-      <div class="note">Obě schémata na téhle stránce jsou vektorová (SVG) a generuje je
+      <div class="note">Všechna tři schémata na téhle stránce jsou vektorová (SVG) a generuje je
         <code class="inline">make_diagrams.py</code> z jednoho seznamu komponent a zpráv — takže
         když se schéma změní, přegeneruje se, místo aby se ručně překreslovalo a zastarávalo.
         Pro diplomku je otevři přímo (<a href="schema-komponenty.svg">komponenty</a>,
+        <a href="schema-vyvojovy.svg">vývojový</a>,
         <a href="schema-sekvence.svg">sekvence</a>) a vlož jako vektor: zvětšení ani tisk je
         nerozostří. Jsou záměrně na bílém pozadí, ne v tmavém vzhledu appky.</div>
     </div>
   </section>
 
   <section class="block">
+    <h2>Vývojový diagram — co se děje kdy</h2>
+    <div class="block-body">
+      <p>Klasický vývojový diagram celého běhu, rozdělený do <b>drah podle vrstev</b>: sloupec
+        říká, <i>kdo</i> tu práci dělá. Obdélník je akce, kosočtverec rozhodnutí, zaoblený tvar
+        začátek nebo konec. Šipky vedené bokem jsou skoky zpátky — do smyčky kroku, na re-plán,
+        nebo rovnou na konec běhu.</p>
+      <div class="diagram-card wide">
+        <img src="schema-vyvojovy.svg" alt="Vývojový diagram běhu orchestrace s drahami podle vrstev">
+      </div>
+      <div class="note">Z diagramu je vidět to podstatné o schématu: <b>pomalá vrstva (CEO) se
+        objevuje jen ve třech místech</b> — úvodní plán, jedna výzva k opravě a re-plán po
+        selhání — zatímco celý zbytek obíhá mezi rychlými vrstvami. A když krok dopadne
+        neprůkazně, zamíří tok <b>zpátky na spuštění kroku</b>, ne na plánovač: nikdo netvrdil,
+        že krok selhal, takže by plánovač neměl z čeho plánovat znovu.</div>
+    </div>
+  </section>
+
+  <section class="block">
     <h2>Sekvence jednoho běhu</h2>
     <div class="block-body">
-      <p>Totéž v čase: kdo komu co posílá a v jakém pořadí, s doslovnými řetězci protokolu. Plná
-        šipka je příkaz nebo volání, čárkovaná odpověď, šedá je větev, která proběhne jen za
-        určité podmínky (rozpor plánu s čidlem, <code class="inline">["DONE"]</code>,
-        <code class="inline">[unclear]</code>).</p>
+      <p>Totéž v čase a přesněji: kdo komu co posílá a v jakém pořadí, s doslovnými řetězci
+        protokolu. Podrobnější než vývojový diagram výš — hodí se tam, kde je potřeba doložit
+        <i>konkrétní</i> rozhraní. Plná šipka je příkaz nebo volání, čárkovaná odpověď, šedá je
+        větev, která proběhne jen za určité podmínky (rozpor plánu s čidlem,
+        <code class="inline">["DONE"]</code>, <code class="inline">[unclear]</code>).</p>
       <div class="diagram-card wide">
         <img src="schema-sekvence.svg" alt="Sekvenční diagram jednoho běhu orchestrace">
       </div>
@@ -551,14 +571,18 @@
   <section class="block">
     <h2>Co se zapisuje do záznamu běhu</h2>
     <div class="block-body">
-      <p>Jeden soubor na běh, <code class="inline">runs/&lt;čas&gt;.json</code>. Formát je
+      <p>Jeden soubor na běh, <code class="inline">runs/&lt;run_id&gt;.json</code>, a vedle něj složka
+        snímků <code class="inline">images/&lt;run_id&gt;/</code> — obojí pod <b>týmž run_id</b>, které
+        vzniká na začátku běhu. Formát je
         <b>aditivní</b> — nová pole přibývají, existující nemění význam, aby starší analýzy nad
         hotovými daty dál platily.</p>
       <table class="plain">
         <tr><th style="width:190px">Pole</th><th>Obsah</th></tr>
+        <tr><td>run_id</td><td>Identifikátor běhu. Stejný nese název záznamu i složka snímků, takže se k sobě nemusí dohledávat podle času.</td></tr>
         <tr><td>success, error, duration_s</td><td>Hlavní měřená veličina, případná chyba a délka běhu.</td></tr>
         <tr><td>goal_early_exit</td><td>Běh skončil proto, že inspektor viděl splněný cíl dřív, než plán došel — tyhle běhy jde při analýze odlišit nebo odfiltrovat.</td></tr>
-        <tr><td>steps[]</td><td>Jeden záznam na <b>pokus</b> (ne na krok plánu): krok, verdikt, značka, důvod ukončení, odůvodnění inspektora, <code class="inline">phys</code> / <code class="inline">vis</code> / <code class="inline">conflict</code> zvlášť, <code class="inline">outcome</code>, <code class="inline">reflex_retry</code> a časové okno <code class="inline">t_start</code> / <code class="inline">t_end</code>.</td></tr>
+        <tr><td>steps[]</td><td>Jeden záznam na <b>pokus</b> (ne na krok plánu): krok, verdikt, značka, důvod ukončení, odůvodnění inspektora, <code class="inline">phys</code> / <code class="inline">vis</code> / <code class="inline">conflict</code> zvlášť, <code class="inline">outcome</code>, <code class="inline">reflex_retry</code> a časové okno <code class="inline">t_start</code> / <code class="inline">t_end</code> a <code class="inline">images</code> — cesty ke snímkům, na kterých verdikt tohoto pokusu doopravdy stojí (po <code class="inline">[unclear]</code> se přesnímkovává, takže to jsou ty novější).</td></tr>
+        <tr><td>initial_images</td><td>Snímky výchozí scény — ty, ze kterých plánoval CEO úvodní plán.</td></tr>
         <tr><td>plan_checks[]</td><td>Jeden záznam na každý plán: co plánovač navrhl, co říkalo čidlo, byl-li rozpor a změnila-li výzva jeho názor.</td></tr>
         <tr><td>done_checks[]</td><td>Jeden záznam na každé tvrzení „cíl je splněný": verdikt inspektora, jeho odůvodnění, trval-li plánovač na svém a co naplánoval potom.</td></tr>
         <tr><td>plan_history[]</td><td>Posloupnost všech plánů běhu i s odůvodněním — tatáž data, která plánovač dostává zpátky jako paměť.</td></tr>

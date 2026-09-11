@@ -14,6 +14,7 @@ condition being measured, not application infrastructure.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -54,6 +55,70 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
         except OSError:
             pass
         raise
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Totéž co atomic_write_text, ale binárně — pro snímky scény.
+
+    Záměrně to NENÍ tak, že by atomic_write_text volal tuhle funkci nad
+    text.encode(): na Windows (kde tenhle projekt běží) překládá textový režim
+    "\\n" na "\\r\\n", takže by se přechodem na binární zápis tiše změnily
+    konce řádků ve všech nových runs/*.json. Data diplomky mají zůstat
+    bajtově stejná, jako byla dosud.
+    """
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        os.chmod(tmp_name, 0o644)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def save_snapshot_files(root: Path, run_id: str, tag: str,
+                        images_b64: list[str] | None) -> list[str]:
+    """Uloží snímky jednoho pozorování do images/<run_id>/ a vrátí jejich cesty.
+
+    Vrácené cesty jsou relativní ke kořeni projektu, aby šel záznam běhu
+    přenést jinam i se složkou snímků.
+
+    **Nikdy nevyhodí výjimku.** Ztráta snímku je nepříjemná, ale shodit kvůli
+    ní běh na reálném robotu by bylo mnohem horší — co se nepodaří zapsat, se
+    v seznamu prostě neobjeví a pozná se to podle toho, že je kratší.
+
+    Snímky se číslují v pořadí, v jakém je vrací daemon (tedy v pořadí kamer).
+    Jména kamer se cestou ztrácejí — Daemon.snapshot() vrací jen hodnoty, ne
+    klíče — ale v rámci jednoho běhu je to pořadí stabilní, takže `_1` je
+    pořád tatáž kamera.
+    """
+    if not images_b64:
+        return []
+    out_dir = Path(root) / "images" / run_id
+    saved: list[str] = []
+    for i, b64 in enumerate(images_b64, 1):
+        if not b64:
+            continue
+        try:
+            data = base64.b64decode(b64)
+        except (ValueError, TypeError):
+            continue
+        if not data:
+            continue
+        name = f"{tag}_{i}.jpg"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_bytes(out_dir / name, data)
+        except OSError:
+            continue
+        saved.append(f"images/{run_id}/{name}")
+    return saved
+
 
 PLANNER_SYSTEM_PROMPT = (
     "You are the planning layer of a three-layer robotic manipulation system.\n\n"
@@ -1177,6 +1242,12 @@ class Orchestrator:
         # been running. See reflex_retry_decision().
         self._uncertain_step = ""
         self._uncertain_repeats = 0
+        # Identifikátor běhu, pod kterým se ukládá runs/<id>.json i
+        # images/<id>/. Vzniká na ZAČÁTKU běhu, ne na konci: snímky se
+        # zapisují průběžně, takže musí vědět, kam patří, dřív než běh skončí.
+        self.run_id = time.strftime("%Y%m%d-%H%M%S")
+        # Cesty ke snímkům výchozí scény — těm, ze kterých plánoval CEO.
+        self.initial_images: list[str] = []
         # One record per plan the CEO produced: what it planned, what the load
         # sensor said at that moment, whether the two contradicted each other,
         # and whether a targeted correction changed the planner's mind. Raw
@@ -1200,6 +1271,23 @@ class Orchestrator:
         self._stop.set()
         if self.daemon:
             self.daemon.stop()
+
+    def _keep_images(self, tag: str, images_b64: list[str] | None) -> list[str]:
+        """Uloží snímky k jednomu pozorování a vrátí cesty do záznamu běhu.
+
+        Snímky dosud existovaly jen jako base64 v SSE proudu do prohlížeče a
+        se zavřením stránky mizely. Přitom je to jediný vizuální důkaz k
+        verdiktu — bez něj se u sporného pokusu nedá zpětně posoudit, jestli
+        se spletl inspektor, nebo čidlo.
+        """
+        if not self.cfg.get("save_images", True):
+            return []
+        paths = save_snapshot_files(HERE, self.run_id, tag, images_b64)
+        if images_b64 and not paths:
+            self.emit("log", level="WARN",
+                      message=f"Snímky k „{tag}\" se nepodařilo uložit do "
+                              f"images/{self.run_id}/ — běh pokračuje bez nich.")
+        return paths
 
     # -- layer 1: the CEO --------------------------------------------------
     def _build_planner_prompt(self) -> str:
@@ -1609,7 +1697,8 @@ class Orchestrator:
         self.emit("log", level="INFO", message=f"Inspektor ke splnění cíle: „{raw}\"")
         return parse_goal_flag(raw), parse_reasoning_sentence(raw)
 
-    def _settle_done(self, context: str, images: list[str] | None) -> tuple[list[str], str]:
+    def _settle_done(self, context: str, images: list[str] | None,
+                     image_paths: list[str] | None = None) -> tuple[list[str], str]:
         """The planner says DONE — ask the layer with eyes before believing it.
 
         This is the one claim in the whole scheme that nothing verified: DONE
@@ -1651,9 +1740,14 @@ class Orchestrator:
             return [PLAN_DONE], ""
 
         frames = list(images or [])
+        # Snímky, které sem přišly od volajícího, jsou už uložené pod svým
+        # pokusem (nebo jako výchozí scéna) — stačí na ně ukázat. Ukládat je
+        # podruhé by jen zdvojilo tytéž soubory na disku.
+        frame_paths = list(image_paths or [])
         if not frames and self.daemon is not None:
             try:
                 frames = self.daemon.snapshot()
+                frame_paths = self._keep_images(f"done{record['replan_index']}", frames)
             except Exception as e:
                 self.emit("log", level="WARN",
                           message=f"Snímek pro kontrolu splnění cíle se nepodařilo pořídit ({e}).")
@@ -1661,6 +1755,7 @@ class Orchestrator:
         if not frames:
             record["verdict"] = "unknown"
             return [PLAN_DONE], ""
+        record["images"] = frame_paths
 
         goal_ok, reason = self._verify_goal(frames)
         record["inspector_reason"] = reason
@@ -1854,6 +1949,8 @@ class Orchestrator:
         self.plan_history = []
         self._uncertain_step = ""
         self._uncertain_repeats = 0
+        self.run_id = time.strftime("%Y%m%d-%H%M%S")
+        self.initial_images = []
 
         try:
             self.emit("state", state="PLANNING")
@@ -1867,6 +1964,7 @@ class Orchestrator:
                     initial_images = self.daemon.snapshot()
                     if initial_images:
                         self.emit("snapshot", images=initial_images, step="(výchozí scéna)")
+                        self.initial_images = self._keep_images("init", initial_images)
                 except Exception as e:
                     self.emit("log", level="WARN",
                               message=f"Výchozí snímek scény se nepodařilo pořídit ({e}) — "
@@ -1882,7 +1980,8 @@ class Orchestrator:
             self.emit("plan", steps=plan, reasoning=ceo_reasoning)
 
             if plan == [PLAN_DONE]:
-                plan, ceo_reasoning = self._settle_done(initial_context, initial_images)
+                plan, ceo_reasoning = self._settle_done(initial_context, initial_images,
+                                                        self.initial_images)
                 if plan == [PLAN_DONE]:
                     self.emit("log", level="INFO",
                               message="Plánovač vyhodnotil, že cíl je už splněný — nic se nespouští.")
@@ -2048,6 +2147,11 @@ class Orchestrator:
                     self.emit("log", level="WARN", message=f"Rozpor důkazů u kroku '{step}': {conflict}")
 
                 att_num = len(self.results) + 1
+                # Snímky se ukládají až tady, protože teprve teď je známé
+                # číslo pokusu — a hlavně: `images` už drží ty snímky, na
+                # kterých verdikt doopravdy stojí (po [unclear] se
+                # přesnímkovává, viz _verify).
+                image_paths = self._keep_images(f"a{att_num:03d}", images)
                 # phys/vis/conflict are recorded per attempt on purpose: the
                 # thesis compares an orchestrated scheme against a monolithic
                 # one, and "how often did the two evidence channels disagree,
@@ -2065,7 +2169,8 @@ class Orchestrator:
                                      "outcome": outcome,
                                      "reflex_retry": action == "retry",
                                      "t_start": round(step_started, 3),
-                                     "t_end": round(step_ended, 3)})
+                                     "t_end": round(step_ended, 3),
+                                     "images": image_paths})
                 self.emit("step", index=index, step=step, phase="verified",
                           success=success, tag=tag, reason=reason, attempt=att_num,
                           insp_reason=insp_reason, conflict=conflict)
@@ -2123,7 +2228,9 @@ class Orchestrator:
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
 
                 if plan == [PLAN_DONE]:
-                    plan, ceo_reasoning = self._settle_done(context, images)
+                    plan, ceo_reasoning = self._settle_done(
+                        context, images,
+                        self.results[-1].get("images") if self.results else None)
                     if plan == [PLAN_DONE]:
                         self.emit("log", level="INFO",
                                   message="Plánovač po selhání vyhodnotil, že cíl je přesto splněný.")
@@ -2199,6 +2306,9 @@ class Orchestrator:
     def _finish(self, success: bool, started: float, error: str = "",
                 goal_early_exit: bool = False) -> dict:
         summary = {
+            # Stejný identifikátor nese runs/<run_id>.json i images/<run_id>/,
+            # takže se k záznamu nemusí dohledávat podle názvu souboru.
+            "run_id": self.run_id,
             "success": success,
             "error": error,
             "duration_s": round(time.time() - started, 1),
@@ -2212,6 +2322,8 @@ class Orchestrator:
             # above and are unaffected. See plan_state_conflict().
             "plan_checks": self.plan_checks,
             "done_checks": self.done_checks,
+            # Snímky výchozí scény — ty, ze kterých plánoval CEO úvodní plán.
+            "initial_images": self.initial_images,
             "plan_history": self.plan_history,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")
@@ -2224,7 +2336,11 @@ class Orchestrator:
         try:
             runs = HERE / "runs"
             runs.mkdir(exist_ok=True)
-            name = time.strftime("%Y%m%d-%H%M%S") + ".json"
+            # Název je run_id z POČÁTKU běhu, ne z konce — aby seděl na
+            # images/<run_id>/, kam se snímky zapisovaly průběžně. Vedle toho
+            # se tím záznam časově srovná s telemetry/<čas>.jsonl, který taky
+            # vzniká na začátku.
+            name = self.run_id + ".json"
             payload = dict(summary)
             payload["config"] = {k: v for k, v in self.cfg.items() if k != "steps"}
             payload["catalog"] = step_catalog(self.cfg)
