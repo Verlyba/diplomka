@@ -222,6 +222,30 @@ GOAL_CHECK_RULES = (
     "GOAL: no"
 )
 
+SCENE_CHANGE_RULES = (
+    "Two photos of the SAME workspace, taken by the SAME camera at two different moments, are "
+    "attached. The FIRST photo was taken BEFORE the robot's last skill ran, the SECOND one AFTER "
+    "it finished. Your only job is to say whether anything in the workspace itself changed "
+    "between them.\n\n"
+    "- IGNORE the robot's own arm and gripper completely — where they point, how far the jaws are "
+    "opened, which part of the frame they cover. The arm is in a different position in almost "
+    "every photo and that is NOT a change in the workspace.\n"
+    "- Judge ONLY the objects and surfaces the robot works on: has anything been moved, lifted, "
+    "put down, tipped over, or taken out of view?\n"
+    "- Answer 'unchanged' only if you are confident both photos show the workspace in the same "
+    "state. If the arm hides the decisive spot in either photo, or you cannot tell for any other "
+    "reason, answer 'unsure'.\n"
+    "- Do NOT reason about whether the robot's task or step succeeded. You are comparing two "
+    "pictures, nothing else.\n\n"
+    "OUTPUT FORMAT — exactly two lines, in this order:\n"
+    "1. ONE line beginning with \"REASONING:\" naming what did or did not move (one sentence).\n"
+    "2. ONE line: \"SCENE: changed\" or \"SCENE: unchanged\" or \"SCENE: unsure\".\n\n"
+    "Example:\n"
+    "REASONING: The object lies in the same spot on the table in both photos and nothing else "
+    "moved.\n"
+    "SCENE: unchanged"
+)
+
 DONE_CORRECTION = (
     "GOAL CHECK — you answered [\"DONE\"], but the visual inspector looked at the workspace photo "
     "and reports that the overall goal is NOT achieved: {reason}\n"
@@ -380,6 +404,63 @@ def parse_goal_flag(text: str) -> bool | None:
         if answer.startswith("NO"):
             return False
     return None
+
+
+# Differential visual channel — see Orchestrator._scene_change_note().
+SCENE_CHANGED, SCENE_UNCHANGED = "changed", "unchanged"
+
+
+def parse_scene_change(text: str) -> str | None:
+    """Read the inspector's 'SCENE: changed|unchanged|unsure' line, or None.
+
+    None deliberately covers BOTH "unsure" and "didn't answer usably": neither
+    is a measurement, and in both cases the caller must add nothing to the
+    planner's context. Same contract as parse_goal_flag() — never raises, never
+    guesses.
+
+    The synonyms are the few phrasings a small VLM reaches for when it ignores
+    the requested wording ("no change", "same"); anything beyond that stays
+    None rather than being talked into one of the two answers.
+    """
+    for line in text.splitlines():
+        stripped = line.strip().strip('*"` ')
+        if not stripped.upper().startswith("SCENE:"):
+            continue
+        answer = stripped[len("SCENE:"):].strip().strip('.*"` ').lower()
+        for prefix in ("unchanged", "no change", "not changed", "same"):
+            if answer.startswith(prefix):
+                return SCENE_UNCHANGED
+        if answer.startswith("chang"):
+            return SCENE_CHANGED
+    return None
+
+
+def format_scene_change(verdict: str | None, reason: str, step: str) -> str:
+    """One block for the re-plan context, or "" when nothing was measured.
+
+    Both directions are reported, on purpose. "Unchanged" is the answer this
+    check exists for, but a check that only ever speaks up against repeating a
+    skill would be a one-sided nudge dressed as a measurement — and the
+    reverted plan_repeat_conflict (2026-09-08) failed exactly because it
+    treated "probably a loop" as established fact. "Changed" is the sentence
+    that DEFENDS a legitimate repeat: the failed attempt itself moved
+    something, so trying the same skill again is a new attempt in a new scene,
+    not a loop.
+    """
+    if verdict not in (SCENE_CHANGED, SCENE_UNCHANGED):
+        return ""
+    why = f" ({reason})" if reason else ""
+    if verdict == SCENE_UNCHANGED:
+        return ("MEASURED SCENE CHANGE: the inspector compared the workspace photo taken before "
+                f"'{step}' ran with the one taken after it and reports the workspace is "
+                f"UNCHANGED — that skill moved nothing the camera can see{why}. This is a "
+                "measurement of the workspace, not a judgement of your plan; note that the arm's "
+                "own position may still have changed. Weigh it when deciding whether running the "
+                "same skill again is worth an attempt.")
+    return ("MEASURED SCENE CHANGE: the inspector compared the workspace photo taken before "
+            f"'{step}' ran with the one taken after it and reports the workspace DID change"
+            f"{why}. Whatever the step's verdict, the scene the next attempt would start from is "
+            "not the scene the failed attempt started from.")
 
 
 # Physical evidence channel (robot's own sensors) — see fuse_evidence().
@@ -1266,6 +1347,16 @@ class Orchestrator:
         # ones it already chose. Also raw thesis data: `first_attempt` joins
         # each plan to steps[].attempt. See format_planner_memory().
         self.plan_history: list[dict] = []
+        # One record per failure that escalated to a re-plan, answering "did
+        # the workspace actually change while that skill ran". See
+        # _scene_change_note() — the planner cannot answer this itself, it only
+        # ever sees one frame at a time.
+        self.scene_checks: list[dict] = []
+        # Frames of the previous observation, kept as base64 because that is
+        # what the inspector takes. Only ever the immediately preceding one:
+        # comparing against an older frame would measure the change across
+        # several steps and silently mislabel which skill caused it.
+        self._prev_frames: list[str] = []
 
     def stop(self) -> None:
         self._stop.set()
@@ -1380,7 +1471,8 @@ class Orchestrator:
     def _build_replan_context(self, instruction: str, step: str, tag: str,
                               reason: str, replans: int, max_replans: int,
                               has_image: bool, insp_reason: str = "",
-                              conflict: str = "", unobserved: bool = False) -> str:
+                              conflict: str = "", unobserved: bool = False,
+                              scene_note: str = "") -> str:
         """Everything the planner needs to decide what to do next.
 
         Deliberately does NOT tell it to "start from the failed step" — that
@@ -1441,6 +1533,11 @@ class Orchestrator:
                         "position — over guessing that the step failed.")
             lines.append("Its outcome is UNKNOWN, not negative — nothing observed says it went "
                          "wrong, and looking again did not help. " + hint)
+        # Right after the step's own verdict, because it is a measurement about
+        # that same step — and deliberately BEFORE the "failed Nx" line, which
+        # is orchestrator bookkeeping rather than an observation.
+        if scene_note:
+            lines.append(scene_note)
         if failures_here > 1:
             lines.append(f"This step has now failed {failures_here}x in this run — "
                          "repeating it unchanged is unlikely to work.")
@@ -1697,6 +1794,107 @@ class Orchestrator:
         self.emit("log", level="INFO", message=f"Inspektor ke splnění cíle: „{raw}\"")
         return parse_goal_flag(raw), parse_reasoning_sentence(raw)
 
+    def _ask_scene_change(self, before: list[str], after: list[str]) -> tuple[str | None, str]:
+        """Ask the inspector whether the workspace differs between two frames.
+
+        Returns (SCENE_CHANGED / SCENE_UNCHANGED / None, one-sentence reason).
+
+        The prompt deliberately withholds the overall goal, the step that ran
+        and its expected outcome — everything the other two inspector prompts
+        lead with. This question has no task semantics in it at all: it asks
+        the model to compare two pictures, which is a strictly easier thing to
+        get right than deciding whether a goal is satisfied, and keeping the
+        goal out is what stops the answer from drifting back into "did the
+        robot succeed". Only the scene description is included, and only so the
+        model knows which part of the frame counts as the workspace.
+
+        Exactly ONE pair of frames is sent, both from camera index 0. Snapshot
+        order is stable within a run (see save_snapshot_files), so the pair is
+        guaranteed to be the same camera at two moments — which is the whole
+        premise of the comparison. Sending every camera would mean handing a
+        small VLM four interleaved images and hoping it pairs them up.
+        """
+        cfg = self.cfg
+        lines = ["You are the visual inspector of a robotic manipulation system.\n"]
+        if cfg.get("scene_description"):
+            lines.append(f"SCENE & ENVIRONMENT:\n{cfg['scene_description']}\n")
+        lines.append(SCENE_CHANGE_RULES)
+
+        model = cfg.get("vlm_model", "local-vlm")
+        try:
+            reply = self.lm.chat_with_images(model=model, user_prompt="\n".join(lines),
+                                             images_b64=[before[0], after[0]], temperature=0.1,
+                                             max_tokens=1024)
+        except Exception as e:
+            # This check only ever adds an opinion to a re-plan that is
+            # happening anyway — it must never be what turns a run into an error.
+            self.emit("log", level="WARN",
+                      message=f"Porovnání scény před/po kroku selhalo ({e}) — re-plán bez něj.")
+            return None, ""
+
+        raw = reply.strip()
+        self.emit("log", level="INFO", message=f"Inspektor k porovnání scény: „{raw}\"")
+        return parse_scene_change(raw), parse_reasoning_sentence(raw)
+
+    def _scene_change_note(self, step: str, attempt: int,
+                           before: list[str], after: list[str]) -> str:
+        """Measure whether the failed skill changed anything, for the re-plan.
+
+        This is the question the reverted plan_repeat_conflict (2026-09-08) got
+        wrong. It tried to answer "has anything changed since the last attempt"
+        from the orchestrator's own bookkeeping — counting successful steps —
+        and the lesson from throwing it away was that the state of the world
+        may only be claimed by a measurement. The question itself was the right
+        one: whether the scene the next attempt starts from is the same scene
+        the last one failed in is the single most decision-relevant fact when a
+        step has just failed. So here it is, measured.
+
+        The planner structurally cannot answer it. It is stateless between
+        calls and it is handed ONE photo — the current one — so "the same as
+        last time" is not a proposition it can evaluate. A monolithic policy
+        gets that temporal continuity for free out of the video stream;
+        orchestration serialised it away, the same way it serialised away the
+        planner's own decisions (see format_planner_memory). This hands the
+        perceptual half back.
+
+        Cost is one call to the FAST layer, and only on a failure that is
+        already escalating to a re-plan — so it is bounded by max_replans and
+        adds exactly zero calls to the slow one. It decides nothing: it neither
+        blocks a repeated plan nor touches any verdict, it adds one measured
+        sentence to a context the planner was going to be sent anyway.
+        """
+        record: dict = {"attempt": attempt, "step": step, "verdict": "",
+                        "inspector_reason": ""}
+        self.scene_checks.append(record)
+
+        if not self.cfg.get("scene_change_check", True):
+            record["verdict"] = "off"
+            return ""
+        if self.cfg.get("skip_inspector"):
+            # The "physical evidence only" ablation switches the inspector off
+            # for the whole run; it must not be called here through a side door.
+            record["verdict"] = "skipped"
+            return ""
+        if not before or not after:
+            # No pair to compare: the first observation of the run when no
+            # initial photo was taken, or a snapshot that came back empty.
+            record["verdict"] = "no_frames"
+            return ""
+
+        verdict, reason = self._ask_scene_change(before, after)
+        record["verdict"] = verdict or "unknown"
+        record["inspector_reason"] = reason
+        if verdict == SCENE_UNCHANGED:
+            self.emit("log", level="WARN",
+                      message=f"Inspektor porovnal snímky před a po kroku '{step}' a hlásí, že se "
+                              f"ve scéně nic nezměnilo ({reason or 'bez odůvodnění'}) — "
+                              "předávám plánovači jako naměřený údaj.")
+        elif verdict == SCENE_CHANGED:
+            self.emit("log", level="INFO",
+                      message=f"Inspektor porovnal snímky před a po kroku '{step}': scéna se "
+                              f"změnila ({reason or 'bez odůvodnění'}).")
+        return format_scene_change(verdict, reason, step)
+
     def _settle_done(self, context: str, images: list[str] | None,
                      image_paths: list[str] | None = None) -> tuple[list[str], str]:
         """The planner says DONE — ask the layer with eyes before believing it.
@@ -1947,6 +2145,8 @@ class Orchestrator:
         self.plan_checks = []
         self.done_checks = []
         self.plan_history = []
+        self.scene_checks = []
+        self._prev_frames = []
         self._uncertain_step = ""
         self._uncertain_repeats = 0
         self.run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -1965,6 +2165,10 @@ class Orchestrator:
                     if initial_images:
                         self.emit("snapshot", images=initial_images, step="(výchozí scéna)")
                         self.initial_images = self._keep_images("init", initial_images)
+                        # The "before" frame of the very first step, so even a
+                        # failure on attempt 1 can be compared against
+                        # something instead of starting the run blind.
+                        self._prev_frames = list(initial_images)
                 except Exception as e:
                     self.emit("log", level="WARN",
                               message=f"Výchozí snímek scény se nepodařilo pořídit ({e}) — "
@@ -2175,6 +2379,12 @@ class Orchestrator:
                           success=success, tag=tag, reason=reason, attempt=att_num,
                           insp_reason=insp_reason, conflict=conflict)
 
+                # Hand this attempt's frames on as the "before" of the next
+                # one. Empty stays empty on purpose: after a failed snapshot
+                # the next comparison must be skipped rather than silently
+                # reach back to a frame two steps old.
+                prev_frames, self._prev_frames = self._prev_frames, list(images or [])
+
                 if success:
                     # The inspector is the layer with eyes, so it is also the
                     # one best placed to notice the overall goal is already
@@ -2220,10 +2430,14 @@ class Orchestrator:
                           message=f"Krok '{step}' selhal ({tag}) — re-plán {replans}/{max_replans}.")
                 self.emit("state", state="PLANNING")
                 previous_remaining = plan[index:]
+                # One fast-layer call, on a failure that is already paying for
+                # a slow-layer one: did that skill move anything at all?
+                scene_note = self._scene_change_note(step, att_num, prev_frames, images)
                 context = self._build_replan_context(
                     instruction, step, tag, reason or "", replans, max_replans,
                     has_image=bool(images), insp_reason=insp_reason or "",
-                    conflict=conflict, unobserved=(outcome == OUTCOME_UNCERTAIN))
+                    conflict=conflict, unobserved=(outcome == OUTCOME_UNCERTAIN),
+                    scene_note=scene_note)
                 plan, ceo_reasoning = self._plan_grounded(context, images or None)
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
 
@@ -2325,6 +2539,7 @@ class Orchestrator:
             # Snímky výchozí scény — ty, ze kterých plánoval CEO úvodní plán.
             "initial_images": self.initial_images,
             "plan_history": self.plan_history,
+            "scene_checks": self.scene_checks,
         }
         self.emit("state", state="COMPLETED" if success else "ERROR")
         self.emit("finished", **summary)
