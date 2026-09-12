@@ -72,6 +72,10 @@ const DEFAULTS = {
   // Při re-plánu dostane plánovač i seznam plánů, které v tomhle běhu sám
   // navrhl, a své vlastní odůvodnění k nim. Nestojí to žádné volání navíc.
   planner_memory: true,
+  // Když krok selže a jde se na re-plán, porovná inspektor snímek scény před
+  // krokem a po něm a řekne, jestli se ve scéně vůbec něco změnilo. Plánovač
+  // to sám zjistit nemůže — vidí vždycky jen jeden aktuální snímek.
+  scene_change_check: true,
   // Snímky, na kterých inspektor rozhodoval, se ukládají do images/<run_id>/
   // a z každého pokusu se na ně odkazuje. Bez toho existují jen v prohlížeči.
   save_images: true,

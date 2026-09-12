@@ -11,6 +11,181 @@ Větev se nikdy nemerguje sama; revizi a merge do `main` dělá uživatel ručn�
 
 ---
 
+## 2026-09-11 — „Změnilo se vůbec něco?" jako **měření**, ne jako úvaha (`scene_change_check`)
+
+### Co jsem zkoumal
+
+Vyšel jsem z jediné otázky, kterou tenhle projekt už jednou položil a špatně
+zodpověděl. 2026-09-08 přibyl `plan_repeat_conflict()`, který se ptal *„změnilo
+se od minulého pokusu něco?"* a odpovídal si na to z **účetnictví
+orchestrátoru** (počtu úspěšných kroků). Uživatel to zamítl a poučení zní:
+**o světě smí mluvit jen měření.**
+
+Zapadlo v tom ale, že ta *otázka* byla dobrá — je to vůbec nejrozhodnější údaj
+v okamžiku, kdy krok selhal. „Zopakuj ten krok" a „zkus něco jiného" se liší
+právě tím, jestli další pokus začíná ze stejné scény, nebo z jiné. Špatně byl
+jen **zdroj odpovědi**.
+
+A zdroj, který na to má, v systému celou dobu je. Inspektor je rychlý, volá se
+po každém kroku, a orchestrátor drží **oba snímky** — z předchozího pozorování
+i z toho současného, ze stejných kamer ve stejném pořadí (`snapshot()` je v
+rámci běhu stabilní, viz `save_snapshot_files`). Nikdo je nikdy neporovnal.
+
+Plánovač tuhle otázku zodpovědět **strukturálně nemůže**: mezi voláními je
+bezstavový a dostává vždycky **jeden** aktuální snímek, takže „je to stejné
+jako posledně" není tvrzení, které by uměl vyhodnotit. Monolitická VLA má
+tuhle časovou spojitost zadarmo z video proudu; orchestrace ji serializovala
+pryč — úplně stejně, jako zahodila plánovačovu vlastní paměť (2026-09-10 (c)).
+Tamto vrátilo **rozhodovací** spojitost, tohle vrací **percepční**.
+
+### Co jsem změnil
+
+Nový **diferenciální vizuální kanál**. Tři čisté funkce + zapojení v
+`orchestrator.py`:
+
+**1. `parse_scene_change(text)`** → `"changed"` / `"unchanged"` / `None`.
+`None` schválně pokrývá **jak `unsure`, tak nepřečtenou odpověď** — ani jedno
+není měření, a v obou případech se do kontextu plánovače nepřidá nic. Stejná
+smlouva jako `parse_goal_flag()`: nikdy nevyhodí výjimku, nikdy nehádá.
+
+**2. `format_scene_change(verdict, reason, step)`** → jedna věta do kontextu
+re-plánu, nebo `""`.
+
+**3. `Orchestrator._ask_scene_change()`** — jedno volání inspektora nad
+**dvojicí snímků téže kamery** (index 0 z obou pozorování; „před" = snímek z
+předchozího pokusu, „po" = ten současný).
+
+**4. `Orchestrator._scene_change_note()`** — brány, zápis, formátování.
+
+Prompt (`SCENE_CHANGE_RULES`) je záměrně **bez cíle úlohy, bez kroku, bez
+očekávaného výsledku** — tedy bez všeho, čím ostatní dva inspekční prompty
+začínají. Tahle otázka nemá **žádnou úlohovou sémantiku**: porovnej dva
+obrázky. Je to výrazně snazší úkon než rozhodnout, jestli je splněný cíl, a
+vynechání cíle je přesně to, co brání odpovědi ujet zpátky k „povedlo se to?".
+Ze zadání se předává jen `scene_description`, aby model věděl, která část
+záběru je pracovní plocha.
+
+Klíčová instrukce v promptu: **rameno a gripper se mají úplně ignorovat.** Bez
+ní je odpověď vždycky „změnilo se" (rameno je po každém kroku jinde) a kontrola
+je k ničemu. Nic z toho není vázané na konkrétní objekty, barvy ani tvary.
+
+**Kde a co to stojí.** Volá se **jen při selhání, které už eskaluje na
+re-plán** — tedy v okamžiku, kdy se stejně platí za volání pomalé vrstvy. Cena
+je tím pádem **jedno volání rychlého modelu, shora omezené `max_replans`**, a
+**nula volání CEO navíc**. Stejná vlastnost jako u `planner_memory`: měřená
+veličina „kolik volání plánovače stojí jeden běh" zůstává srovnatelná s
+předchozími běhy.
+
+**Nic nerozhoduje.** Nepřepisuje verdikt, nemění `success`, neblokuje
+zopakovaný plán, nevyvolává re-dotaz. Přidá jednu naměřenou větu do kontextu,
+který se stejně odesílá, a zapíše se. To je po zkušenosti z 2026-09-08 vědomé.
+
+**Hlásí se obě strany, ne jen ta „užitečná".** `unchanged` je odpověď, kvůli
+které to vzniklo, ale kontrola, která se ozve **jen** proti zopakování kroku,
+je jednostranné postrčení převlečené za měření. `changed` je naopak věta, která
+legitimní zopakování **obhájí**: selhaný pokus sám něco posunul, takže totéž
+znovu je nový pokus v nové scéně, ne smyčka. Testy hlídají, že ani jeden blok
+neobsahuje příkaz.
+
+Věta u `unchanged` výslovně dodává, že **poloha ramene se změnit mohla** — pro
+ACT policy je to jiná počáteční podmínka, takže „scéna je stejná" nesmí být
+přečtené jako „opakování nemá smysl".
+
+Zapojení v `run()`: snímky každého pokusu se předávají dál jako „před" toho
+dalšího (`self._prev_frames`), výchozí snímek scény slouží jako „před" prvního
+kroku. **Prázdné zůstává prázdné** — po nepovedeném snímkování se další
+porovnání přeskočí, místo aby se tiše sáhlo po snímku o dva kroky starším a
+změna se přiřkla špatné dovednosti.
+
+Nové aditivní pole `scene_checks` v `runs/*.json`:
+`{attempt, step, verdict, inspector_reason}`, kde `verdict` je
+`changed` / `unchanged` / `unknown` / `no_frames` / `skipped` / `off`.
+Klíč `attempt` páruje záznam se `steps[].attempt`.
+
+Nový přepínač `scene_change_check` (default `true`) v `server.py`,
+`web/config.js`, checkbox v `web/index.html`; `false` reprodukuje **přesně**
+dosavadní chování (ověřeno testem: kontext re-plánu je pak bajt po bajtu
+totožný). Ablace `skip_inspector` volání nepovolí ani postranními dveřmi.
+Nové testy `tests/test_scene_change.py` (48 kontrol, bez robota, LeRobota i
+LM Studia).
+
+**Fyzické chování robota se nemění vůbec** — mění se jen text jednoho promptu
+a zapisovaná data. Bez hardwaru nemám jak ověřit nic, co by robot udělal jinak.
+
+### Co jsem zvažoval a zavrhl
+
+- **Ptát se po každém kroku, ne jen při selhání.** Byla by to spojitá časová
+  stopa scény přes celý běh (hezká data), ale zdvojnásobilo by to počet volání
+  inspektora **u kroků, kde se nic nerozhoduje** — u úspěšného kroku se plán
+  nemění, ať se scéna změnila jakkoli. Dvourychlostní argument platí i pro
+  rychlou vrstvu: utrácet se má tam, kde je rozhodnutí.
+- **Posílat dvojici snímků rovnou plánovači místo inspektora.** Zdánlivě to
+  ušetří volání. Jenže CEO je ta nejpomalejší, nejmenší a zdokumentovaně
+  nejnespolehlivější vrstva a už teď dostane fotku i paměť plánů; přidat mu
+  druhý obrázek a nechat ho dělat percepční úlohu je přesně to, čemu se
+  orchestrace vyhýbá. Specialista odpoví a předá **jednu větu**.
+- **Nechat `unchanged` tvrdě zablokovat zopakování téhož kroku.** Tohle je ten
+  zavržený `plan_repeat_conflict()` znovu, jen s lepším čidlem. „Scéna je
+  stejná" není „opakovat je marné": ACT policy startuje z jiné polohy ramene a
+  stochasticky, takže druhý pokus je genuinely jiný pokus. Rozhodnutí zůstává
+  plánovači.
+- **Porovnávat všechny kamery.** Malý VLM by dostal čtyři prokládané obrázky a
+  musel si je sám spárovat. Jedna dvojice z jedné kamery je otázka, kterou
+  ještě zvládne.
+- **Počítat rozdíl snímků numericky (bez VLM).** Lákavé — je to zadarmo a
+  deterministické — ale vyžadovalo by práh na „kolik pixelů je změna", který
+  bych si musel vymyslet, a hlavně by ho spolehlivě spouštělo samo rameno a
+  změny osvětlení. „Ignoruj rameno, dívej se na předměty" je sémantická úloha,
+  ne prahová.
+- **Přidat `scene_change` do `fuse_evidence()` jako třetí kanál.** Nepatří
+  tam: fúze rozhoduje o **výsledku kroku**, a „ve scéně se nic nezměnilo"
+  neříká, jestli krok uspěl (korektní nájezd taky nic nepřesune). Je to vstup
+  pro **plánování**, ne pro verdikt.
+
+### Otevřené otázky
+
+- **Jak často je selhaný krok doopravdy no-op?** Teď je to měřitelné
+  (`scene_checks[].verdict`). Kdyby vyšlo, že drtivá většina selhání scénu
+  **nemění**, je to silný argument pro to, že re-plánování řeší špatný problém
+  (dovednost se nespustí správně, místo aby plán byl špatný).
+- **Změní ta věta chování plánovače?** Dá se spočítat: u re-plánů s
+  `unchanged` vs. s `changed` porovnat, jak často plán začíná týmž krokem
+  (`plan_history[].plan[0]` spárované přes `first_attempt`).
+- Umí malý VLM vůbec **ignorovat rameno**? To je celá sázka téhle noci a
+  pozná se hned z odůvodnění v `scene_checks[].inspector_reason`: když se v
+  nich bude mluvit o poloze gripperu, instrukce nezabrala.
+- **Známé omezení:** `Daemon.snapshot()` vrací jen hodnoty, ne jména kamer, a
+  prázdné snímky filtruje. Kdyby kamera 1 v jednom ze dvou pozorování vrátila
+  prázdno, index 0 se posune na kameru 2 a porovnaly by se **dva různé
+  pohledy**. Selhává to na bezpečnou stranu (odpověď „changed", tedy žádné
+  tvrzení o neměnnosti), ale spravit by to šlo jen změnou protokolu daemona —
+  to je zásah do rozhraní, které drží reálný hardware, a na jednu noc to
+  nepatří.
+
+### Co potřebuje ověření na reálném hardwaru (uživatel)
+
+1. **Jestli inspektor umí rameno ignorovat.** Hlavní riziko celé změny.
+   Nejlevnější sanity check: pusť běh, nech krok selhat a podívej se do logu na
+   řádek „Inspektor k porovnání scény" — odůvodnění musí mluvit o předmětech,
+   ne o gripperu. Kdyby to nešlo, `scene_change_check: false` vrací přesně
+   dnešní stav.
+2. **Která kamera je u tebe index 0.** Porovnává se první kamera z
+   `cameras_json` (tedy `camera_*`, ne `camera2_*`). Jestli je to **kamera na
+   zápěstí**, která se hýbe s ramenem, bude odpověď skoro vždycky „changed" a
+   kontrola bude jen neškodně mlčet — v tom případě prohoď kamery v Nastavení,
+   ať je index 0 ta pevná.
+3. **Že plánovači ta věta navíc nerozbije platnost JSON odpovědi.** Blok je
+   jednořádkový, ale kontext malého modelu už nese fotku, paměť plánů i soupis
+   pokusů. Projeví se to v logu jako „CEO nevrátil platné JSON pole" u
+   re-plánů.
+4. **Že nové pole `scene_checks` neshodí tvoje analytické skripty** (je
+   aditivní, ale ověř).
+5. Ablace na jeden večer: tatáž úloha 2× s `scene_change_check: true` a 2× s
+   `false`. Počet volání CEO na běh by se mezi podmínkami měnit **neměl** —
+   pokud se mění, je to samo o sobě zajímavé.
+
+---
+
 ## 2026-09-10 (c) — Plánovač dostane zpátky vlastní paměť (`planner_memory`)
 
 ### Co jsem zkoumal

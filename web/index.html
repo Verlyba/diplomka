@@ -215,6 +215,9 @@
           <label class="checkline" title="Plánovač je mezi voláními bez paměti: při každém re-plánu odvozuje strategii znovu jen z výsledků kroků a neví, co už sám navrhl ani proč. Tahle volba mu do kontextu re-plánu přidá stručný seznam jeho vlastních dosavadních plánů i s jeho odůvodněními, spárovaný přes čísla pokusů se soupisem PROGRESS THIS RUN. Nestojí to žádné volání plánovače navíc — jen víc informací v tom, které se stejně děje. Vypnuto = chování před touhle volbou.">
             <input data-key="planner_memory" type="checkbox"> Připomínat plánovači jeho vlastní dřívější plány
           </label>
+          <label class="checkline" title="Když krok selže a jde se na re-plán, dostane inspektor dva snímky téže kamery — jeden pořízený před tím krokem a jeden po něm — a odpoví jen na jednu otázku: změnilo se ve scéně vůbec něco? (Rameno se přitom má ignorovat, to je v jiné poloze skoro vždycky.) Plánovač tuhle otázku zodpovědět nemůže: mezi voláními nemá paměť a vidí vždy jen jeden aktuální snímek. Odpověď se do kontextu re-plánu přidá jako naměřený údaj, nic neblokuje ani nepřepisuje. Stojí jedno volání rychlého modelu u selhání, které stejně platí za volání pomalého. Vypnuto = chování před touhle volbou.">
+            <input data-key="scene_change_check" type="checkbox"> Měřit, jestli krok scénu vůbec změnil
+          </label>
           <label class="checkline" title="Snímky, ze kterých inspektor rozhodoval, se uloží do images/<run_id>/ a z každého pokusu se na ně odkazuje polem steps[].images. Bez toho existují snímky jen jako base64 v živém přenosu do prohlížeče a se zavřením stránky mizí — u sporného pokusu pak nejde zpětně posoudit, jestli se spletl inspektor, nebo čidlo. Složka má stejný název jako záznam běhu (runs/<run_id>.json).">
             <input data-key="save_images" type="checkbox"> Ukládat snímky k jednotlivým pokusům
           </label>
