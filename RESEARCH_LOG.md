@@ -11,6 +11,161 @@ Větev se nikdy nemerguje sama; revizi a merge do `main` dělá uživatel ručn�
 
 ---
 
+## 2026-09-12 — Co která vrstva doopravdy stojí (`llm_calls`, `policy_swaps`, `cost_summary`)
+
+### Co jsem zkoumal
+
+Přečetl jsem tenhle deník celý a hledal v něm tvrzení, které se opakuje v
+každém záznamu. Našel jsem ho, a je to shodou okolností to úplně nejdůležitější
+tvrzení v celém projektu:
+
+> „Cena je jedno volání **rychlého** modelu a **nula** volání CEO navíc."
+> (2026-09-11)
+> „Počet volání CEO se nemění ani o jedno." (2026-09-10 (c))
+> „Utrácí tu nejdražší věc v systému za nic." (2026-09-10)
+> „Jedno volání planovače navíc je levnější výměna, i když je plánovač pomalá
+> vrstva." (2026-09-07)
+
+Celé tohle schéma stojí na jediné asymetrii — **CEO je pomalý, a proto se volá
+zřídka; inspektor a ACT policy jsou rychlé, a proto se volají často.** Každé
+rozhodnutí na téhle větvi je z ní odvozené. A **nikdo ji nikdy nezměřil.**
+V `runs/*.json` je jediné číslo o ceně: `duration_s`, do kterého je slitý pohyb
+robota, načítání modelů i čekání na LLM.
+
+Má to dva konkrétní důsledky, oba špatné:
+
+1. **Premisa není falzifikovatelná.** Kdyby gemma-4-e4b odpovídala na
+   plánovací prompt za 3 s a VLM inspektor potřeboval na dvojici snímků 8 s,
+   je polovina úvah v tomhle deníku vzhůru nohama — a nikdo by to nepoznal.
+2. **Každý záznam v tomhle deníku končí úkolem, který nejde splnit.** Sekce
+   „Co potřebuje ověření na reálném hardwaru" žádá uživatele přesně pětkrát za
+   sebou, ať porovná **počet volání CEO na běh** mezi ablacemi. To číslo
+   v záznamu běhu není. Dá se pracně poskládat z `plan_checks[].corrected`,
+   `done_checks` a `plan_history`, ale nikde není a chyba v tom skládání se
+   nepozná.
+
+A je to zároveň číslo, které **diplomka potřebuje na nákladové straně
+srovnání**. Monolitická VLA platí jen za vykonání dovednosti. Orchestrace
+k tomu přidává tři položky — volání pomalé vrstvy, volání rychlé vrstvy a
+přehození policy mezi kroky — a jejich součet **je ta cena, za kterou se kupuje
+kontrolovatelnost**. Zatím se v práci dá napsat, co orchestrace přináší, ale ne
+co stojí.
+
+### Co jsem změnil
+
+**1. `Orchestrator._chat()` — jediné dveře k modelům.** Všechna čtyři volání
+(`_create_plan`, `_verify`, `_verify_goal`, `_ask_scene_change`) teď jdou přes
+jednu obalovací metodu, která volání změří a zapíše. Obalení je vědomě lepší
+než počítání na místech volání: **zaznamená se i volání, které spadlo**, i s
+časem, který stihlo spálit. Dvě takové cesty v kódu už dávno jsou a v záznamu
+dosud nebyly vůbec — plánovačovo „zkus to znovu bez snímku" a inspektorovo
+„vyfoť znovu a zeptej se podruhé".
+
+Každý řádek: `{layer, purpose, model, t, s, ok, images}`. `layer` je
+`planner` / `inspector`, `purpose` rozlišuje úvodní plán, re-plán, opravu podle
+čidla, opravu DONE, ověření kroku, přesnímkování, kontrolu cíle a porovnání
+scény. `t` je **absolutní** čas začátku, stejně jako `steps[].t_start` — tím se
+řádky dají srovnat s kroky i s `telemetry/*.jsonl` bez jakékoli konvence o
+číslování pokusů.
+
+**2. `Orchestrator._record_swap()` + `policy_swaps`.** Každé dokončené přehození
+policy, s fází `preload` / `step`. Tohle je jediná ze tří položek, kterou
+monolit **neplatí vůbec** — a zároveň jediná, u které existuje optimalizace
+(`_preload_plan_policies`), jejíž přínos nikdo nezměřil.
+
+**3. Čistá funkce `summarize_costs(llm_calls, policy_swaps, steps, run_s)`.**
+Rozpočítá běh na `planner_s`, `inspector_s`, `policy_swap_s`, `skill_s` (ze
+`steps[].t_start`/`t_end`), `orchestration_s` (součet prvních tří) a
+**`unaccounted_s`** — zbytek. Ten se hlásí schválně: start daemona, snímkování
+a zápisy na disk se do těch tří položek nevejdou a bez zbytku by se daly číst
+jako celý běh.
+
+**4. Tři aditivní pole v `runs/*.json`:** `llm_calls`, `policy_swaps`,
+`cost_summary`. Plus jeden řádek do logu na konci běhu, ať je to vidět i bez
+otevírání souboru.
+
+**Žádný nový přepínač a žádná nová konstanta.** Chování se nemění ani o řádek —
+není co ablatovat. A nový klíč v `config.json` by měl nepříjemný vedlejší
+účinek: `run_consistency.py` hlásí každý klíč, který starší běhy nemají, jako
+rozdíl, takže by ryze měřicí přepínač vypadal jako změna experimentu.
+
+### Proč zrovna tyhle tři položky
+
+Hranice je věcná, ne technická: **co orchestrace platí navíc oproti
+monolitu.** Snímkování kamer a start daemona platí obě schémata stejně, takže
+patří do zbytku, ne do režie orchestrace. Kdyby se do `orchestration_s`
+připočetly, číslo by se nafouklo o náklad, který monolit nese taky, a srovnání
+by přestalo znamenat, co má.
+
+### Co jsem zvažoval a zavrhl
+
+- **Počítat tokeny místo sekund.** Teoreticky lepší metrika (nezávislá na
+  zatížení stroje), ale `LMStudio.chat()` pole `usage` z odpovědi zahazuje a
+  jestli ho lokální server vůbec vrací, bych si musel domyslet — a to je přesně
+  ten druh nezkontrolovatelného předpokladu, kterému se tady vyhýbám. Navíc
+  v robotice je **fyzikálně relevantní veličina latence, ne token**: zatímco se
+  přemýšlí, svět se hýbe (viz rámec z 2026-09-10 (b)). Kandidát na příště, až
+  bude z reálného běhu vidět, co server hlásí.
+- **Zapisovat jen souhrn, ne jednotlivá volání.** Stejná chyba jako kdekoli
+  jinde v tomhle repu: surová data se zpětně nedoberou. Ze souhrnu se nedá
+  zjistit, jestli je pomalý *každý* re-plán, nebo jen ten jeden po přidání
+  paměti plánů.
+- **Rovnou postavit adaptivní rozpočet ověřování (úroveň 3 z 2026-09-10 (b)).**
+  Nejde to: adaptivně utrácet se dá jen to, co je změřené. Tohle je ten měřicí
+  krok, který úroveň 3 teprve umožňuje. A metodické varování z té noci pořád
+  platí — **současné fixní schéma musí zůstat měřeným artefaktem.**
+- **Měřit i dobu snímkování a startu daemona jako režii orchestrace.** Viz
+  výše — platí je i baseline. Jsou ve zbytku.
+- **Zaznamenávat i délku `set_policy`, které vyhodilo výjimku.** Ta výjimka
+  sdílí retry blok s vykonáním kroku, takže by nešlo poznat, co vlastně spadlo,
+  a doba naměřená do neznámého bodu selhání není měření toho, jak dlouho trvá
+  přehození.
+- **Vypsat náklady v `web/`.** Bez nového přepínače není důvod sahat na
+  aplikaci; jeden řádek v logu na konci běhu stačí a data jsou v `runs/*.json`.
+
+### Otevřené otázky
+
+- **Je CEO doopravdy ta drahá vrstva?** Hlavní otázka. Poměr
+  `planner_s / planner_calls` vs. `inspector_s / inspector_calls` na to
+  odpovídá přímo. Kdyby vyšel blízko 1, je návrhová logika několika minulých
+  nocí postavená na neplatném předpokladu a patří přepsat.
+- **Jak velká část běhu je vůbec režie orchestrace?**
+  `orchestration_s / run_s`. To je jedno z čísel, které se dá v diplomce
+  postavit rovnou proti inferenčnímu času monolitu.
+- **Vyplácí se `_preload_plan_policies`?** Jeho docstring tvrdí, že po
+  přednačtení jsou pozdější přehozy jen přepnutí reference. Teď je to vidět:
+  `policy_swaps` s fází `preload` mají být pomalé a ty s fází `step` skoro
+  nulové. Pokud jsou `step` přehozy pořád drahé, cache v daemonu nefunguje tak,
+  jak se předpokládá.
+- **Kolik stojí přesnímkování po `[unclear]`?** Počet volání s
+  `purpose: "verify_step_resnapshot"` dělený počtem `verify_step` je frekvence,
+  se kterou inspektor napoprvé nerozhodne — číslo, o které se opírá celý
+  `OUTCOME_UNCERTAIN` z 2026-09-10.
+- **Nepřehazuje LM Studio modely mezi voláními?** Jestli se na jednom stroji
+  střídá plánovací LLM a VLM a server je kvůli paměti mezi voláními
+  odkládá, projeví se to jako obrovské jednotlivé `s` u volání, která následují
+  po volání té druhé vrstvy. **To by byl skutečný nález** — náklad, který vzniká
+  právě tím, že jde o dva různé modely, a který monolit z principu nemá.
+
+### Co potřebuje ověření na reálném hardwaru (uživatel)
+
+1. **Nejlevnější sanity check vůbec:** pusť jeden běh a podívej se na poslední
+   řádek logu („Náklady vrstev: …"). Součet položek musí dávat smysl proti
+   `duration_s` a `ostatní` nesmí být záporné ani většinové. Kdyby `ostatní`
+   sežralo půlku běhu, měří se špatná hranice a řekni mi to.
+2. **Ověř tu premisu.** Jeden běh stačí na první odhad: kolik sekund stojí
+   jedno volání plánovače a kolik jedno volání inspektora. Je to číslo, na
+   kterém stojí obhajoba celého dvourychlostního schématu v diplomce.
+3. **Že nová pole `llm_calls`, `policy_swaps` a `cost_summary` neshodí tvoje
+   analytické skripty** (jsou aditivní, `run_consistency.py` ani
+   `calibrate_protocols.py` se jich nedotýkají, ale ověř).
+4. Teprve teď jde poctivě splnit to, co po tobě tenhle deník chce už pět
+   záznamů po sobě: **ablace se srovnáním počtu volání CEO na běh**
+   (`cost_summary.planner_calls`). U `planner_memory`, `scene_change_check`
+   i `uncertain_retry` se to číslo měnit **nemá**.
+
+---
+
 ## 2026-09-11 — „Změnilo se vůbec něco?" jako **měření**, ne jako úvaha (`scene_change_check`)
 
 ### Co jsem zkoumal

@@ -747,6 +747,62 @@ def format_planner_memory(history: list[dict], total_attempts: int) -> str:
     return "\n".join(lines)
 
 
+# ── What each layer actually costs ─────────────────────────────────────────
+
+LAYER_PLANNER, LAYER_INSPECTOR = "planner", "inspector"
+
+
+def summarize_costs(llm_calls: list[dict], policy_swaps: list[dict],
+                    steps: list[dict], run_s: float) -> dict:
+    """Split one run's wall clock among the layers that spent it.
+
+    The whole scheme rests on a single asymmetry — the planner is slow and is
+    therefore called rarely, the inspector and the skill policies are fast and
+    are therefore called often — and every design decision on this branch has
+    been argued from it ("this costs one call to the fast layer and zero to the
+    slow one"). None of it was ever measured. This makes the premise
+    falsifiable: if a planner call turns out to be no more expensive than an
+    inspector call, a good half of those arguments are upside down.
+
+    It is also the number the thesis needs on the cost side of its comparison.
+    A monolithic policy pays for skill execution only; the three items counted
+    here — calls to the slow layer, calls to the fast layer, and hot-swapping a
+    policy between steps — are exactly what orchestration adds on top, so their
+    sum is the price of the controllability it buys.
+
+    Failed calls count like any other: a planner call that timed out spent that
+    time whether or not it returned anything usable.
+
+    `unaccounted_s` is the residual — daemon start-up, camera snapshots, disk
+    writes, the gaps between them. It is reported rather than dropped so the
+    three measured items cannot be misread as the whole run.
+    """
+    def spent(rows: list[dict]) -> float:
+        return sum(float(r.get("s") or 0) for r in rows)
+
+    planner = [c for c in llm_calls if c.get("layer") == LAYER_PLANNER]
+    inspector = [c for c in llm_calls if c.get("layer") == LAYER_INSPECTOR]
+    # Only attempts carrying both timestamps: a run recorded before those
+    # fields existed contributes nothing rather than a made-up zero-length step.
+    skill_s = sum(float(s["t_end"]) - float(s["t_start"]) for s in steps
+                  if s.get("t_start") and s.get("t_end"))
+    planner_s, inspector_s = spent(planner), spent(inspector)
+    swap_s = spent(policy_swaps)
+    total = float(run_s or 0)
+    return {
+        "planner_calls": len(planner),
+        "planner_s": round(planner_s, 2),
+        "inspector_calls": len(inspector),
+        "inspector_s": round(inspector_s, 2),
+        "policy_swaps": len(policy_swaps),
+        "policy_swap_s": round(swap_s, 2),
+        "skill_s": round(skill_s, 2),
+        "run_s": round(total, 2),
+        "orchestration_s": round(planner_s + inspector_s + swap_s, 2),
+        "unaccounted_s": round(total - skill_s - planner_s - inspector_s - swap_s, 2),
+    }
+
+
 # ── The inference daemon, seen from the orchestrator side ───────────────────
 
 class Daemon:
@@ -1358,6 +1414,15 @@ class Orchestrator:
         # _scene_change_note() — the planner cannot answer this itself, it only
         # ever sees one frame at a time.
         self.scene_checks: list[dict] = []
+        # One record per call to a model, with what it cost. The split-speed
+        # premise (slow planner called rarely, fast inspector called often) has
+        # driven every design decision in this scheme and has never been
+        # checked against a clock. See summarize_costs().
+        self.llm_calls: list[dict] = []
+        # One record per per-step policy hot-swap. A monolithic policy never
+        # pays this at all, so it belongs on the orchestration side of the
+        # comparison rather than being lost inside duration_s.
+        self.policy_swaps: list[dict] = []
         # Frames of the previous observation, kept as base64 because that is
         # what the inspector takes. Only ever the immediately preceding one:
         # comparing against an older frame would measure the change across
@@ -1385,6 +1450,52 @@ class Orchestrator:
                       message=f"Snímky k „{tag}\" se nepodařilo uložit do "
                               f"images/{self.run_id}/ — běh pokračuje bez nich.")
         return paths
+
+    def _chat(self, layer: str, purpose: str, **kwargs) -> str:
+        """The one door to the models, so that every call is timed and recorded.
+
+        Wrapping instead of counting at the call sites keeps the property that
+        matters for the data: a call that raised is recorded too, with the time
+        it burned before failing. The planner's "retry without the photo" and
+        the inspector's "take a fresh snapshot and ask again" both cost real
+        seconds today and appear nowhere in the run record.
+        """
+        started = time.time()
+        ok = True
+        try:
+            return self.lm.chat_with_images(**kwargs)
+        except Exception:
+            ok = False
+            raise
+        finally:
+            images = kwargs.get("images_b64")
+            if isinstance(images, list):
+                count = len([i for i in images if i])
+            else:
+                count = 1 if images else 0
+            self.llm_calls.append({
+                "layer": layer,
+                "purpose": purpose,
+                "model": kwargs.get("model", ""),
+                # Absolute, like steps[].t_start — that is what lets these rows
+                # be lined up with the steps and with telemetry/*.jsonl.
+                "t": round(started, 3),
+                "s": round(time.time() - started, 3),
+                "ok": ok,
+                "images": count,
+            })
+
+    def _record_swap(self, step: str, phase: str, started: float) -> None:
+        """Record one completed policy hot-swap.
+
+        Only swaps that returned are recorded. A SET_POLICY that raised is
+        indistinguishable here from the step execution that shares its retry
+        block, and a duration measured up to an unknown failure point is not a
+        measurement of how long swapping takes.
+        """
+        self.policy_swaps.append({"step": step, "phase": phase,
+                                  "t": round(started, 3),
+                                  "s": round(time.time() - started, 3)})
 
     # -- layer 1: the CEO --------------------------------------------------
     def _build_planner_prompt(self) -> str:
@@ -1575,7 +1686,8 @@ class Orchestrator:
             lines.append("No photo is available — evaluate ROBOT STATE and PROGRESS THIS RUN to plan the remaining skills to reach the goal.")
         return "\n".join(lines)
 
-    def _create_plan(self, instruction: str, images_b64: list[str] | None = None) -> tuple[list[str], str]:
+    def _create_plan(self, instruction: str, images_b64: list[str] | None = None,
+                     purpose: str = "plan") -> tuple[list[str], str]:
         """Ask the CEO for a plan. On re-plan calls images_b64 are the same
         snapshots the inspector just judged — the CEO reasons from the failure
         *tag* either way, but the tag alone can't describe anything outside
@@ -1599,9 +1711,10 @@ class Orchestrator:
         system = self._build_planner_prompt()
         model = self.cfg.get("llm_model", "local-llm")
 
-        def ask(with_image: bool) -> str:
+        def ask(with_image: bool, tag: str) -> str:
             imgs = images_b64 if with_image else None
-            return self.lm.chat_with_images(
+            return self._chat(
+                LAYER_PLANNER, tag,
                 model=model,
                 user_prompt=instruction,
                 images_b64=imgs,
@@ -1620,15 +1733,20 @@ class Orchestrator:
         original_instruction = instruction
         reply = ""
         for attempt in (1, 2):
+            # The second pass is the reformat retry below, and the no-image
+            # path is the fallback for a planner that cannot take pictures —
+            # both are calls the run pays for, so both are told apart in the
+            # record rather than being merged into one "plan" bucket.
+            tag = purpose if attempt == 1 else f"{purpose}_reformat"
             try:
-                reply = ask(with_image=True)
+                reply = ask(with_image=True, tag=tag)
             except Exception as e:
                 if not images_b64:
                     raise
                 self.emit("log", level="WARN",
                           message=f"Plánovač se snímkem selhal ({e}) — zkouším bez snímku "
                                   "(model plánovače asi neumí obraz).")
-                reply = ask(with_image=False)
+                reply = ask(with_image=False, tag=f"{tag}_no_image")
 
             reasoning = parse_reasoning_sentence(reply)
             plan = parse_json_array(reply)
@@ -1683,7 +1801,8 @@ class Orchestrator:
                           message=f"Neznámé ID kroku '{item}' — zahozeno.")
         return resolved
 
-    def _plan_grounded(self, context: str, images: list[str] | None) -> tuple[list[str], str]:
+    def _plan_grounded(self, context: str, images: list[str] | None,
+                       purpose: str = "plan") -> tuple[list[str], str]:
         """Ask the CEO for a plan, then check it against the load sensor.
 
         The point of the split-speed architecture is that the layers below the
@@ -1701,7 +1820,7 @@ class Orchestrator:
         interesting for — how often the planner contradicts a measurement, and
         whether being told so changes its answer.
         """
-        raw_plan, reasoning = self._create_plan(context, images_b64=images)
+        raw_plan, reasoning = self._create_plan(context, images_b64=images, purpose=purpose)
         plan = self._resolve_plan(raw_plan)
 
         # skip_planner is the fixed-order ablation — there is no planner to
@@ -1722,7 +1841,8 @@ class Orchestrator:
                 context + "\n\n" +
                 PLAN_STATE_CORRECTION.format(plan=json.dumps(plan, ensure_ascii=False),
                                              conflict=conflict))
-            raw_plan, reasoning2 = self._create_plan(corrected_context, images_b64=images)
+            raw_plan, reasoning2 = self._create_plan(corrected_context, images_b64=images,
+                                                     purpose=f"{purpose}_state_correction")
             plan2 = self._resolve_plan(raw_plan)
             conflict2 = plan_state_conflict(plan2, step_catalog(self.cfg), holding)
             record.update({"corrected": True, "plan_after": list(plan2),
@@ -1785,9 +1905,10 @@ class Orchestrator:
 
         model = cfg.get("vlm_model", "local-vlm")
         try:
-            reply = self.lm.chat_with_images(model=model, user_prompt="\n".join(lines),
-                                             images_b64=images_b64, temperature=0.1,
-                                             max_tokens=1024)
+            reply = self._chat(LAYER_INSPECTOR, "goal_check",
+                               model=model, user_prompt="\n".join(lines),
+                               images_b64=images_b64, temperature=0.1,
+                               max_tokens=1024)
         except Exception as e:
             # A failing inspector must never turn a run that would otherwise
             # have finished into an error — it only ever adds an opinion here.
@@ -1828,9 +1949,10 @@ class Orchestrator:
 
         model = cfg.get("vlm_model", "local-vlm")
         try:
-            reply = self.lm.chat_with_images(model=model, user_prompt="\n".join(lines),
-                                             images_b64=[before[0], after[0]], temperature=0.1,
-                                             max_tokens=1024)
+            reply = self._chat(LAYER_INSPECTOR, "scene_change",
+                               model=model, user_prompt="\n".join(lines),
+                               images_b64=[before[0], after[0]], temperature=0.1,
+                               max_tokens=1024)
         except Exception as e:
             # This check only ever adds an opinion to a re-plan that is
             # happening anyway — it must never be what turns a run into an error.
@@ -1980,7 +2102,7 @@ class Orchestrator:
                           "žádám plánovač o přehodnocení.")
         plan, reasoning = self._plan_grounded(
             context + "\n\n" + DONE_CORRECTION.format(reason=reason or "(bez odůvodnění)"),
-            frames or None)
+            frames or None, purpose="done_correction")
         record["insisted"] = (plan == [PLAN_DONE])
         record["plan_after"] = list(plan)
         if record["insisted"]:
@@ -2123,7 +2245,13 @@ class Orchestrator:
 
         model = self.cfg.get("vlm_model", "local-vlm")
         for attempt in (1, 2):
-            reply = self.lm.chat_with_images(model=model, user_prompt=prompt, images_b64=images_b64, temperature=0.1, max_tokens=1024)
+            # The second pass only ever happens after an [unclear] verdict, on
+            # a freshly taken photo — a different question in practice, and one
+            # whose frequency is worth reading straight out of the record.
+            reply = self._chat(LAYER_INSPECTOR,
+                               "verify_step" if attempt == 1 else "verify_step_resnapshot",
+                               model=model, user_prompt=prompt, images_b64=images_b64,
+                               temperature=0.1, max_tokens=1024)
             raw_reply = reply.strip()
             self.emit("log", level="INFO",
                       message=f"VLM inspektor ({model}) odpovídá: „{raw_reply}\"")
@@ -2181,8 +2309,10 @@ class Orchestrator:
             if path in seen:
                 continue
             seen.add(path)
+            swap_started = time.time()
             try:
                 self.daemon.set_policy(path)
+                self._record_swap(slug, "preload", swap_started)
             except Exception as e:
                 self.emit("log", level="WARN",
                           message=f"Přednačtení modelu pro krok '{slug}' selhalo ({e}) — "
@@ -2199,6 +2329,8 @@ class Orchestrator:
         self.done_checks = []
         self.plan_history = []
         self.scene_checks = []
+        self.llm_calls = []
+        self.policy_swaps = []
         self._prev_frames = []
         self._uncertain_step = ""
         self._uncertain_repeats = 0
@@ -2233,7 +2365,8 @@ class Orchestrator:
                     self.daemon = None
 
             initial_context = self._build_initial_context(instruction, bool(initial_images))
-            plan, ceo_reasoning = self._plan_grounded(initial_context, initial_images or None)
+            plan, ceo_reasoning = self._plan_grounded(initial_context, initial_images or None,
+                                                      purpose="initial_plan")
             self.emit("plan", steps=plan, reasoning=ceo_reasoning)
 
             if plan == [PLAN_DONE]:
@@ -2294,7 +2427,9 @@ class Orchestrator:
                         else:
                             self.emit("log", level="INFO",
                                       message=f"Hot-swap modelu na krok '{step}'.")
+                            swap_started = time.time()
                             self.daemon.set_policy(policy_path)
+                            self._record_swap(step, "step", swap_started)
                         reason = self.daemon.run_task(step, step_timeout, is_grasp, is_reset)
                         break
                     except (RuntimeError, OSError) as e:
@@ -2487,7 +2622,8 @@ class Orchestrator:
                     has_image=bool(images), insp_reason=insp_reason or "",
                     conflict=conflict, unobserved=(outcome == OUTCOME_UNCERTAIN),
                     scene_note=scene_note)
-                plan, ceo_reasoning = self._plan_grounded(context, images or None)
+                plan, ceo_reasoning = self._plan_grounded(context, images or None,
+                                                          purpose="replan")
                 self.emit("plan", steps=plan, replan=replans, reasoning=ceo_reasoning)
 
                 if plan == [PLAN_DONE]:
@@ -2568,13 +2704,14 @@ class Orchestrator:
                 self.daemon = None
 
     def _finish(self, success: bool, started: float, error: str = "") -> dict:
+        duration = time.time() - started
         summary = {
             # Stejný identifikátor nese runs/<run_id>.json i images/<run_id>/,
             # takže se k záznamu nemusí dohledávat podle názvu souboru.
             "run_id": self.run_id,
             "success": success,
             "error": error,
-            "duration_s": round(time.time() - started, 1),
+            "duration_s": round(duration, 1),
             "steps": self.results,
             # Additive to the run format: existing analyses key on the fields
             # above and are unaffected. See plan_state_conflict().
@@ -2584,7 +2721,21 @@ class Orchestrator:
             "initial_images": self.initial_images,
             "plan_history": self.plan_history,
             "scene_checks": self.scene_checks,
+            # What the run spent, per layer. Raw rows first (they join to the
+            # steps and to telemetry by absolute `t`), aggregate second.
+            "llm_calls": self.llm_calls,
+            "policy_swaps": self.policy_swaps,
+            "cost_summary": summarize_costs(self.llm_calls, self.policy_swaps,
+                                            self.results, duration),
         }
+        cost = summary["cost_summary"]
+        self.emit("log", level="INFO",
+                  message=(f"Náklady vrstev: plánovač {cost['planner_calls']}× / "
+                           f"{cost['planner_s']} s, inspektor {cost['inspector_calls']}× / "
+                           f"{cost['inspector_s']} s, přepnutí modelu "
+                           f"{cost['policy_swaps']}× / {cost['policy_swap_s']} s, "
+                           f"dovednosti {cost['skill_s']} s, ostatní "
+                           f"{cost['unaccounted_s']} s (celkem {cost['run_s']} s)."))
         self.emit("state", state="COMPLETED" if success else "ERROR")
         self.emit("finished", **summary)
         self._save_run(summary)
