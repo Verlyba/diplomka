@@ -193,7 +193,21 @@ except (ImportError, AttributeError) as e:  # pragma: no cover - env dependent
 # up to ~0.5 at 5x/s telemetry sampling, so native-tick noise is smaller
 # still) and well below actual motion (tens of units) — tune from the
 # `joint_velocity` field now logged in telemetry rather than guessing further.
+# Only used for |grasp/|reset steps (velocity-settle) — see
+# PROTOCOL_A_TARGET_THRESHOLD for ordinary steps, which measure a different
+# quantity under this same telemetry field name.
 PROTOCOL_A_THRESHOLD = 0.5
+# Ordinary (non-grasp, non-reset) steps settle on target-tracking distance —
+# "has the arm reached the policy's own currently-predicted target" — not
+# velocity, even though the tick loop logs both under `joint_velocity` for
+# historical reasons. Confirmed on real telemetry (2026-09-13, calibrate_
+# protocols.py against 19 carry_cube runs): this quantity's measured range
+# (2.57-10.72) sits entirely above PROTOCOL_A_THRESHOLD, so a step using the
+# velocity threshold here never settles and always falls back to the step
+# timeout instead — same shared-threshold problem PROTOCOL_A_GRASP_PATIENCE_
+# EXTRA solved for patience, just never split for the threshold itself until
+# calibrate_protocols.py's per-step report separated the two populations.
+PROTOCOL_A_TARGET_THRESHOLD = 5.0
 PROTOCOL_A_PATIENCE = 5        # consecutive frames, used for |reset steps
 # Grasping can involve a touch more residual jostling right after contact
 # than a clean return-to-home does, so a grasp step waits a bit longer than a
@@ -757,7 +771,7 @@ def stdin_reader(max_seconds: float) -> None:
 def main() -> None:
     global state, active_task, active_is_grasp, active_is_reset, device, simulated, use_triggers
     global use_protocol_a, use_protocol_b
-    global PROTOCOL_A_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_A_GRASP_PATIENCE_EXTRA, PROTOCOL_A_GRACE_S, PROTOCOL_B_LOAD_LIMIT, PROTOCOL_B_PATIENCE, PROTOCOL_B_GRACE_S, PROTOCOL_B_STABILITY_SLOPE
+    global PROTOCOL_A_THRESHOLD, PROTOCOL_A_TARGET_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_A_GRASP_PATIENCE_EXTRA, PROTOCOL_A_GRACE_S, PROTOCOL_B_LOAD_LIMIT, PROTOCOL_B_PATIENCE, PROTOCOL_B_GRACE_S, PROTOCOL_B_STABILITY_SLOPE
     global idle_load_baseline, _baseline_samples, _load_history, _telemetry_log_fh
 
     ap = argparse.ArgumentParser(description="Persistent inference daemon")
@@ -796,8 +810,13 @@ def main() -> None:
                     help="Disable protocol B (gripper servo current threshold).")
     ap.add_argument("--protocol-a.threshold", dest="protocol_a_threshold", type=float,
                     default=PROTOCOL_A_THRESHOLD,
-                    help=f"Protocol A: max joint movement between ticks, native robot position unit "
-                         f"(default {PROTOCOL_A_THRESHOLD}).")
+                    help=f"Protocol A: max joint movement between ticks for |grasp/|reset steps, "
+                         f"native robot position unit (default {PROTOCOL_A_THRESHOLD}).")
+    ap.add_argument("--protocol-a.target-threshold", dest="protocol_a_target_threshold", type=float,
+                    default=PROTOCOL_A_TARGET_THRESHOLD,
+                    help="Protocol A: max distance to the policy's own predicted target for "
+                         "ordinary steps (not |grasp/|reset) — a different quantity from "
+                         f"--protocol-a.threshold, needs its own scale (default {PROTOCOL_A_TARGET_THRESHOLD}).")
     ap.add_argument("--protocol-a.patience", dest="protocol_a_patience", type=int,
                     default=PROTOCOL_A_PATIENCE,
                     help=f"Protocol A: consecutive settled frames for |reset steps (default {PROTOCOL_A_PATIENCE}).")
@@ -835,6 +854,7 @@ def main() -> None:
     use_protocol_a = not args.no_protocol_a
     use_protocol_b = not args.no_protocol_b
     PROTOCOL_A_THRESHOLD = args.protocol_a_threshold
+    PROTOCOL_A_TARGET_THRESHOLD = args.protocol_a_target_threshold
     PROTOCOL_A_PATIENCE = args.protocol_a_patience
     PROTOCOL_A_GRASP_PATIENCE_EXTRA = args.protocol_a_grasp_patience_extra
     PROTOCOL_A_GRACE_S = args.protocol_a_grace
@@ -904,7 +924,9 @@ def main() -> None:
             _telemetry_log_fh = open(log_path, "a", encoding="utf-8")
             log.info("Telemetrie se loguje do %s", log_path)
             _log_telemetry(event="daemon_start", policy_path=args.policy_path,
-                           protocol_a_threshold=PROTOCOL_A_THRESHOLD, protocol_a_patience=PROTOCOL_A_PATIENCE,
+                           protocol_a_threshold=PROTOCOL_A_THRESHOLD,
+                           protocol_a_target_threshold=PROTOCOL_A_TARGET_THRESHOLD,
+                           protocol_a_patience=PROTOCOL_A_PATIENCE,
                            protocol_a_grace_s=PROTOCOL_A_GRACE_S,
                            protocol_b_limit=PROTOCOL_B_LOAD_LIMIT, protocol_b_patience=PROTOCOL_B_PATIENCE,
                            protocol_b_grace_s=PROTOCOL_B_GRACE_S)
@@ -1015,7 +1037,11 @@ def main() -> None:
                     deltas = np.full(n_pos, np.inf, dtype=np.float32)  # first tick: can't measure velocity yet
             else:
                 deltas = np.abs(target[:n_pos] - joints[:n_pos])
-            settled = settled + 1 if bool(np.all(deltas < PROTOCOL_A_THRESHOLD)) else 0
+            # See PROTOCOL_A_TARGET_THRESHOLD above: velocity and
+            # target-tracking distance are different quantities and do not
+            # share a scale, so they cannot share a threshold either.
+            settle_threshold = PROTOCOL_A_THRESHOLD if use_velocity_settle else PROTOCOL_A_TARGET_THRESHOLD
+            settled = settled + 1 if bool(np.all(deltas < settle_threshold)) else 0
             # See PROTOCOL_A_GRACE_S above: only |reset can end on this signal,
             # and only a velocity-settle step (both |reset and |grasp measure
             # velocity, for the telemetry value even though |grasp can no

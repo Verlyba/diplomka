@@ -440,7 +440,11 @@ function render() {
     // tak ať jde zkopírovat stejně snadno jako příkaz nad ní, s doslovným
     // popisem úlohy místo placeholderu.
     ['Po „DAEMON_READY": nastav úlohu', 'napiš do TÉHOŽ terminálu a potvrď Enterem — bez tohohle daemon jen čeká ve WAITING a robotem vůbec nehne',
-      `SET_TASK:${c.task_description}`],
+      // Krátký stabilní task_slug, ne volný task_description text — ten se
+      // v configu může přeformulovat (a i mírná změna znění vytvoří v
+      // telemetry/*.jsonl nový, nekompatibilní "krok", protože tam obojí
+      // končí jako doslovný `task` řetězec — viz calibrate_protocols.py).
+      `SET_TASK:${c.task_slug || 'baseline'}`],
   ]);
 
   // 8) serve

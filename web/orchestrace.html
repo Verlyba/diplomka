@@ -448,15 +448,24 @@
             se odstup od predikce neustálil, ani když rameno stálo bit po bitu 10+ sekund — byl to
             šum predikce kolem držené pozice, ne pohyb. Gripper se do „klidu" nepočítá, <b>kromě</b>
             úchopových kroků, kde je to naopak podstatné: rameno se zastaví dřív, než čelisti
-            dozavírají.</td>
+            dozavírají. <b>U kroku <code class="inline">grasp</code> ale samotné „klid" krok
+            neukončí</b> — „klid" tu rozliší dokončené sevření od zastavení s prázdným gripperem
+            stejně málo jako druhé; slouží jen jako doplňková informace v telemetrii. O konci
+            úchopového kroku rozhoduje výhradně Protokol B nebo časový limit.</td>
         </tr>
         <tr>
-          <td>… jednotka prahu</td>
+          <td>… jednotka a dva prahy</td>
           <td>Klíč se jmenuje <code class="inline">protocol_a_threshold_rad</code>, ale
             <b>radiány to nejsou</b> — je to nativní jednotka polohy robota, u téhle sestavy SO-101
             stupně (<code class="inline">use_degrees=true</code>). Název je historický a je
-            zachovaný kvůli zpětné kompatibilitě konfigurací. Výchozí 0,5 má rezervu nad šumem
-            enkodéru a je hluboko pod skutečným pohybem (desítky jednotek).</td>
+            zachovaný kvůli zpětné kompatibilitě konfigurací. Rychlost (<code class="inline">reset</code>/
+            <code class="inline">grasp</code>) a odstup od predikce (ostatní kroky) jsou dvě různé
+            fyzikální veličiny s jiným měřítkem, proto mají <b>oddělené prahy</b>:
+            <code class="inline">protocol_a_threshold_rad</code> pro rychlost (výchozí 0,5, rezerva
+            nad šumem enkodéru, hluboko pod skutečným pohybem) a
+            <code class="inline">protocol_a_target_threshold_rad</code> pro odstup od predikce
+            (výchozí 5,0 — odvozeno z reálné telemetrie, sdílený práh se sem nikdy netrefil a krok
+            vždy skončil až časovým limitem).</td>
         </tr>
         <tr>
           <td>Protokol B</td>

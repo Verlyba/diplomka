@@ -144,8 +144,10 @@ DEFAULT_CONFIG: dict = {
     # step termination protocols — task- and hardware-specific, hence togglable
     "protocol_a_enabled": True,
     "protocol_a_threshold_rad": 0.5,
+    "protocol_a_target_threshold_rad": 5.0,
     "protocol_a_patience": 5,
     "protocol_a_grasp_patience_extra": 5,
+    "protocol_a_grace_s": 1.0,
     "protocol_b_enabled": True,
     "protocol_b_limit_ma": 250,
     "protocol_b_patience": 3,
@@ -311,8 +313,9 @@ def create_project(slug: str, description: str) -> dict:
                        "camera_name", "camera_index", "camera_width", "camera_height", "camera_fps",
                        "camera2_name", "camera2_index", "camera2_width", "camera2_height", "camera2_fps",
                        "fps", "lm_url", "llm_model", "vlm_model",
-                       "protocol_a_enabled", "protocol_a_threshold_rad", "protocol_a_patience",
-                       "protocol_a_grasp_patience_extra",
+                       "protocol_a_enabled", "protocol_a_threshold_rad",
+                       "protocol_a_target_threshold_rad", "protocol_a_patience",
+                       "protocol_a_grasp_patience_extra", "protocol_a_grace_s",
                        "protocol_b_enabled", "protocol_b_limit_ma", "protocol_b_patience",
                        "protocol_b_grace_s", "protocol_b_deadband_frac", "protocol_b_stability_slope",
                        "holding_limit_ma"):

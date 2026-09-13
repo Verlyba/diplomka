@@ -317,13 +317,28 @@ def analyze(files: list[list[dict]], cfg: dict | None = None,
         }
         per_step.append(entry)
 
-        # Protokol A: práh musí ležet nad klidovým šumem a pod skutečným pohybem.
-        checks.append(_check(
-            "protocol_a_threshold_rad", "Práh pohybu mezi snímky", slug,
-            cfg.get("protocol_a_threshold_rad"),
-            percentile(jv, 0.05), percentile(acc["joint_velocity"], 0.95),
-            jv_stats, acc["runs"], min_runs,
-            note="Dolní okraj je klidový šum čidla, horní skutečný pohyb ramene."))
+        # Protokol A měří dvě různé veličiny pod jedním telemetrickým polem
+        # (joint_velocity) podle typu kroku — viz PROTOCOL_A_TARGET_THRESHOLD
+        # v inference_daemon.py. |grasp/|reset: skutečná rychlost mezi tiky,
+        # práh musí ležet nad klidovým šumem a pod skutečným pohybem. Obyčejné
+        # kroky: vzdálenost od aktuálně predikovaného cíle, jiné měřítko —
+        # srovnávat proti sdílenému prahu by dávalo nesmyslný verdikt.
+        if acc["is_grasp"] or acc["is_reset"]:
+            checks.append(_check(
+                "protocol_a_threshold_rad", "Práh pohybu mezi snímky (rychlost)", slug,
+                cfg.get("protocol_a_threshold_rad"),
+                percentile(jv, 0.05), percentile(acc["joint_velocity"], 0.95),
+                jv_stats, acc["runs"], min_runs,
+                note="Dolní okraj je klidový šum čidla, horní skutečný pohyb ramene."))
+        else:
+            checks.append(_check(
+                "protocol_a_target_threshold_rad", "Práh vzdálenosti od cíle", slug,
+                cfg.get("protocol_a_target_threshold_rad"),
+                percentile(jv, 0.05), percentile(acc["joint_velocity"], 0.95),
+                jv_stats, acc["runs"], min_runs,
+                note="Dolní okraj je klidový šum, horní vzdálenost od cíle během pohybu — "
+                     "jiná veličina než rychlost u |grasp/|reset kroků, viz "
+                     "PROTOCOL_A_TARGET_THRESHOLD v inference_daemon.py."))
 
         if acc["is_grasp"]:
             # Protokol B, mez ustálení: plató po sevření vs. stoupající proud.

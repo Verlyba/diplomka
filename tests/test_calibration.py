@@ -114,7 +114,11 @@ check("ochranna doba zahodila rozjezdove tiky",
       len(steps_grace["grab"]["rise"]) < len(steps["grab"]["rise"]), True)
 
 # ── Cely report ─────────────────────────────────────────────────────────────
-cfg = {"protocol_a_threshold_rad": 0.5, "protocol_b_stability_slope": 30.0,
+# "approach" (bez |grasp/|reset) je kontrolovan proti target_threshold, ne
+# proti threshold — viz PROTOCOL_A_TARGET_THRESHOLD v inference_daemon.py:
+# jina fyzikalni velicina (vzdalenost od cile) nez rychlost u |grasp/|reset.
+cfg = {"protocol_a_threshold_rad": 0.5, "protocol_a_target_threshold_rad": 0.5,
+       "protocol_b_stability_slope": 30.0,
        "protocol_b_limit_ma": 250.0, "holding_limit_ma": 20.0,
        "protocol_b_grace_s": 0.0}
 report = analyze(FILES, cfg, min_runs=3)
@@ -125,7 +129,7 @@ for c in report["checks"]:
     by_key.setdefault(c["key"], []).append(c)
 
 # Prah pohybu 0.5 lezi mezi klidem (0.1-0.2) a pohybem (desitky) -> OK.
-approach_a = next(c for c in by_key["protocol_a_threshold_rad"] if c["scope"] == "approach")
+approach_a = next(c for c in by_key["protocol_a_target_threshold_rad"] if c["scope"] == "approach")
 check("prah protokolu A je v mezere", approach_a["verdict"], "ok")
 check("prah protokolu A ma navrh", approach_a["suggested"] is not None, True)
 
@@ -138,14 +142,14 @@ limit_b = next(c for c in by_key["protocol_b_limit_ma"] if c["scope"] == "grab")
 check("limit protokolu B se nenavrhuje", limit_b["suggested"], None)
 
 # Spatne nastavene hodnoty se musi poznat.
-bad_low = analyze(FILES, {**cfg, "protocol_a_threshold_rad": 0.01}, min_runs=3)
+bad_low = analyze(FILES, {**cfg, "protocol_a_target_threshold_rad": 0.01}, min_runs=3)
 bad_low_check = next(c for c in bad_low["checks"]
-                     if c["key"] == "protocol_a_threshold_rad" and c["scope"] == "approach")
+                     if c["key"] == "protocol_a_target_threshold_rad" and c["scope"] == "approach")
 check("prilis nizky prah se pozna", bad_low_check["verdict"], "too_low")
 
-bad_high = analyze(FILES, {**cfg, "protocol_a_threshold_rad": 999.0}, min_runs=3)
+bad_high = analyze(FILES, {**cfg, "protocol_a_target_threshold_rad": 999.0}, min_runs=3)
 bad_high_check = next(c for c in bad_high["checks"]
-                      if c["key"] == "protocol_a_threshold_rad" and c["scope"] == "approach")
+                      if c["key"] == "protocol_a_target_threshold_rad" and c["scope"] == "approach")
 check("prilis vysoky prah se pozna", bad_high_check["verdict"], "too_high")
 
 # ── Prah na pocet behu ──────────────────────────────────────────────────────
@@ -161,7 +165,7 @@ print(f"ok   pri min_runs=10 je vsech {len(strict['checks'])} kontrol zablokovan
 
 single = analyze([run_rows(1000.0)], cfg, min_runs=DEFAULT_MIN_RUNS)
 single_a = next(c for c in single["checks"]
-                if c["key"] == "protocol_a_threshold_rad" and c["scope"] == "approach")
+                if c["key"] == "protocol_a_target_threshold_rad" and c["scope"] == "approach")
 check("jeden beh nestaci na verdikt", single_a["verdict"], "insufficient_data")
 
 # ── Degenerovane vstupy ─────────────────────────────────────────────────────

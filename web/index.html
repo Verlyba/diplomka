@@ -243,8 +243,11 @@
           <label class="checkline" title="Krok skončí, když se klouby přestanou hýbat">
             <input data-key="protocol_a_enabled" type="checkbox"> Protokol A — dosednutí kloubů
           </label>
-          <label class="field" title="Jednotka je nativní jednotka polohy robota (u tohoto projektu stupně, ne radiány — název pole je jen historický)">Práh pohybu mezi snímky
+          <label class="field" title="Jednotka je nativní jednotka polohy robota (u tohoto projektu stupně, ne radiány — název pole je jen historický). Platí jen pro |grasp a |reset kroky (rychlost mezi tiky) — pro obyčejné kroky viz práh cílení níž.">Práh pohybu mezi snímky (|grasp, |reset)
             <input data-key="protocol_a_threshold_rad" type="number" step="0.05" min="0">
+          </label>
+          <label class="field" title="Platí pro obyčejné kroky (ne |grasp, ne |reset) — vzdálenost od aktuálně predikovaného cíle modelu, jiná fyzikální veličina než rychlost mezi tiky výše, proto vlastní práh a jiné měřítko (ověřeno na reálné telemetrii — dřívější sdílený práh se sem nikdy netrefil, krok vždy skončil až časovým limitem)">Práh vzdálenosti od cíle (obyčejné kroky)
+            <input data-key="protocol_a_target_threshold_rad" type="number" step="0.25" min="0">
           </label>
           <label class="field">Počet snímků v klidu
             <input data-key="protocol_a_patience" type="number" step="1" min="1">
@@ -252,13 +255,23 @@
           <label class="field" title="Přidá se k počtu snímků v klidu jen u kroků označených jako úchop — sevření obvykle ještě chvíli drncá i po dosednutí ramene">Úchop: navíc snímků v klidu
             <input data-key="protocol_a_grasp_patience_extra" type="number" step="1" min="0">
           </label>
+          <label class="field" title="Prvních N sekund po startu kroku se Protokol A nevyhodnocuje u |reset kroků — brání tomu, aby se pomalý/hladký rozjezd pohybu přečetl jako 'už stojí', dřív než pohyb doopravdy začal">Ochranná doba po startu kroku (s)
+            <input data-key="protocol_a_grace_s" type="number" step="0.1" min="0">
+          </label>
         </div>
-        <div class="note"><b>Protokol A</b> ukončí krok, když se všechny klouby (kromě gripperu)
-          mezi dvěma po sobě jdoucími snímky pohnou o míň než uvedený práh, a vydrží tak zadaný
-          počet snímků po sobě. Znamená to, že se rameno fyzicky přestalo hýbat — schválně NE
-          "je blízko toho, co teď predikuje model": ta predikce může mít trvalý odstup i několik
-          stupňů od skutečné pozice, i když je rameno už dávno v klidu (ověřeno na reálné
-          telemetrii). Funguje pro libovolný krok bez ohledu na to, jestli se něco uchopuje.</div>
+        <div class="note"><b>Protokol A</b> ukončí krok, když se všechny klouby (kromě gripperu, s
+          výjimkou popsanou níž) mezi dvěma po sobě jdoucími snímky pohnou o míň než uvedený práh,
+          a vydrží tak zadaný počet snímků po sobě. U kroků označených <code>|grasp</code> nebo
+          <code>|reset</code> se měří skutečná rychlost (jak moc se kloub posunul od minulého
+          snímku) — znamená to, že se rameno fyzicky přestalo hýbat. U obyčejných kroků se místo
+          toho měří vzdálenost od cíle, který model právě predikuje — "je blízko toho, co teď
+          predikuje model" (ta predikce může mít trvalý odstup i několik stupňů od skutečné
+          pozice, i když je rameno už dávno v klidu, proto vlastní, vyšší práh). Grafický profil
+          každé z těchto dvou veličin je jiný, proto mají oddělené prahy výše. U kroku <code>|grasp</code>
+          navíc platí, že Protokol A sám o sobě krok nikdy neukončí (ověřeno na reálné telemetrii:
+          "klouby přestaly hýbat" nerozliší dokončené sevření od zastavení s prázdným gripperem) —
+          slouží tam jen jako doplňková informace v telemetrii; o konci úchopového kroku rozhoduje
+          Protokol B nebo časový limit.</div>
         <div class="grid" style="margin-top:12px">
           <label class="checkline" title="Krok skončí, když zátěž gripperu (Present_Load 0-1000) vzroste nad klidovou hodnotu o víc než tento limit">
             <input data-key="protocol_b_enabled" type="checkbox"> Protokol B — zátěž gripperu (Present_Load)

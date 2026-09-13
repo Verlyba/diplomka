@@ -85,8 +85,10 @@ const DEFAULTS = {
   // vypínatelné a jejich prahy konfigurovatelné.
   protocol_a_enabled: true,
   protocol_a_threshold_rad: 0.5,
+  protocol_a_target_threshold_rad: 5.0,
   protocol_a_patience: 5,
   protocol_a_grasp_patience_extra: 5,
+  protocol_a_grace_s: 1.0,
   protocol_b_enabled: true,
   protocol_b_limit_ma: 250,
   protocol_b_patience: 3,

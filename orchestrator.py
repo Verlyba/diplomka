@@ -864,6 +864,7 @@ class Daemon:
         if not cfg.get("protocol_b_enabled", True):
             cmd.append("--no-protocol-b")
         cmd.append(f"--protocol-a.threshold={float(cfg.get('protocol_a_threshold_rad', 0.5))}")
+        cmd.append(f"--protocol-a.target-threshold={float(cfg.get('protocol_a_target_threshold_rad', 5.0))}")
         cmd.append(f"--protocol-a.patience={int(cfg.get('protocol_a_patience', 5))}")
         cmd.append(f"--protocol-a.grasp-patience-extra={int(cfg.get('protocol_a_grasp_patience_extra', 5))}")
         cmd.append(f"--protocol-a.grace={float(cfg.get('protocol_a_grace_s', 1.0))}")
