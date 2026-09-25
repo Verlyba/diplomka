@@ -13,6 +13,7 @@
   <nav>
     <a href="index.html" class="active">Setup</a>
     <a href="orchestrace.html">Orchestrační schéma</a>
+    <a href="retrain.html">Retrénink (chunk_size)</a>
   </nav>
 </header>
 
@@ -190,6 +191,26 @@
       </fieldset>
 
       <fieldset>
+        <legend>Inference politiky (experimentální)</legend>
+        <div class="grid">
+          <label class="checkline" title="ACT normálně předpoví celý blok akcí a odjede ho naslepo. S ensemblingem se model pouští v každém ticku a do robota jde vážený průměr všech předpovědí pro daný okamžik. Jen inference, váhy se nemění.">
+            <input data-key="temporal_ensemble" type="checkbox"> Temporal ensembling (jen ACT)
+          </label>
+          <label class="field" title="Váha předpovědi je exp(−koeficient · i), i = 0 je nejstarší. Původní ACT: 0,01 (skoro rovnoměrně). 0 = všechny stejně, záporné = víc nových.">Koeficient ensemblingu
+            <input data-key="temporal_ensemble_coeff" type="number" step="0.005">
+          </label>
+        </div>
+        <div class="note warn"><b>Zapnutí mění chování robota</b> — patří mezi podmínky měření (uloží se do
+          záznamu běhu). Model se pak pouští v <b>každém</b> ticku, ne jednou za
+          <code class="inline">n_action_steps</code>: kontroluj v telemetrii u
+          <code class="inline">task_done</code> pole <code class="inline">loop_ms_median</code> /
+          <code class="inline">loop_overruns</code>, jestli smyčka pořád stíhá řídicí FPS. Ukončovací
+          Protokol A je u běžných kroků kalibrovaný na jiné „cílové“ hodnoty (průměr je hladší a za
+          pohybem zaostává), takže se s ním může chovat jinak. Vypnuto = politika se načítá a jede
+          přesně jako dřív.</div>
+      </fieldset>
+
+      <fieldset>
         <legend>AI modely v LM Studiu (jen pro orchestraci)</legend>
         <div class="grid">
           <label class="field">URL LM Studia <input data-key="lm_url" type="text"></label>
@@ -255,7 +276,7 @@
           <label class="field" title="Přidá se k počtu snímků v klidu jen u kroků označených jako úchop — sevření obvykle ještě chvíli drncá i po dosednutí ramene">Úchop: navíc snímků v klidu
             <input data-key="protocol_a_grasp_patience_extra" type="number" step="1" min="0">
           </label>
-          <label class="field" title="Prvních N sekund po startu kroku se Protokol A nevyhodnocuje u |reset kroků — brání tomu, aby se pomalý/hladký rozjezd pohybu přečetl jako 'už stojí', dřív než pohyb doopravdy začal">Ochranná doba po startu kroku (s)
+          <label class="field" title="Prvních N sekund po startu kroku nesmí Protokol A ukončit žádný krok (|reset ani běžný) — brání tomu, aby se rozjezd pohybu přečetl jako 'už stojí', resp. u běžných kroků 'už je u predikce' (první predikovaná akce leží těsně u aktuální pozice), dřív než se rameno doopravdy pohnulo. Naměřeno: 9 z 11 ukončení carry_cube přišlo za 0,22–0,25 s bez pohybu, skutečná dosednutí za 2,3–2,9 s">Ochranná doba po startu kroku (s)
             <input data-key="protocol_a_grace_s" type="number" step="0.1" min="0">
           </label>
         </div>

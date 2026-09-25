@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retrénink — chunk_size</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <h1><span>◆</span> Diplomka — LeRobot: baseline vs. orchestrace</h1>
+  <nav>
+    <a href="index.html">Setup</a>
+    <a href="orchestrace.html">Orchestrační schéma</a>
+    <a href="retrain.html" class="active">Retrénink (chunk_size)</a>
+  </nav>
+</header>
+
+<main>
+
+  <section class="block">
+    <h2><b>i</b> Proč tahle stránka existuje</h2>
+    <div class="block-body">
+      <p>
+        Audit z 2026-09-19 (viz <code class="inline">poznamky/DENIK.md</code>) ukázal, že
+        rozdělením nahrávky na <code class="inline">catch_cube</code> / <code class="inline">carry_cube</code> /
+        <code class="inline">homing</code> vznikly krátké epizody, u kterých ACT výchozí
+        <code class="inline">chunk_size = 100</code> zasahuje paddingem hluboko do finálního
+        přiblížení a úchopu — u <code class="inline">catch_cube</code> v průměru přes polovinu
+        epizody, u <code class="inline">carry_cube</code> prakticky celou. Baseline (`diplomka_1`,
+        epizody ~600 snímků) tenhle problém nemá.
+      </p>
+      <p>
+        <code class="inline">local/&lt;dataset&gt;</code> je na disku <b>jeden živý adresář</b>, který
+        postupně rostl nahráváním (<code class="inline">--resume</code>) — <code class="inline">_20ep</code>,
+        <code class="inline">_60ep</code> a <code class="inline">_120ep</code> checkpointy nejsou
+        natrénované na třech kopiích, ale na třech velikostech téhož adresáře v době, kdy měl zrovna
+        tolik epizod. Ty dřívější velikosti jako samostatná data už neexistují — je tam jen dnešní
+        stav. <b>Nic se proto nekopíruje ani neuseká do jiné složky</b> — LeRobot umí omezit trénink
+        na prvních N epizod téhož datasetu přímo přes <code class="inline">--dataset.episodes</code>,
+        takže se pro každou dřívější velikost (zjištěnou z názvů existujících checkpointů) i pro
+        aktuální plný počet vygeneruje vlastní příkaz nad stejnými, nijak neměněnými zdrojovými daty.
+      </p>
+      <p>
+        Skutečnou délku epizod stránka počítá <b>přímo z datasetu na disku</b>, ne z
+        <code class="inline">meta/info.json</code> (to už jednou neseděl — dataset skutečně měl
+        60 epizod, ale pojmenoval se <code class="inline">_61ep_</code>). Stejná chyba se dřív
+        objevovala i v seznamu velikostí k retréninku — 20/60/120 u tří kroků, ale u baseline
+        osamocených 20/<b>61</b>/120, protože se velikost braním z názvu starého checkpointu. Teď se
+        čísla ze všech 4 modelů porovnají mezi sebou a blízká čísla (do rozdílu 3) se sjednotí na to
+        kulatější/častější — baseline dostane 60 jako všichni ostatní, u dané velikosti je pak vidět
+        poznámka „opraveno z chybného 61".
+        <b>Staré checkpointy se nemažou ani nepřepisují</b> — nový model jede do vlastního adresáře
+        se sufixem <code class="inline">_cs&lt;N&gt;</code>, takže nemůže kolidovat se stávajícím.
+        Archivace starých až budou hotové všechny nové — ručně, appka do toho nesahá.
+      </p>
+      <div class="note">
+        <b><code class="inline">chunk_size</code> je stejný pro úplně všechny modely a velikosti</b> —
+        spočtený z nejkratšího ze 4 celých datasetů (dnes <code class="inline">carry_cube</code>,
+        79 snímků), tak aby ani jeho nejkratší epizoda neměla v paddingu víc než ~20 %. Kus datasetu
+        (prvních N epizod) může mít jen vyšší minimum než celek, takže tohle číslo bezpečně sedí i na
+        každou menší velikost. Pole zůstává editovatelné, kdyby bylo potřeba ho pro konkrétní model
+        ručně snížit ještě víc.
+      </div>
+      <div class="note">
+        <b>Počet trénovacích kroků</b> se dopočítává z historických checkpointů — napříč všemi
+        4 modely a jejich velikostmi drželo 11 z 12 dosavadních checkpointů ~32,8–34,6 "epoch"
+        (steps×batch_size/frames), medián bez jasně odlehlého bodu
+        (<code class="inline">diplomka_1_carry_cube_120ep_act</code>, 31,3 — ten checkpoint měl na
+        svou velikost podtrénováno) je 33,4. Nový výchozí počet kroků = 33,4 × snímků úseku /
+        batch_size, zaokrouhleno na stovky — taky editovatelné.
+      </div>
+      <div class="note">
+        <b>"Hotovo" appka pozná sama</b> z toho, jestli na disku už existuje checkpoint se stejným
+        názvem, jaký by daný příkaz vytvořil (<code class="inline">/api/models</code>) — žádné ruční
+        odškrtávání, které by se mohlo rozejít se skutečností. Po doběhnutí tréninku obnov stránku
+        tlačítkem níže.
+      </div>
+      <div class="note">
+        <b>Odhad doby učení</b> se počítá ze skutečné rychlosti (kroky/s), naměřené z časových razítek
+        nejdéle trénovaného starého checkpointu daného modelu — ne z odhadu od oka. Konkrétně z rozdílu
+        mezi časem uložení prvního a posledního checkpointu (<code class="inline">save_freq=5000</code>)
+        vydělenym počtem kroků mezi nimi. Chybí-li pro model aspoň dva uložené checkpointy k měření,
+        stránka to řekne rovnou místo aby něco vymýšlela.
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>1</b> Modely k retréninku</h2>
+    <div class="block-body">
+      <div class="row" style="margin-bottom:14px;">
+        <button type="button" id="reload-btn">🔄 Obnovit stav z disku</button>
+      </div>
+      <div id="models"></div>
+    </div>
+  </section>
+
+</main>
+
+<script src="retrain.js"></script>
+</body>
+</html>

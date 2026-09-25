@@ -377,3 +377,233 @@ jednou a pak se používá; když neprojde žádný, zkoušení se vypne.
   Daemon snímky cachuje, takže je to levné.
 - `release_act` mezitím dotrénován (`outputs/training/pick_and_place_release_act`
   existuje) — všechny 4 krokové modely jsou teď kompletní.
+
+## 2026-09-19 — první živý test na aktuálním kódu: tři nálezy k `catch_cube`
+
+První skutečný test po sloučení fúze důkazů a rozdělení protokolu A na
+grasp/reset threshold (viz commit `61812aa` a okolí). Dva běhy
+(`runs/20260919-204911.json`, `runs/20260919-212218.json`) + navazující
+`210802`. Tři samostatné věci, každá potvrzená z telemetrie/fotek, ne odhad.
+
+**1. Oprava (kód): inspektor si u RESET kroku pletl vlastní nálepku se
+skutečným cílem.** `homing` fyzicky sedlo správně (protokol A, `drženo 7/7`,
+top kamera potvrzuje domovskou pozici — `images/20260919-204911/a002_1.jpg`),
+ale fúze důkazů to i tak shodila jako `[unknown_failure]`, protože VLM
+inspektor u zápěstní kamery ([a002_2.jpg](../images/20260919-204911/a002_2.jpg),
+náhodou zabírá misku i z domovské pozice) vygeneroval odůvodnění mluvící o
+„positioned for approach" — frázi, kterou nemá odkud znát kromě nálepky
+`[positioning/approach, no grasp]`, co `_verify()` lepí ke KAŽDÉMU
+negraspovému kroku včetně resetu. Opraveno v `orchestrator.py` `_verify()`:
+RESET kroky mají teď vlastní nálepku bez slova „approach" a explicitní větu,
+že okolní předměty v záběru nejsou pro reset relevantní.
+
+**2. Oprava (kód): `catch_cube` startoval z pozice, kterou nikdy neviděl v
+tréninku.** Audit `diplomka_1_catch_cube` (120 epizod) ukázal, že hlavní
+klouby ramene mají při startu epizody směrodatnou odchylku jen 1,6–4° — každá
+tréninková epizoda fakticky začíná z domovské pozice, přestože popis
+dovednosti tvrdí „z libovolné pozice". V živém běhu ale orchestrátor občas
+pustí `catch_cube` znovu bez mezikroku `homing` — rameno pak startuje tam, kde
+skončil předchozí neúspěšný krok, naměřeno až 150–220° od tréninkové pozice na
+rameni/lokti (`runs/20260919-212218.json`, pokusy 7 a 8 — identické selhání
+dvakrát po sobě, gripper míří k misce místo ke kostce). Přidána
+`plan_pose_conflict()` (stejný princip jako existující `plan_state_conflict()`
+— nikdy tichý přepis plánu, jen upozornění a re-ask CEO), testy v
+`tests/test_plan_check.py`.
+
+**3. Nález pro diplomku (NEOPRAVENO, netýká se kódu appky): rozdělení
+nahrávky na dovednosti systematicky poškozuje přesnost úchopu přes ACT
+`chunk_size`.**
+
+I po opravě bodu 2 (start ze správné pozice) `catch_cube` míjí jinak, než
+baseline — kostka skončí před nebo za čelistmi, ne uprostřed
+(`images/20260919-210802/a004_1.jpg` + `a004_2.jpg`, start ~5° od tréninkové
+pozice, přesto minutí). Baseline (`diplomka_1_120ep_act`) naproti tomu najíždí
+přesně nad kostku a v úrovni s ní — když selže, je to spíš špatné načasování
+sevření gripperu, ne špatná pozice.
+
+Mechanismus (ověřeno přímo ve zdrojáku LeRobotu, ne odhad):
+`lerobot/datasets/dataset_reader.py:215-232`, `_get_query_indices()` — cílová
+budoucí akce se u KAŽDÉHO snímku ořízne na `min(ep_end - 1, idx + delta)` a
+zbytek označí jako `is_pad`. ACT má `chunk_size = 100` výchozí
+(`lerobot/policies/act/configuration_act.py:85`) — posledních 100 snímků
+KAŽDÉ epizody tedy dostává čím dál víc ořezaný/opakovaný cíl místo
+skutečného pokračování pohybu.
+
+Změřené délky epizod (`meta/episodes/*.parquet`, `length`):
+
+| dataset | průměr snímků/epizoda | % epizod < 200 snímků |
+| --- | --- | --- |
+| `diplomka_1` (baseline, celá úloha) | 598 | 0 % |
+| `diplomka_1_catch_cube` | 180 | 81 % |
+| `diplomka_1_carry_cube` | 117 | 100 % (12 % celých epizod < 100) |
+| `diplomka_1_homing` | 302 | 1 % |
+
+U `catch_cube` leží finální přiblížení a úchop (druhá půlka epizody) přesně v
+tom 100-snímkovém poškozeném okně. U baseline sedí ten samý moment úchopu
+(kolem snímku 180 z 598) skoro 400 snímků od konce epizody — mimo okno,
+čistý signál. `carry_cube` je na tom nejhůř (celé epizody kratší než okno).
+
+**Proč se to nemění teď:** rozdělení nahrávky na `catch_cube`/`carry_cube`/
+`homing` existuje výhradně proto, aby orchestrace i baseline trénovaly ze
+stejných dat stejné kvality — jinak by šlo o srovnání architektury
+zamotané se srovnáním datasetů, což by znehodnotilo celé měření. Kdyby tahle
+podmínka neplatila, řešením by bylo buď nahrávat samostatné epizody na
+každou dovednost s vlastním „doběhem" po cíli (padding by pak padl na
+nezajímavé snímky, ne na přiblížení), nebo nastavit `chunk_size` zvlášť podle
+délky epizody místo univerzálního defaultu 100 — což `web/setup.js`
+`trainFlags()` nikdy nedělal (`--policy.chunk_size` se nikdy explicitně
+neposílá, jede se na defaultu ACT configu stejně pro baseline i pro všechny
+tři krokové modely, bez ohledu na to, že mají řádově kratší epizody). Obojí
+je ale retrénink, ne oprava kódu appky — sem patří jen jako doložený nález
+pro diskuzi v diplomce (proč orchestrovaný úchop typicky míří hůř než
+monolitický baseline i po opravě startovní pozice), ne jako TODO na dnešek.
+
+## 2026-09-25 — první živý běh s `diplomka_2` (retrénované modely, `chunk_size=15`): dvě chyby
+
+Nahrání retrénovaných modelů do projektu `diplomka_2` (12 checkpointů pod
+standardními názvy bez `_cs15`, ověřené sha256 vah, všech 12 mělo poslední krok
+= cílový a váhy bez NaN/inf) a první orchestrovaný běh na nich
+(`runs/20260925-202316.json`, telemetrie `20260925-202327.jsonl`). Běh selhal a
+oba důvody dohledány z reálné telemetrie, ne odhadem.
+
+**1. Zaseknutá sběrnice servo motorů — oprava (`bus_guard.py`).** V 20:24:27 přestal
+daemon dostávat polohy kloubů a od té chvíle hlásil jen
+`Failed to sync read 'Present_Position' … [TxRxResult] Port is in use!`.
+V telemetrii jsou od 20:24:27.208 klouby zmrzlé bit po bitu (232 tiků po sobě
+identické, `load` 0) — tik jen opakoval poslední úspěšné čtení, krok doběhl do
+timeoutu a LLM/VLM pak usuzovaly nad během, který už nic neměřil (`unclear`,
+`no_image`, re-plán).
+
+Mechanismus (ověřen ve zdrojáku `scservo_sdk/protocol_packet_handler.py`):
+`txPacket()` nastaví `port.is_using = True` (řádek 75) a smaže ho až na konci
+`rxPacket()` (řádek 171). Výjimka mezi tím — typicky `SerialException` z USB
+adaptéru na Windows — nechá příznak viset do konce procesu a každé další volání
+okamžitě vrátí `COMM_PORT_BUSY`. Původní (první) výjimka se z logu dohledat
+nedala: orchestrátor propouští každý řádek stderr daemona jako událost a
+záplava (383× stejná hláška) vytlačila z 500místné historie serveru všechno
+starší. Příčina samotného prvního výpadku (pravděpodobně USB/napájení při rychlém
+švihu ramene se zátěží gripperu ~480) tak zůstává neprokázaná.
+
+Řešení: `BusGuard` (samostatný modul bez závislostí, ať jde testovat bez robota)
+— (a) uvolní `is_using` a vyprázdní port, ale až od druhé chyby v řadě, protože
+jediné „Port is in use“ bývá běžný souběh dvou vláken, do jehož rozběhnuté
+transakce se zasahovat nemá; (b) po pěti marných uvolněních port zavře a znovu
+otevře; (c) trvá-li porucha 8 s, daemon skončí a orchestrátor ho spustí znovu
+(stávající větev „Daemon selhal — restartuji“, čerstvý proces = nový
+PortHandler); (d) opakující se hlášky omezí, aby první výjimka zůstala vidět;
+(e) do telemetrie zapíše `bus_fault`, `bus_recovered` (s dobou výpadku) a
+`bus_lost`, aby bylo u každého běhu poznat, že proběhl s výpadkem. Zamítnuté
+alternativy: záplata přímo v balíčku SDK (zásah do cizího kódu, zmizí při
+přeinstalaci) a zámek kolem všech volání sběrnice (řeší souběh vláken, ale ne
+příznak zanechaný výjimkou). Souvisí s tím druhá oprava: tik, jehož čtení
+selhalo, se už nezapočítává do „klid drženo 7×“ Protokolu A (zmrzlé klouby
+dřív mohly krok „dosednutím“ ukončit i na mrtvé sběrnici). Testy:
+`tests/test_bus_guard.py` (33 případů).
+
+Dodatečně zjištěno, že to není ojedinělé a není to způsobené novými modely:
+stejný podpis (klouby v `RUNNING` identické bit po bitu, `load` konstantní,
+rameno fyzicky nehybné na fotkách ze všech kroků) je už v posledním běhu z
+2026-09-19 (`runs/20260919-214945.json`, telemetrie `20260919-214956.jsonl`,
+stará data a projekt `diplomka_1`): od 21:51:47, necelou sekundu po startu
+`catch_cube`, zůstaly klouby zmrzlé 135 s přes tři kroky a `homing` skončil za
+1,02 s s „pohyb 0,00000/tik“. Tehdy si toho nikdo nevšiml. V telemetriích
+z hardwaru (celkem jen ~1,6 h běhu daemona od 2026-08-27) není podpis nikde
+jinde než 19. a 25. 9., tj. v obou posledních sezeních a v žádném dřívějším.
+Kód daemona se mezi nimi neměnil (poslední commit 2026-09-13), rychlost kloubů
+(61–107 °/s) ani proud gripperu v `carry_cube` se u nových modelů nijak
+neliší od starých. Vysvětlení tedy leží pravděpodobně mimo software (USB
+adaptér, kabel, port, napájení, stav ovladače po restartu PC) — v deníku z
+2026-08-05 je navíc zaznamenaný zamčený COM3 kvůli zombie procesu v FTDI
+ovladači, takže tenhle adaptér s ovladačem už jednou nestabilní byl. Kroky
+běhů měřené po výpadku (od 21:51:47 19. 9. a od 20:24:27 25. 9.) jsou neplatná
+měření, ne selhání policy.
+
+**2. `carry_cube` končil Protokolem A za 0,22 s, aniž se rameno pohnulo — oprava
+(ochranná doba pro všechny kroky).** Uživatel si všiml, že se `carry_cube` vůbec
+nepohnul a už ho to zastavilo a zavolalo re-plán. Ze všech `telemetry/*.jsonl`
+(každý běžný krok ukončený Protokolem A v režimu „dosedly na predikci“, což je
+jen `carry_cube`, 11 případů): 9 skončilo za 0,22–0,25 s s pohybem ramene
+0,8–3,2°, 2 skončily po 2,28 s a 2,89 s s pohybem 58° a 88° (skutečná
+dosednutí). Mezi 0,25 s a 2,28 s nic neleží, takže jediná už existující hodnota
+`protocol_a_grace_s = 1,0` obě skupiny čistě rozdělí (ochranná doba kdekoliv
+mezi 0,5 a 2,0 s zablokuje právě těch 9 a žádné z 2 dobrých).
+
+Příčina: první predikovaná akce nového bloku leží těsně u aktuální pozice, takže
+vzdálenost od predikce je pod `protocol_a_target_threshold_rad` (5,25) po celých
+7 tiků dřív, než se cokoliv pohne. Ochranná doba přitom platila jen pro kroky
+s měřením rychlosti (`|reset`, `|grasp`) a komentář v kódu výslovně tvrdil, že
+běžné kroky tímto selháním „nejsou dotčené“ — data říkají opak. Chyba nesouvisí
+s novými modely: vznikla rozdělením prahu (commit `61812aa`, 2026-09-13), před
+kterým `carry_cube` Protokolem A nikdy neskončil (kalibrace z 2026-09-13:
+19 historických běhů, vždy timeout 20 s, protože práh 0,5 ležel pod naměřeným
+rozsahem 2,57–10,72) a po kterém se začal ukončovat hned na startu. Kalibrace prahu z 2026-09-13 tak správně opravila, že Protokol A vůbec
+funguje, ale přehlédla, že „vzdálenost od predikce“ je malá i tehdy, když se
+rameno ještě nerozjelo.
+
+Oprava: `grace_elapsed_a` teď platí pro každý krok, který smí Protokol A ukončit.
+Ověřeno na skutečném procesu daemona v simulovaném režimu (start je tam stejný —
+predikce hned u aktuální pozice): s ochrannou dobou 0 skončí běžný krok za
+0,17 s, s 1,0 s za 1,01 s. Řádky v `runs/` z běhů před touto opravou, u kterých
+`carry_cube` skončil za ~0,2 s, jsou tedy neplatná měření kroku, ne selhání
+policy.
+
+## 2026-09-25 (večer) — pokusný přepínač temporal ensemblingu
+
+**Proč.** Při ručních zkouškách s `diplomka_2` (`chunk_size=15`) rameno u `catch_cube`
+dojede ke kostce a po minutém úchopu pak pokračuje dál místo aby zůstalo stát. Z telemetrie
+(minutý úchop = krok doběhl do timeoutu, chování od 5. s do konce): nové modely se hýbou
+v mediánu 2,95 °/s (n = 6), staré (`chunk_size=100`) 1,70 °/s (n = 26, bez simulovaných
+běhů); permutační test p = 0,046 pro rychlost, p = 0,20 pro vzdálenost posunu. Staré modely
+bloudily taky (6 z 26 případů nad 3 °/s), rozdíl je tedy jen v míře a vzorek nových je malý.
+Hypotéza: nový model přeplánovává z obrazu každých 0,5 s, starý přehrával jeden plán 3,3 s
+naslepo a po jeho dohrání stál. Hypotéza je konzistentní s daty, ne prokázaná. Zároveň je
+poctivé přiznat, že `chunk_size=15` byl zvolen jen podle podílu paddingu v konci epizody
+a druhá strana kompromisu (kratší horizont = menší časový „závazek“ k rozhodnutí, např.
+zavřít gripper) při volbě zvažována nebyla.
+
+**Co bylo přidáno.** Přepínač `temporal_ensemble` (+ `temporal_ensemble_coeff`, výchozí 0,01
+jako v původní práci o ACT) v konfiguraci projektu, v Setupu v sekci „Inference politiky“.
+Jen inference, váhy se nemění. Při načtení politiky se nastaví `temporal_ensemble_coeff` a
+`n_action_steps = 1` (LeRobot vyžaduje obojí spolu; kontrola v `ACTConfig.__post_init__` se
+při změně po načtení z checkpointu neprovede, proto ji dělá `temporal_ensemble.py` sám). Model
+se pak pouští v každém ticku a do robota jde vážený průměr všech dosavadních předpovědí pro
+daný okamžik s váhou `exp(-coeff * i)`, `i = 0` nejstarší (`ACTTemporalEnsembler`,
+Algorithm 2 v arXiv 2304.13705). Vypnuto (výchozí) = politika se načítá bit po bitu jako
+dřív a orchestrátor nepředá daemonovi ani jeden argument navíc.
+
+**Ověření.** Na skutečném checkpointu (`diplomka_2_catch_cube_120ep_act`): bez přepínače
+ensembler neexistuje a `n_action_steps = 15`; s přepínačem existuje, `n_action_steps = 1`,
+a výstup v každém z prvních šesti ticků odpovídá váženému průměru podle dokumentace
+s odchylkou do 1,2·10⁻⁷. Jeden průchod modelu na RTX 4070 trvá 10,5 ms (p95 11,1 ms), tik
+s ensemblingem 10,8 ms z rozpočtu 33,3 ms při 30 FPS — zbytek smyčky (čtení kamer, sběrnice,
+předzpracování) tím nezměřen, proto daemon nově zapisuje do `task_done` telemetrie
+`loop_period_ms`, `loop_ms_median`, `loop_ms_p95` a `loop_overruns` (kolik tiků přesáhlo
+periodu o víc než 5 %). Přepínač i koeficient jsou v záznamu běhu, `run_consistency.py` je
+bere jako rozhodné (neznámý klíč je rozhodný z definice).
+
+**Rizika, na která se dívat.** (1) Smyčka nemusí stíhat 30 Hz — pak se rameno hýbe pomaleji,
+než jak bylo trénováno (viz `loop_overruns`). (2) Průměr je hladší a za pohybem zaostává,
+takže cílová hodnota, se kterou Protokol A u běžných kroků porovnává klouby, se chová jinak
+než ta, na které se kalibroval práh; totéž platí o načasování zavření gripperu — náhlé
+„zavři“ se zprůměruje se staršími „ještě ne“. (3) Zapnuto je pro všechny kroky v daemonu
+(catch_cube, carry_cube i homing).
+
+**Dodatek 2026-09-25 (večer) k nálezu č. 3 z 2026-09-19 (padding a `chunk_size`): mechanismus
+ověřen, účinek na výkon robota NEprokázán.** Že se posledních `chunk_size` snímků každé epizody
+učí s ořezaným cílem (`dataset_reader.py`, `_get_query_indices`) a že to u krátkých
+rozdělených epizod zasahuje velkou část trajektorie, je ověřené v kódu i na délkách epizod.
+Tvrzení, že to „systematicky poškozuje přesnost úchopu“ a že `chunk_size=15` to opraví, ale
+první porovnání na robotu nepodporují: `catch_cube` s `chunk_size=15` bez ensemblingu chytil 6
+z 12 pokusů, se zapnutým ensemblingem 1 z 8, staré modely (`chunk_size=100`, `diplomka_1`)
+zatím 2 ze 3 (chycení = Protokol B). Na skoro stejném místě desky (střed kostky ~(285, 99) px)
+starý model kostku chytl, nový s ensemblingem ji minul 6× po sobě v okolí (266–283, 101–116);
+model je deterministický (4 pokusy z domova skončily do 7° stejně), takže jeden pokus na
+kombinaci model × místo je reprezentativní. Nový model dojíždí za okraj desky, zápěstní kamera
+pak vidí jen koberec (fotky `runs/20260925-212658`), což je vstup mimo trénovací data.
+Vzorky jsou malé a podmínky nebyly řízené (poloha kostky se mezi běhy měnila), takže z toho
+plyne jen: účinek přeškolení na `chunk_size=15` je nejasný, možná záporný. Do práce patří jako
+hypotéza a otevřená otázka, ne jako prokázaná příčina. Možné vysvětlení, které se nabízí a
+není ověřené: starý model naplánuje celý dojezd naráz z prvního čistého snímku z domovské pozice
+a odjede ho naslepo, kdežto s krátkým chunkem se přeplánovává z mezisnímků za rychlého pohybu
+(zakrytí kostky ramenem, neobvyklé úhly zápěstní kamery), a chyba se tak kumuluje. `chunk_size=15`
+byl navíc zvolen jen podle podílu paddingu, druhá strana kompromisu se nezvažovala.

@@ -685,6 +685,56 @@ PLAN_STATE_CORRECTION = (
 )
 
 
+def plan_pose_conflict(plan: list[str], catalog: list[dict], last_step: str | None) -> str:
+    """Does the plan open with a grasp skill right after a non-RESET step?
+
+    Grasp skills in this project are trained from one tightly clustered
+    starting pose — an audit of the recorded training episodes (2026-09-19)
+    found under 5 degrees of spread on the arm's main joints across all of
+    them. They were never trained to recover from an arbitrary pose, only to
+    reach for the target from that one starting configuration. Every skill,
+    including grasp ones, simply stops wherever its own policy happens to end
+    up — so a grasp skill scheduled right after anything other than a RESET
+    skill starts from a pose the policy has essentially never seen.
+
+    Observed live: catch_cube reaching for the wrong location entirely, twice
+    in a row, immediately after a carry_cube attempt — the arm was over 150
+    degrees off (shoulder/elbow) from anything in its training data
+    (runs/20260919-212218.json, attempts 7-8).
+
+    Uses only catalog metadata (`grasp`, `reset`) and this run's own step
+    history — nothing here knows the task, the objects, or the skill names.
+
+    Returns "" when there is nothing to flag: the plan doesn't open with a
+    grasp skill, this is the run's very first step (the arm boots at home),
+    or the last executed step was itself a RESET.
+    """
+    if not plan or last_step is None:
+        return ""
+    order = {s["slug"]: i for i, s in enumerate(catalog)}
+    first = plan[0].strip()
+    idx = order.get(first)
+    if idx is None or not catalog[idx].get("grasp"):
+        return ""
+    last_idx = order.get(last_step)
+    if last_idx is not None and catalog[last_idx].get("reset"):
+        return ""
+    return (f"the last step actually executed was '{last_step}', not a RESET skill — the arm is "
+            f"very likely nowhere near the pose '{first}' was trained to start from")
+
+
+PLAN_POSE_CORRECTION = (
+    "STATE CHECK — your previous answer {plan} may start from a pose the skill was never trained "
+    "for: {conflict}.\n"
+    "Grasp skills in this project only ever saw one narrow starting pose during training (the arm "
+    "at rest, essentially at its RESET/home configuration) — they were not trained to recover from "
+    "wherever the previous skill happened to stop. Consider scheduling 'homing' immediately before "
+    "the grasp skill to bring the arm back to that trained starting pose first. If you are "
+    "convinced skipping it is right anyway, repeat your plan unchanged and say in your REASONING "
+    "line why."
+)
+
+
 # ── Planner memory (the slow layer's own decision trace) ───────────────────
 
 def plan_repeat_index(plan: list[str], history: list[dict]) -> int | None:
@@ -872,6 +922,11 @@ class Daemon:
         cmd.append(f"--protocol-b.patience={int(cfg.get('protocol_b_patience', 3))}")
         cmd.append(f"--protocol-b.grace={float(cfg.get('protocol_b_grace_s', 0.75))}")
         cmd.append(f"--protocol-b.stability={float(cfg.get('protocol_b_stability_slope', 30.0))}")
+        # Experimental, off by default (see temporal_ensemble.py). Passed only when
+        # switched on, so a project that never touched it starts the daemon with
+        # exactly the command line it always had.
+        if cfg.get("temporal_ensemble", False):
+            cmd.append(f"--temporal-ensemble.coeff={float(cfg.get('temporal_ensemble_coeff', 0.01))}")
 
         self.emit("log", level="INFO", message="Spouštím inferenční daemon: " + " ".join(cmd))
         self.proc = subprocess.Popen(
@@ -1831,30 +1886,44 @@ class Orchestrator:
             return plan, reasoning
 
         holding = self._holding_state()
-        conflict = plan_state_conflict(plan, step_catalog(self.cfg), holding)
+        last_step = self.results[-1]["step"] if self.results else None
+        catalog = step_catalog(self.cfg)
+
+        # Two independent, deterministic audits of the same expensive plan —
+        # gripper-load state first (existing check), then, only if that one
+        # is silent, whether a grasp skill is being asked to start from a
+        # pose it was never trained for (see plan_pose_conflict()). Checked
+        # in this order simply because the load sensor is the older, more
+        # exhaustively exercised check; either can trigger the same re-ask.
+        conflict = plan_state_conflict(plan, catalog, holding)
+        correction_tpl = PLAN_STATE_CORRECTION
+        if not conflict:
+            conflict = plan_pose_conflict(plan, catalog, last_step)
+            correction_tpl = PLAN_POSE_CORRECTION
         record = {"plan": list(plan), "holding": holding, "conflict": conflict,
                   "corrected": False}
 
         if conflict:
             self.emit("log", level="WARN",
-                      message=f"Plán CEO odporuje čidlu zátěže: {conflict} — žádám o opravu.")
+                      message=f"Plán CEO možná odporuje stavu robota: {conflict} — žádám o opravu.")
             corrected_context = (
                 context + "\n\n" +
-                PLAN_STATE_CORRECTION.format(plan=json.dumps(plan, ensure_ascii=False),
-                                             conflict=conflict))
+                correction_tpl.format(plan=json.dumps(plan, ensure_ascii=False),
+                                      conflict=conflict))
             raw_plan, reasoning2 = self._create_plan(corrected_context, images_b64=images,
                                                      purpose=f"{purpose}_state_correction")
             plan2 = self._resolve_plan(raw_plan)
-            conflict2 = plan_state_conflict(plan2, step_catalog(self.cfg), holding)
+            conflict2 = (plan_state_conflict(plan2, catalog, holding)
+                        or plan_pose_conflict(plan2, catalog, last_step))
             record.update({"corrected": True, "plan_after": list(plan2),
                            "conflict_after": conflict2})
             if conflict2:
                 self.emit("log", level="WARN",
-                          message="CEO i po upozornění trvá na plánu, který odporuje čidlu — "
+                          message="CEO i po upozornění trvá na plánu, který odporuje stavu robota — "
                                   "spouštím ho tak, jak ho navrhl, a zaznamenávám to do běhu.")
             else:
                 self.emit("log", level="INFO",
-                          message="CEO po upozornění navrhl plán odpovídající stavu gripperu.")
+                          message="CEO po upozornění navrhl plán odpovídající stavu robota.")
             plan, reasoning = plan2, (reasoning2 or reasoning)
 
         self.plan_checks.append(record)
@@ -2184,14 +2253,22 @@ class Orchestrator:
 
         lines.append(f"OVERALL GOAL: '{cfg.get('task_slug')}' — {cfg.get('task_description', '')}\n")
 
+        def _skill_note(s_cfg: dict) -> str:
+            # RESET must NOT say "positioning/approach" — that phrase describes
+            # an ordinary step's goal (get near a target) and a small local VLM
+            # has been observed to parrot it back as the expected outcome for
+            # a reset step too, inventing an "approach" framing that has
+            # nothing to do with "return to the home pose".
+            if s_cfg.get("reset"):
+                return " [RESET skill — returns to home pose, no grasp]"
+            return " [grasps object]" if s_cfg.get("grasp") else " [positioning/approach, no grasp]"
+
         if plan:
             lines.append("ACTIVE PLAN CREATED BY CEO PLANNER:")
             for i, p_slug in enumerate(plan, 1):
                 p_cfg = next((s for s in catalog if s["slug"] == p_slug), {})
                 p_desc = p_cfg.get("description") or p_slug
-                grasp_note = " [grasps object]" if p_cfg.get("grasp") else " [positioning/approach, no grasp]"
-                if p_cfg.get("reset"):
-                    grasp_note += " [RESET skill]"
+                grasp_note = _skill_note(p_cfg)
                 if i - 1 < step_index:
                     status = "[COMPLETED PREVIOUSLY]"
                 elif i - 1 == step_index:
@@ -2203,15 +2280,17 @@ class Orchestrator:
         else:
             lines.append("TASK SKILLS CATALOG (ALL STEPS IN TASK):")
             for i, s in enumerate(catalog, 1):
-                grasp_note = " [grasps object]" if s.get("grasp") else " [positioning/approach, no grasp]"
-                if s.get("reset"):
-                    grasp_note += " [RESET skill]"
-                lines.append(f"  {i}. '{s['slug']}' ({s['description']}){grasp_note}")
+                lines.append(f"  {i}. '{s['slug']}' ({s['description']}){_skill_note(s)}")
             lines.append("")
 
         total_steps = len(plan) if plan else len(catalog)
         lines.append(f"STEP JUST EXECUTED (STEP {step_index + 1} OF {total_steps}): '{step_slug}' ({step_desc})")
         lines.append(f"EXPECTED OUTCOME TO VERIFY NOW: {expected}\n")
+        if step_cfg.get("reset"):
+            lines.append(
+                "This is a RESET step: judge ONLY whether the arm/gripper is in its default idle "
+                "pose. Any objects visible near, under, or behind the gripper are irrelevant to this "
+                "verdict — do not fail the step for their presence or position.\n")
 
         # Physical grounding for the photo — same signals the CEO planner
         # already gets (see _gripper_note), just never previously reached the

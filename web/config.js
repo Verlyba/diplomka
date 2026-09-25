@@ -97,6 +97,8 @@ const DEFAULTS = {
   protocol_b_stability_slope: 30.0,
   holding_limit_ma: 20,
   gripper_state_in_context: true,
+  temporal_ensemble: false,
+  temporal_ensemble_coeff: 0.01,
 
   // Kolik proběhlých běhů musí být v telemetry/, než kalibrační tabulka
   // („naměřeno vs. nastaveno") vydá u dané veličiny verdikt. Neovlivňuje běh

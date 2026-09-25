@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from orchestrator import PLAN_ABORT, PLAN_DONE, plan_state_conflict
+from orchestrator import PLAN_ABORT, PLAN_DONE, plan_state_conflict, plan_pose_conflict
 
 # Zamerne bezbarvy, neutralni katalog: kontrola nesmi znat nic o konkretni
 # uloze — jen poradi kroku a priznaky grasp/reset.
@@ -83,3 +83,42 @@ if failures:
         print("  ", f)
     sys.exit(1)
 print(f"OK — vsech {len(CASES)} pripadu kontroly planu sedi.")
+
+
+# ── plan_pose_conflict: uchop hned po ne-RESET kroku ────────────────────────
+# (popis, plan, katalog, last_step) -> ceka se rozpor?
+POSE_CASES = [
+    ("uchop hned po jinem kroku bez resetu", ["pick"], CATALOG, "transport", True),
+    ("uchop hned po jinem uchopu", ["pick"], CATALOG, "pick", True),
+    ("uchop hned po resetu — v poradku", ["pick"], CATALOG, "home", False),
+    ("prvni krok behu (zadna historie) — v poradku", ["pick"], CATALOG, None, False),
+    ("neuchopovy krok se nehlida", ["approach"], CATALOG, "transport", False),
+    ("prazdny plan", [], CATALOG, "transport", False),
+    ("sentinel DONE", [PLAN_DONE], CATALOG, "transport", False),
+    ("neznamy predchozi krok — bezpecne konzervativni (rozpor)",
+     ["pick"], CATALOG, "neco_jineho", True),
+    ("uloha bez uchopu", ["push_b"], NO_GRASP_CATALOG, "push_a", False),
+]
+
+pose_failures = []
+for popis, plan, catalog, last_step, want_conflict in POSE_CASES:
+    conflict = plan_pose_conflict(plan, catalog, last_step)
+    got = bool(conflict)
+    status = "ok  " if got == want_conflict else "CHYBA"
+    if got != want_conflict:
+        pose_failures.append((popis, got, want_conflict))
+    print(f"{status} last_step={str(last_step):<12} plan={str(plan):<10} -> "
+          f"{'rozpor' if got else 'v poradku'}   ({popis})")
+
+conflict = plan_pose_conflict(["pick"], CATALOG, "transport")
+if "pick" not in conflict or "transport" not in conflict:
+    pose_failures.append(("text rozporu nejmenuje oba kroky", conflict,
+                          "obsahuje 'pick' i 'transport'"))
+
+print()
+if pose_failures:
+    print(f"NEPROSLO: {len(pose_failures)} pripadu")
+    for f in pose_failures:
+        print("  ", f)
+    sys.exit(1)
+print(f"OK — vsech {len(POSE_CASES)} pripadu kontroly pozice pred uchopem sedi.")

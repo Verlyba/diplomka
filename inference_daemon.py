@@ -60,6 +60,9 @@ from copy import copy
 from pathlib import Path
 from typing import Any
 
+from bus_guard import BusGuard
+from temporal_ensemble import apply_temporal_ensemble
+
 os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
 
 # Výstup daemonu čte orchestrátor jako UTF-8 a příkazy (SET_TASK: s českým
@@ -208,6 +211,14 @@ PROTOCOL_A_THRESHOLD = 0.5
 # EXTRA solved for patience, just never split for the threshold itself until
 # calibrate_protocols.py's per-step report separated the two populations.
 PROTOCOL_A_TARGET_THRESHOLD = 5.0
+
+# Temporal ensembling of the ACT action chunks (see temporal_ensemble.py). None =
+# off, the policy loads exactly as before. Experimental: with it the policy runs a
+# forward pass on EVERY tick instead of every n_action_steps-th, and the "target"
+# Protocol A compares against becomes the ensemble average, so Protocol A's
+# target-tracking distance is not calibrated for it — runs are tagged in
+# telemetry (daemon_start.temporal_ensemble_coeff) to keep them apart.
+TEMPORAL_ENSEMBLE_COEFF: float | None = None
 PROTOCOL_A_PATIENCE = 5        # consecutive frames, used for |reset steps
 # Grasping can involve a touch more residual jostling right after contact
 # than a clean return-to-home does, so a grasp step waits a bit longer than a
@@ -224,10 +235,21 @@ PROTOCOL_A_GRASP_PATIENCE_EXTRA = 5   # extra consecutive frames on top of PROTO
 # "stopped" even though the arm hasn't started reaching for anything yet —
 # the same overlap problem PROTOCOL_B_GRACE_S was introduced for. Same fix:
 # don't let the settle counter's result end the step until enough time has
-# passed for a genuine attempt to be underway. Only gates velocity-settle
-# steps (grasp/reset) — ordinary steps settle against their own predicted
-# target, not raw velocity, so they aren't subject to this failure mode.
-PROTOCOL_A_GRACE_S = 1.0       # seconds since SET_TASK before Protocol A may end a |reset step
+# passed for a genuine attempt to be underway.
+#
+# This used to gate only velocity-settle steps (grasp/reset), on the reasoning
+# that an ordinary step settles against its own predicted target rather than
+# raw velocity and so "isn't subject to this failure mode". Real telemetry
+# (2026-09-25, all telemetry/*.jsonl, every ordinary step that ended on
+# Protocol A) says otherwise: 9 of 11 carry_cube steps were ended after
+# 0.22-0.25 s with the arm having moved only 0.8-3.2 degrees — the policy's
+# first predicted action sits right next to the arm's current pose, so
+# distance-to-target is already under PROTOCOL_A_TARGET_THRESHOLD for the
+# full patience window before anything has moved. The other 2 ended after
+# 2.28 s and 2.89 s with 58 and 88 degrees of travel (real arrivals). Nothing
+# lies between 0.25 s and 2.28 s, so this one existing constant separates
+# the two populations cleanly; it now gates EVERY step Protocol A may end.
+PROTOCOL_A_GRACE_S = 1.0       # seconds since SET_TASK before Protocol A may end any step
 # Confirmed on the same 2026-09-06 telemetry as above that grace + patience
 # alone still isn't the right completion signal for a GRASP step even before
 # either fix: "joints stopped moving" is equally true of "finished closing on
@@ -418,7 +440,15 @@ def load_policy(policy_path: str, dev: str) -> None:
     resolved = resolve_policy_dir(policy_path)
     cfg = PreTrainedConfig.from_pretrained(resolved)
     cfg.pretrained_path = resolved
-    policy = get_policy_class(cfg.type).from_pretrained(resolved)
+    if TEMPORAL_ENSEMBLE_COEFF is None:
+        policy = get_policy_class(cfg.type).from_pretrained(resolved)
+    else:
+        # The ensembler is built in ACTPolicy.__init__ only if the coefficient is
+        # already in the config, so the override has to go in before construction
+        # and the modified config must be handed to from_pretrained (which would
+        # otherwise reload the untouched one from disk).
+        log.warning(apply_temporal_ensemble(cfg, TEMPORAL_ENSEMBLE_COEFF))
+        policy = get_policy_class(cfg.type).from_pretrained(resolved, config=cfg)
     policy.to(dev)
     policy.eval()
     try:
@@ -664,6 +694,37 @@ def predict_and_act(task: str) -> tuple[np.ndarray, np.ndarray, float, dict]:
     return joints, target, load, action
 
 
+def _bus_port_handler():
+    """The Feetech PortHandler of the connected follower, or None (simulated / not a Feetech arm)."""
+    if robot is None or simulated:
+        return None
+    bus = getattr(robot, "bus", getattr(getattr(robot, "follower_arm", None), "bus", None))
+    return getattr(bus, "port_handler", None)
+
+
+# See bus_guard.py for why a single serial hiccup used to end a whole run:
+# the SDK's "port in use" flag is only cleared at the end of a successful
+# receive, so an exception in between wedges the bus for the process's life.
+_bus_guard = BusGuard(
+    get_port_handler=_bus_port_handler,
+    log_fn=log.warning,
+    event_fn=lambda name, **fields: _log_telemetry(event=name, **fields),
+)
+
+
+def _bus_lost() -> None:
+    """Recovery did not help in time — leave, so the orchestrator restarts a fresh daemon.
+
+    A new process means a new PortHandler and a new serial connection; the
+    orchestrator already retries a step whose daemon died (see Orchestrator.run,
+    "Daemon selhal — restartuji a zkouším krok znovu"), which is the right
+    semantics here too: a step measured on a dead bus never really ran.
+    """
+    log.error("Sběrnice servo motorů se neobnovila — daemon končí, orchestrátor ho spustí znovu.")
+    print("[STATUS] BUS_LOST: sběrnice servo motorů se neobnovila", flush=True)
+    _quit_requested.set()
+
+
 def freeze_robot() -> None:
     """Hold the arm exactly where it physically is right now.
 
@@ -685,8 +746,10 @@ def freeze_robot() -> None:
         hold_action = {k: v for k, v in obs.items() if k in action_keys and isinstance(v, (int, float))}
         if hold_action:
             robot.send_action(hold_action)
+        _bus_guard.ok()
     except Exception as e:
-        log.warning("Freeze/hold failed: %s", e)
+        if not _bus_guard.fault(e):
+            log.warning("Freeze/hold failed: %s", e)
 
 
 # ── stdin command loop ──────────────────────────────────────────────────────
@@ -771,7 +834,7 @@ def stdin_reader(max_seconds: float) -> None:
 def main() -> None:
     global state, active_task, active_is_grasp, active_is_reset, device, simulated, use_triggers
     global use_protocol_a, use_protocol_b
-    global PROTOCOL_A_THRESHOLD, PROTOCOL_A_TARGET_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_A_GRASP_PATIENCE_EXTRA, PROTOCOL_A_GRACE_S, PROTOCOL_B_LOAD_LIMIT, PROTOCOL_B_PATIENCE, PROTOCOL_B_GRACE_S, PROTOCOL_B_STABILITY_SLOPE
+    global PROTOCOL_A_THRESHOLD, PROTOCOL_A_TARGET_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_A_GRASP_PATIENCE_EXTRA, PROTOCOL_A_GRACE_S, PROTOCOL_B_LOAD_LIMIT, PROTOCOL_B_PATIENCE, PROTOCOL_B_GRACE_S, PROTOCOL_B_STABILITY_SLOPE, TEMPORAL_ENSEMBLE_COEFF
     global idle_load_baseline, _baseline_samples, _load_history, _telemetry_log_fh
 
     ap = argparse.ArgumentParser(description="Persistent inference daemon")
@@ -826,8 +889,13 @@ def main() -> None:
                          f"for |grasp steps (default {PROTOCOL_A_GRASP_PATIENCE_EXTRA}).")
     ap.add_argument("--protocol-a.grace", dest="protocol_a_grace", type=float,
                     default=PROTOCOL_A_GRACE_S,
-                    help="Protocol A: seconds after SET_TASK before it may end a |reset step, to skip "
+                    help="Protocol A: seconds after SET_TASK before it may end any step, to skip "
                          f"the pre-motion settle-counter false start (default {PROTOCOL_A_GRACE_S}).")
+    ap.add_argument("--temporal-ensemble.coeff", dest="temporal_ensemble_coeff", type=float,
+                    default=None,
+                    help="ACT only: turn on temporal ensembling with this exponential-weight "
+                         "coefficient (original ACT work: 0.01). Sets n_action_steps to 1, so the "
+                         "policy runs on every tick. Default: off.")
     ap.add_argument("--protocol-b.limit", dest="protocol_b_limit", type=float,
                     default=PROTOCOL_B_LOAD_LIMIT,
                     help="Protocol B: gripper current rise over the idle baseline, in mA "
@@ -858,6 +926,7 @@ def main() -> None:
     PROTOCOL_A_PATIENCE = args.protocol_a_patience
     PROTOCOL_A_GRASP_PATIENCE_EXTRA = args.protocol_a_grasp_patience_extra
     PROTOCOL_A_GRACE_S = args.protocol_a_grace
+    TEMPORAL_ENSEMBLE_COEFF = args.temporal_ensemble_coeff
     PROTOCOL_B_LOAD_LIMIT = args.protocol_b_limit
     PROTOCOL_B_PATIENCE = args.protocol_b_patience
     PROTOCOL_B_GRACE_S = args.protocol_b_grace
@@ -928,6 +997,7 @@ def main() -> None:
                            protocol_a_target_threshold=PROTOCOL_A_TARGET_THRESHOLD,
                            protocol_a_patience=PROTOCOL_A_PATIENCE,
                            protocol_a_grace_s=PROTOCOL_A_GRACE_S,
+                           temporal_ensemble_coeff=TEMPORAL_ENSEMBLE_COEFF,
                            protocol_b_limit=PROTOCOL_B_LOAD_LIMIT, protocol_b_patience=PROTOCOL_B_PATIENCE,
                            protocol_b_grace_s=PROTOCOL_B_GRACE_S)
         except Exception as e:
@@ -940,6 +1010,12 @@ def main() -> None:
     load_slope = 0.0
     load_trend = 0.0
     prev_joints: np.ndarray | None = None
+    # Wall-clock length of every RUNNING iteration, reported per step in the
+    # task_done telemetry. Diagnostic only. The control loop is meant to run at
+    # `period` (the training fps); an iteration longer than that means the arm is
+    # being driven slower than it was trained — what temporal ensembling risks,
+    # since it adds a full forward pass to every tick.
+    loop_ms: list[float] = []
     mode = "SIMULATED" if simulated else "HARDWARE"
     print(f"[STATUS] DAEMON_READY: mode={mode}", flush=True)
 
@@ -948,6 +1024,7 @@ def main() -> None:
             return
         tick = time.time()
         load = 0.0
+        obs_failed = False   # this tick's robot I/O raised — joints/target below are last tick's, not a measurement
 
         if state == "WAITING":
             settled = 0
@@ -976,8 +1053,13 @@ def main() -> None:
                     # just at the instant the step ended.
                     if hold_action:
                         robot.send_action(hold_action)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Silent as before for anything that is not a servo-bus
+                    # fault; a wedged bus is now recovered (see bus_guard.py).
+                    if _bus_guard.fault(e) and _bus_guard.gave_up:
+                        _bus_lost()
+                else:
+                    _bus_guard.ok()
 
         elif state == "RUNNING":
             if not simulated and robot is not None and policy is not None:
@@ -987,7 +1069,14 @@ def main() -> None:
                         joints = current
                     target = predicted
                 except Exception as e:
-                    log.warning("Inference step failed: %s", e)
+                    obs_failed = True
+                    if _bus_guard.fault(e):
+                        if _bus_guard.gave_up:
+                            _bus_lost()
+                    else:
+                        log.warning("Inference step failed: %s", e)
+                else:
+                    _bus_guard.ok()
             else:
                 # Simulated arm: slide toward a canned target so the whole
                 # orchestration loop (triggers, VLM, re-planning) is testable.
@@ -1042,13 +1131,19 @@ def main() -> None:
             # share a scale, so they cannot share a threshold either.
             settle_threshold = PROTOCOL_A_THRESHOLD if use_velocity_settle else PROTOCOL_A_TARGET_THRESHOLD
             settled = settled + 1 if bool(np.all(deltas < settle_threshold)) else 0
-            # See PROTOCOL_A_GRACE_S above: only |reset can end on this signal,
-            # and only a velocity-settle step (both |reset and |grasp measure
-            # velocity, for the telemetry value even though |grasp can no
-            # longer end this way) risks reading "hasn't started yet" as
-            # "already stopped" — an ordinary step's target-tracking settle is
-            # a distance-to-target measurement, not subject to it.
-            grace_elapsed_a = (not use_velocity_settle) or (time.time() - task_started_at) >= PROTOCOL_A_GRACE_S
+            if obs_failed:
+                # A tick whose robot read/write raised reuses last tick's joints and
+                # target, so "nothing moved" is an artefact, not stillness. Seen
+                # 2026-09-25: on a wedged bus the frozen joints made Protocol A
+                # "settle" and end a step that was not being measured at all.
+                settled = 0
+            # See PROTOCOL_A_GRACE_S above: applies to every step Protocol A
+            # may end (|reset and ordinary; |grasp can no longer end this way
+            # at all). A velocity settle can read "hasn't started yet" as
+            # "already stopped", and a target-tracking settle can read
+            # "hasn't started yet" as "already at the predicted target" — the
+            # first predicted action is right next to the current pose.
+            grace_elapsed_a = (time.time() - task_started_at) >= PROTOCOL_A_GRACE_S
             prev_joints = joints.copy()
             settle_patience = PROTOCOL_A_PATIENCE + (PROTOCOL_A_GRASP_PATIENCE_EXTRA if active_is_grasp else 0)
 
@@ -1105,10 +1200,16 @@ def main() -> None:
             if reason:
                 freeze_robot()
                 print(f"[STATUS] TASK_DONE: {active_task} | {reason}", flush=True)
+                _loop = sorted(loop_ms)
                 _log_telemetry(event="task_done", task=active_task, reason=reason,
                                load=load, baseline=baseline, rise=rise,
                                settled=settled, grasp_hold=grasp_hold,
-                               slope=load_slope, trend=load_trend)
+                               slope=load_slope, trend=load_trend,
+                               loop_period_ms=round(period * 1000, 1),
+                               loop_ms_median=round(_loop[len(_loop) // 2], 1) if _loop else None,
+                               loop_ms_p95=round(_loop[min(len(_loop) - 1, int(len(_loop) * 0.95))], 1) if _loop else None,
+                               loop_overruns=sum(1 for x in _loop if x > period * 1000 * 1.05))
+                loop_ms.clear()
                 state, active_task, active_is_grasp, active_is_reset, settled, grasp_hold = "WAITING", "", False, False, 0, 0
                 prev_joints = None
 
@@ -1147,6 +1248,8 @@ def main() -> None:
                            target=[round(float(x), 3) for x in target])
 
         elapsed = time.time() - tick
+        if state == "RUNNING":
+            loop_ms.append(elapsed * 1000)
         if elapsed < period:
             time.sleep(period - elapsed)
 

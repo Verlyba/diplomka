@@ -418,6 +418,11 @@ function render() {
     arg('policy.path', derive.baselineLoadPath(c, baselineEpisodes)),
     arg('device', c.device), arg('fps', c.fps),
     '--no-triggers', arg('max-seconds', 60)];
+  // Experimentální (viz temporal_ensemble.py) — jen když je zapnuté, ať se jinak
+  // příkaz nezmění ani o znak.
+  if (c.temporal_ensemble) {
+    baseline.push(arg('temporal-ensemble.coeff', c.temporal_ensemble_coeff));
+  }
   // inference_daemon.py má vlastní argparse, ne draccus — --robot.cameras tam
   // (na rozdíl od teleop/record/rollout) čeká striktní JSON, ne tenhle zápis
   // bez uvozovek. Bezpečnější jsou jeho jednotlivé --camera./--camera2. flagy

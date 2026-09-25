@@ -159,6 +159,10 @@ DEFAULT_CONFIG: dict = {
     # calibrate_protocols.py). Nemá vliv na běh robota, jen na tu tabulku.
     "calibration_min_runs": 3,
     "gripper_state_in_context": True,
+    # Experimentální: temporal ensembling ACT politiky (viz temporal_ensemble.py).
+    # Vypnuto = politika se načítá a jede přesně jako dřív.
+    "temporal_ensemble": False,
+    "temporal_ensemble_coeff": 0.01,
 }
 
 MIME = {
@@ -434,6 +438,82 @@ def list_local_datasets(task_slug: str | None = None) -> list[dict]:
     return result
 
 
+def dataset_episode_lengths(repo_id: str) -> dict:
+    """Declared vs. measured episode count/length for one local dataset.
+
+    meta/info.json's total_episodes is written once when the dataset is
+    recorded and simply trusted everywhere else in this app (see
+    orchestrator._dataset_stats(), and the _<N>ep checkpoint naming
+    convention it feeds). It has been wrong before — a dataset that was
+    really 60 episodes ended up on disk named "_61ep_act" after a recording
+    hiccup — so this reads the actual per-episode lengths straight from
+    meta/episodes/*.parquet instead of trusting the declared count, and
+    returns both so a mismatch is visible rather than silently propagated
+    into yet another checkpoint name.
+    """
+    d = _dataset_dir_for(repo_id)
+    info_file = d / "meta" / "info.json"
+    if not info_file.exists():
+        raise FileNotFoundError(f"Dataset '{repo_id}' na disku neexistuje.")
+    with open(info_file, "r", encoding="utf-8") as f:
+        info = json.load(f)
+
+    # (episode_index, length) explicitly sorted by episode_index — this
+    # project's recorder happens to already write them in order, but a
+    # consumer picking "the first N episodes" (see /retrain.html, which trains
+    # on a --dataset.episodes prefix of a bigger dataset instead of copying
+    # it) depends on that ordering being guaranteed, not incidental.
+    import pyarrow.parquet as pq
+    pairs: list[tuple[int, int]] = []
+    for pq_file in sorted((d / "meta" / "episodes").glob("chunk-*/*.parquet")):
+        table = pq.read_table(pq_file, columns=["episode_index", "length"])
+        pairs.extend(zip(table.column("episode_index").to_pylist(),
+                         table.column("length").to_pylist()))
+    pairs.sort(key=lambda p: p[0])
+    lengths = [int(length) for _, length in pairs]
+
+    return {
+        "repo_id": repo_id,
+        "declared_episodes": info.get("total_episodes"),
+        "declared_frames": info.get("total_frames"),
+        "measured_episodes": len(lengths),
+        "measured_frames": sum(lengths),
+        "lengths": lengths,
+    }
+
+
+def checkpoint_rate(path: str) -> dict | None:
+    """Empirical steps/second for one checkpoint dir, from its own numbered
+    subdirectories' mtimes (earliest saved step vs. latest) — a real
+    measurement of a training run that actually happened on this machine,
+    not a guessed number. save_freq=5000 means checkpoint 005000 was written
+    close to the run's start (after warmup) and the highest-numbered one at
+    the end, so the span between them is a clean, representative sample.
+
+    Returns None when there are fewer than 2 checkpoints to measure a span
+    from (nothing to divide), or the path doesn't exist — /retrain.html shows
+    "no estimate" rather than inventing a number in that case.
+    """
+    root = (HERE / (load_config().get("output_root") or "outputs/training")).resolve()
+    d = (HERE / path).resolve()
+    if root not in d.parents and d != root:
+        raise ValueError("Cesta je mimo output_root.")
+    ckpt_dir = d / "checkpoints"
+    if not ckpt_dir.is_dir():
+        return None
+    nums = [(int(p.name), p) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()]
+    if len(nums) < 2:
+        return None
+    nums.sort(key=lambda t: t[0])
+    (first_step, first_path), (last_step, last_path) = nums[0], nums[-1]
+    delta_steps = last_step - first_step
+    delta_seconds = last_path.stat().st_mtime - first_path.stat().st_mtime
+    if delta_steps <= 0 or delta_seconds <= 0:
+        return None
+    return {"path": path, "steps": delta_steps, "seconds": delta_seconds,
+            "rate_steps_per_s": delta_steps / delta_seconds}
+
+
 def delete_dataset(repo_id: str) -> None:
     d = _dataset_dir_for(repo_id)
     if not d.exists():
@@ -671,6 +751,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(list_local_datasets(task_slug))
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
+        elif path == "/api/dataset-episode-lengths":
+            qs = parse_qs(urlparse(self.path).query)
+            repo_id = qs.get("repo_id", [""])[0]
+            try:
+                self._send_json({"ok": True, **dataset_episode_lengths(repo_id)})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=400)
+        elif path == "/api/checkpoint-rate":
+            qs = parse_qs(urlparse(self.path).query)
+            ckpt_path = qs.get("path", [""])[0]
+            try:
+                rate = checkpoint_rate(ckpt_path)
+                self._send_json({"ok": True, "rate": rate})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=400)
         elif path == "/api/runs":
             runs_dir = HERE / "runs"
             files = sorted((f.name for f in runs_dir.glob("*.json")), reverse=True) \
