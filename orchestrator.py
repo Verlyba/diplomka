@@ -15,6 +15,7 @@ condition being measured, not application infrastructure.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -26,6 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+
+from release_detect import HOLD_FRAC as RELEASE_HOLD_FRAC
 
 HERE = Path(__file__).resolve().parent
 # Kam record_with_marks.py / lerobot-record doopravdy ukládá "local/<name>"
@@ -473,6 +476,31 @@ PHYS_CONFIRM, PHYS_DENY, PHYS_NONE, PHYS_UNCLEAR = "CONFIRM", "DENY", "NONE", "U
 # channel asserted anything about this step at all, so calling it a failure
 # would be inventing negative evidence out of missing evidence.
 OUTCOME_SUCCESS, OUTCOME_FAILURE, OUTCOME_UNCERTAIN = "success", "failure", "uncertain"
+
+
+def release_evidence(reason: str, last_load: float | None, last_baseline: float | None,
+                     limit: float, sensor_ok: bool = True) -> tuple[str, str]:
+    """Physical verdict of a |release step: did the jaws let the object go?
+
+    CONFIRM only when the daemon itself saw it — a gripped load that left while
+    the gripper stood still (`Protokol B (uvolnění`, see release_detect.py). DENY
+    when the step is over and the jaws are STILL loaded: the object is still in
+    them, which is precisely what a top-down camera cannot tell from "lying in
+    the bowl" (2026-09-25: 4 of 13 runs the system called successful had the cube
+    still clamped over the bowl, by manual inspection of the wrist-camera frames). Anything else —
+    a step that carried nothing, a sensor that reads flat zero, a load between the
+    two bounds — claims nothing, so the camera decides on its own.
+    """
+    if not sensor_ok:
+        return PHYS_NONE, ""
+    if "Protokol B (uvolnění" in (reason or ""):
+        return PHYS_CONFIRM, "protokol B: čelisti pustily předmět (zátěž klesla, gripper stojí)"
+    if last_load is not None and limit > 0:
+        rise = last_load - (last_baseline or 0.0)
+        if rise >= RELEASE_HOLD_FRAC * limit:
+            return PHYS_DENY, (f"zátěž gripperu {last_load:.0f} (nárůst {rise:.0f}) — "
+                               "čelisti předmět pořád svírají")
+    return PHYS_NONE, ""
 
 
 def fuse_evidence(phys: str, phys_note: str, vis: str,
@@ -1013,7 +1041,8 @@ class Daemon:
             raise RuntimeError(f"Výměna modelu selhala: {self._policy_error}")
         self.policy_path = policy_path
 
-    def run_task(self, task: str, timeout: float, is_grasp: bool = False, is_reset: bool = False) -> str:
+    def run_task(self, task: str, timeout: float, is_grasp: bool = False, is_reset: bool = False,
+                 is_release: bool = False) -> str:
         """SET_TASK + wait for TASK_DONE (the task latch). Returns the reason."""
         self._task_done.clear()
         self._done_reason = ""
@@ -1022,6 +1051,8 @@ class Daemon:
             cmd += "|grasp"
         if is_reset:
             cmd += "|reset"
+        if is_release:
+            cmd += "|release"
         cmd += f"|timeout={timeout:.1f}"
         self._send(cmd)
         if not self._task_done.wait(timeout + 3.0):
@@ -1162,7 +1193,8 @@ def step_catalog(cfg: dict) -> list[dict]:
             entry = {"slug": slug,
                      "description": (step.get("description") or "").strip(),
                      "grasp": bool(step.get("grasp")),
-                     "reset": bool(step.get("reset"))}
+                     "reset": bool(step.get("reset")),
+                     "release": bool(step.get("release"))}
             if step.get("policy_path"):
                 entry["policy_path"] = step["policy_path"]
             timeout_s = step.get("timeout_s")
@@ -1484,6 +1516,10 @@ class Orchestrator:
         # comparing against an older frame would measure the change across
         # several steps and silently mislabel which skill caused it.
         self._prev_frames: list[str] = []
+        # Snímek (podle otisku jeho base64) -> cesta k uloženému souboru. Díky tomu
+        # každé volání modelu ví, ze kterých souborů jeho snímky jsou, a žádný snímek
+        # se neuloží dvakrát (viz _image_paths_for).
+        self._saved_by_hash: dict[str, str] = {}
 
     def stop(self) -> None:
         self._stop.set()
@@ -1505,16 +1541,47 @@ class Orchestrator:
             self.emit("log", level="WARN",
                       message=f"Snímky k „{tag}\" se nepodařilo uložit do "
                               f"images/{self.run_id}/ — běh pokračuje bez nich.")
+        # Soubor se jmenuje <tag>_<pořadí>.jpg a pořadí je pozice v `images_b64`
+        # (prázdné a nečitelné snímky se přeskakují, takže cesty s ním nesedí 1:1).
+        for path in paths:
+            try:
+                pos = int(path.rsplit("_", 1)[1].split(".")[0]) - 1
+                self._saved_by_hash[self._image_key(images_b64[pos])] = path
+            except (IndexError, ValueError):
+                continue
         return paths
+
+    @staticmethod
+    def _image_key(b64: str) -> str:
+        return hashlib.sha1(b64.encode("ascii", "ignore")).hexdigest()
+
+    def _image_paths_for(self, purpose: str, images) -> list[str]:
+        """Cesty k souborům se snímky, které se právě posílají modelu.
+
+        Do záznamu volání (llm_calls[].image_paths) patří přesně to, co model
+        dostal, ve stejném pořadí — jinak se u sporného verdiktu nedá zpětně říct,
+        na co se díval. Většina snímků je už uložená pod svým pokusem nebo jako
+        výchozí scéna; ty se jen dohledají. Co uložené ještě není, se uloží teď pod
+        `call<číslo volání>_<účel>`, takže se žádný snímek nepošle modelu bez stopy.
+        Prázdný řetězec na dané pozici = snímek se nepodařilo uložit.
+        """
+        if not images or not self.cfg.get("save_images", True):
+            return []
+        imgs = [images] if isinstance(images, str) else list(images)
+        keys = [self._image_key(i) if i else "" for i in imgs]
+        missing = [i for i, k in zip(imgs, keys) if k and k not in self._saved_by_hash]
+        if missing:
+            self._keep_images(f"call{len(self.llm_calls) + 1:03d}_{purpose}", missing)
+        return [self._saved_by_hash.get(k, "") if k else "" for k in keys]
 
     def _chat(self, layer: str, purpose: str, **kwargs) -> str:
         """The one door to the models, so that every call is timed and recorded.
 
         Wrapping instead of counting at the call sites keeps the property that
         matters for the data: a call that raised is recorded too, with the time
-        it burned before failing. The planner's "retry without the photo" and
-        the inspector's "take a fresh snapshot and ask again" both cost real
-        seconds today and appear nowhere in the run record.
+        it burned before failing. The planner's "retry without the photo" (and,
+        until 2026-09-26, the inspector's "take a fresh snapshot and ask again")
+        cost real seconds and used to appear nowhere in the run record.
         """
         started = time.time()
         ok = True
@@ -1529,6 +1596,11 @@ class Orchestrator:
                 count = len([i for i in images if i])
             else:
                 count = 1 if images else 0
+            try:
+                image_paths = self._image_paths_for(purpose, images)
+            except Exception:
+                # Záznam volání je důležitější než cesty k jeho snímkům.
+                image_paths = []
             self.llm_calls.append({
                 "layer": layer,
                 "purpose": purpose,
@@ -1539,6 +1611,9 @@ class Orchestrator:
                 "s": round(time.time() - started, 3),
                 "ok": ok,
                 "images": count,
+                # Které soubory model dostal (stejné pořadí jako snímky). Volání
+                # bez snímků má prázdný seznam. Viz _image_paths_for.
+                "image_paths": image_paths,
             })
 
     def _record_swap(self, step: str, phase: str, started: float) -> None:
@@ -1564,7 +1639,8 @@ class Orchestrator:
         for s in step_catalog(cfg):
             grasp_type = " [ends by closing the gripper on the object]" if s.get("grasp") else ""
             reset_type = " [RESET — returns the arm to a known/safe position from any state]" if s.get("reset") else ""
-            lines.append(f"- '{s['slug']}': {s['description']}{grasp_type}{reset_type}")
+            release_type = " [ends by opening the gripper and letting the carried object go]" if s.get("release") else ""
+            lines.append(f"- '{s['slug']}': {s['description']}{grasp_type}{reset_type}{release_type}")
         lines.append("")
         lines.append(PLANNER_OUTPUT_REASONING if cfg.get("planner_reasoning", True)
                      else PLANNER_OUTPUT_TERSE)
@@ -2232,11 +2308,10 @@ class Orchestrator:
         entirely rather than just ignored, so the inspector isn't asked a
         question it demonstrably can't answer reliably.
 
-        images_used is returned because an [unclear] verdict makes this method
-        take a FRESH snapshot and re-ask; the caller must keep that newer
-        photo, otherwise everything downstream (the re-plan context, the
-        planner's own vision) would keep reasoning about the stale frame that
-        was already judged too ambiguous to decide on.
+        images_used is the photo the verdict rests on. It is always the one passed
+        in now; an earlier version took a fresh snapshot after an [unclear]
+        verdict and returned that one (removed 2026-09-26). The return value
+        stays so the caller needs no change.
         """
         cfg = self.cfg
         catalog = step_catalog(cfg)
@@ -2261,6 +2336,12 @@ class Orchestrator:
             # nothing to do with "return to the home pose".
             if s_cfg.get("reset"):
                 return " [RESET skill — returns to home pose, no grasp]"
+            # A release step is not "positioning": arriving over the target with
+            # the object still clamped is exactly the failure to look for, and a
+            # top-down photo makes "held above the bowl" look like "in the bowl".
+            if s_cfg.get("release"):
+                return (" [carries the held object and RELEASES it — done only when the object "
+                        "has left the gripper; an object still between the jaws is NOT released]")
             return " [grasps object]" if s_cfg.get("grasp") else " [positioning/approach, no grasp]"
 
         if plan:
@@ -2324,36 +2405,22 @@ class Orchestrator:
         prompt = "\n".join(lines)
 
         model = self.cfg.get("vlm_model", "local-vlm")
-        for attempt in (1, 2):
-            # The second pass only ever happens after an [unclear] verdict, on
-            # a freshly taken photo — a different question in practice, and one
-            # whose frequency is worth reading straight out of the record.
-            reply = self._chat(LAYER_INSPECTOR,
-                               "verify_step" if attempt == 1 else "verify_step_resnapshot",
-                               model=model, user_prompt=prompt, images_b64=images_b64,
-                               temperature=0.1, max_tokens=1024)
-            raw_reply = reply.strip()
-            self.emit("log", level="INFO",
-                      message=f"VLM inspektor ({model}) odpovídá: „{raw_reply}\"")
-            success, tag = self._read_verdict(raw_reply)
-            reasoning = parse_reasoning_sentence(raw_reply)
-            if reasoning:
-                self.emit("log", level="INFO", message=f"Odůvodnění inspektora: „{reasoning}“")
-
-            # [unclear] means "I cannot tell from this photo", not "it failed".
-            # A fresh snapshot is far cheaper than a re-plan, so take one and
-            # ask once more before treating it as a failure.
-            if tag != UNCLEAR_TAG or attempt == 2 or self.daemon is None:
-                break
-            self.emit("log", level="WARN",
-                      message="Inspektor nedokázal ze snímků rozhodnout — nový snímek.")
-            fresh = self.daemon.snapshot()
-            if not fresh:
-                # Bez nového snímku by druhý dotaz jen zopakoval tentýž obrázek
-                # a stál další volání VLM se zaručeně stejnou odpovědí.
-                break
-            images_b64 = fresh
-            self.emit("snapshot", images=fresh, step=step_slug)
+        # Jeden dotaz na jeden snímek. Dřív se po [unclear] pořídil nový snímek a
+        # inspektor se zeptal podruhé (odebráno 2026-09-26 na přání uživatele). Z běhů
+        # z toho dne: 27 opakování ze 132 ověření, 113 s celkem, a v 20 z nich už
+        # fyzika rozhodla (DENY/CONFIRM) a opakování ji ani jednou nepřebilo. Nejasný
+        # verdikt bez fyzického důkazu teď rovnou jde do pravidla `uncertain`
+        # (krok se jednou zopakuje bez CEO, viz reflex_retry_decision).
+        reply = self._chat(LAYER_INSPECTOR, "verify_step",
+                           model=model, user_prompt=prompt, images_b64=images_b64,
+                           temperature=0.1, max_tokens=1024)
+        raw_reply = reply.strip()
+        self.emit("log", level="INFO",
+                  message=f"VLM inspektor ({model}) odpovídá: „{raw_reply}\"")
+        success, tag = self._read_verdict(raw_reply)
+        reasoning = parse_reasoning_sentence(raw_reply)
+        if reasoning:
+            self.emit("log", level="INFO", message=f"Odůvodnění inspektora: „{reasoning}“")
         return success, tag, reasoning, images_b64
 
     def _preload_plan_policies(self, plan: list[str]) -> None:
@@ -2476,6 +2543,7 @@ class Orchestrator:
                 policy_path = step_output_dir(cfg, step)
                 is_grasp = bool(step_cfg.get("grasp"))
                 is_reset = bool(step_cfg.get("reset"))
+                is_release = bool(step_cfg.get("release"))
                 # Per-step timeout written by compute_step_timeouts.py;
                 # falls back to episode_time_s when the script hasn't run.
                 step_timeout = float(
@@ -2510,7 +2578,7 @@ class Orchestrator:
                             swap_started = time.time()
                             self.daemon.set_policy(policy_path)
                             self._record_swap(step, "step", swap_started)
-                        reason = self.daemon.run_task(step, step_timeout, is_grasp, is_reset)
+                        reason = self.daemon.run_task(step, step_timeout, is_grasp, is_reset, is_release)
                         break
                     except (RuntimeError, OSError) as e:
                         # OSError (e.g. BrokenPipeError from _send()'s
@@ -2535,6 +2603,11 @@ class Orchestrator:
                 images = self.daemon.snapshot()
                 if images:
                     self.emit("snapshot", images=images, step=step)
+                # Číslo pokusu je známé už teď (results se doplní až na konci kroku), a
+                # snímky se ukládají PŘED dotazem na inspektora, aby jeho volání v
+                # llm_calls ukázalo přímo na tyhle soubory.
+                att_num = len(self.results) + 1
+                image_paths = self._keep_images(f"a{att_num:03d}", images)
 
                 # ── Evidence fusion ──────────────────────────────────────
                 # Both channels are always evaluated; fuse_evidence() combines
@@ -2584,6 +2657,14 @@ class Orchestrator:
                     # A reset that timed out proves nothing either way — the
                     # arm may still be home — so it stays PHYS_NONE and the
                     # inspector decides alone.
+                elif is_release and cfg.get("protocol_b_enabled", True):
+                    # The grasp check's mirror image: the load that closing
+                    # produced has to be gone again. Same sensor guard — a
+                    # flat-zero load is "not reading", not "released".
+                    phys, phys_note = release_evidence(
+                        reason or "", self.daemon.last_load, self.daemon.last_baseline,
+                        float(cfg.get("protocol_b_limit_ma", 250) or 0),
+                        sensor_ok=self.daemon.load_ever_nonzero)
 
                 # Visual channel. SKIPPED (inspector deliberately off, the
                 # "physical only" ablation) is deliberately distinct from
@@ -2593,9 +2674,8 @@ class Orchestrator:
                 if cfg.get("skip_inspector"):
                     vis = "SKIPPED"
                 elif images:
-                    # `images` is reassigned on purpose: on an [unclear]
-                    # verdict _verify() re-snapshots, and the re-plan below
-                    # must reason about that fresher frame, not the stale one.
+                    # `images` is reassigned to what _verify() returns: the photo the
+                    # verdict rests on (today always the one that was passed in).
                     v_success, v_tag, v_reason, images = self._verify(
                         step, images, plan=plan, step_index=index, stop_reason=reason or "")
                     vis = "SUCCESS" if v_success else ("UNCLEAR" if v_tag == UNCLEAR_TAG else "FAIL")
@@ -2620,12 +2700,6 @@ class Orchestrator:
                 if conflict:
                     self.emit("log", level="WARN", message=f"Rozpor důkazů u kroku '{step}': {conflict}")
 
-                att_num = len(self.results) + 1
-                # Snímky se ukládají až tady, protože teprve teď je známé
-                # číslo pokusu — a hlavně: `images` už drží ty snímky, na
-                # kterých verdikt doopravdy stojí (po [unclear] se
-                # přesnímkovává, viz _verify).
-                image_paths = self._keep_images(f"a{att_num:03d}", images)
                 # phys/vis/conflict are recorded per attempt on purpose: the
                 # thesis compares an orchestrated scheme against a monolithic
                 # one, and "how often did the two evidence channels disagree,

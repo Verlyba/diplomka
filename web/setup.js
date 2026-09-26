@@ -127,6 +127,9 @@ inspektora, pokud níže nevyplníš cílový stav."
         <label class="checkline" title="Krok vrací rameno do known/bezpečné pozice zvenčí libovolného stavu. Dokončení se pak ověřuje fyzicky — klouby se přestanou hýbat (Protokol A) — místo aby o tom rozhodovala jen fotka pro VLM, která u 'je rameno doma?' často neumí rozhodnout.">
           <input class="reset" type="checkbox" ${step.reset ? 'checked' : ''}> reset
         </label>
+        <label class="checkline" title="Krok přenese držený předmět a pustí ho (u nás carry_cube). Rameno dojede nad cíl DŘÍV, než se gripper otevře, takže samotné 'rameno dosedlo' (Protokol A) krok ukončilo s kostkou pořád v čelistech — 7 z 17 kroků v telemetrii z 25. 9. Se zaškrtnutým „pustit“ Protokol A nesmí krok ukončit, dokud gripper předmět svírá; krok končí, až zátěž gripperu spadne a gripper se zastaví (release_detect.py), a tohle pustění je i fyzický důkaz pro ověření kroku. Nezaškrtnuté = chování jako dřív.">
+          <input class="release" type="checkbox" ${step.release ? 'checked' : ''}> pustit
+        </label>
       </div>
       <span class="model-badge" data-badge-for="${escapeAttr(step.slug || '')}" title="Stav se zjišťuje…">…</span>
       <button type="button" class="btn-doc btn-step-modal ${docBtnClass}" title="${escapeAttr(docBtnTitle)}">📄</button>
@@ -157,6 +160,9 @@ u compute_step_timeouts.py v sekci 5, nebo si ho tady přepiš ručně."
     });
     row.querySelector('.reset').addEventListener('change', (e) => {
       cfg.steps[i].reset = e.target.checked; isFormDirty = true;
+    });
+    row.querySelector('.release').addEventListener('change', (e) => {
+      cfg.steps[i].release = e.target.checked; isFormDirty = true;
     });
     row.querySelector('.hint').addEventListener('input', (e) => {
       const v = e.target.value.trim();
@@ -482,7 +488,7 @@ let isFormDirty = false;
 
   document.getElementById('add-step').addEventListener('click', () => {
     cfg.steps = cfg.steps || [];
-    cfg.steps.push({ slug: '', description: '', grasp: false, reset: false });
+    cfg.steps.push({ slug: '', description: '', grasp: false, reset: false, release: false });
     renderSteps(); render();
     isFormDirty = true;
   });

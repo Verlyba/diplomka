@@ -119,7 +119,7 @@
       </div>
       <div class="note">Čtyři zprávy stojí za zvláštní pozornost, protože v nich je celé jádro
         schématu: <code class="inline">SET_TASK</code> nese příznaky
-        <code class="inline">|grasp</code> / <code class="inline">|reset</code>, podle kterých
+        <code class="inline">|grasp</code> / <code class="inline">|reset</code> / <code class="inline">|release</code>, podle kterých
         daemon vybere ukončovací protokol; <code class="inline">[STATUS] TASK_DONE</code> nese
         <b>důvod</b> ukončení, ze kterého orchestrátor odvodí fyzický důkaz; dotaz na inspektora
         obsahuje <b>i ten fyzický důkaz</b>, aby uměl rozlišit, co kamera nevidí; a
@@ -238,7 +238,7 @@
               <code class="inline">episode_time_s</code>. Když daemon mezitím umře (zaseklý
               sériový port), jednou se restartuje a krok se zkusí znovu — jeden hardwarový zádrhel
               nemá vynulovat celý pokus.
-              <span class="k">SET_TASK:&lt;krok&gt;|grasp|reset|timeout=N</span></div>
+              <span class="k">SET_TASK:&lt;krok&gt;|grasp|reset|release|timeout=N</span></div>
           </div>
           <div class="arrow">▼</div>
           <div class="node decision">
@@ -284,7 +284,9 @@
               <b>fyzické důkazy</b> (jak krok skončil, co říká zátěž) — aby uměl rozlišit, co
               kamera nevidí. Vrací odůvodnění, <code class="inline">GOAL: yes/no</code> k celkovému
               cíli a značku. <code class="inline">[unclear]</code> znamená „z tohohle snímku to
-              nepoznám", ne „selhalo to": pořídí se <b>nový snímek</b> a dotaz se jednou zopakuje.
+              nepoznám", ne „selhalo to": dotaz se <b>neopakuje</b> (opakování s novým snímkem se
+              od 2026-09-26 nedělá) a o kroku bez fyzického důkazu rozhodne pravidlo
+              <code class="inline">uncertain</code> níže.
               Vypnutý inspektor (<code class="inline">skip_inspector</code>) dává
               <code class="inline">SKIPPED</code> — to je experimentální podmínka a je záměrně
               odlišené od <code class="inline">NOIMG</code>, což je rozbitá kamera.
@@ -420,8 +422,8 @@
       </div>
       <div class="note"><b>Proč je <code class="inline">uncertain</code> zvlášť a ne prostě
         selhání.</b> Ve dvou vyznačených buňkách <b>žádný kanál netvrdí, že krok dopadl špatně</b>
-        — fyzika pro tenhle typ kroku signál nemá a kamera říká „z tohohle snímku to nepoznám"
-        (a nový snímek už se zkusil). Zapsat to jako selhání by znamenalo vyrobit negativní důkaz
+        — fyzika pro tenhle typ kroku signál nemá a kamera říká „z tohohle snímku to nepoznám".
+        Zapsat to jako selhání by znamenalo vyrobit negativní důkaz
         z chybějícího: zkreslí to data, tvrdí to plánovači něco, co nikdo nenaměřil, a utratí
         volání pomalé vrstvy za situaci, ve které plánovač nedostane <i>žádnou</i> novou informaci.
         Proto se místo toho krok jednou zopakuje bez CEO. <code class="inline">success</code>
@@ -452,7 +454,16 @@
             dozavírají. <b>U kroku <code class="inline">grasp</code> ale samotné „klid" krok
             neukončí</b> — „klid" tu rozliší dokončené sevření od zastavení s prázdným gripperem
             stejně málo jako druhé; slouží jen jako doplňková informace v telemetrii. O konci
-            úchopového kroku rozhoduje výhradně Protokol B nebo časový limit.</td>
+            úchopového kroku rozhoduje výhradně Protokol B nebo časový limit.
+            <b>Krok <code class="inline">release</code></b> (přenese držený předmět a pustí ho)
+            je zrcadlový případ úchopu: rameno dojede nad cíl dřív, než se gripper otevře, takže
+            samotné „rameno dosedlo" ukončilo krok s předmětem pořád v čelistech (telemetrie z
+            25. 9.: 7 ze 17 kroků <code class="inline">carry_cube</code>, u dalšího gripper
+            právě začínal otevírat). Protokol A proto <b>nesmí ukončit krok, dokud gripper předmět
+            svírá</b> (zátěž na plató nad 66 % limitu protokolu B); krok končí, až zátěž spadne
+            pod 50 % limitu a gripper se zastaví — Protokol B v obráceném čtení, viz
+            <code class="inline">release_detect.py</code>. Když se v kroku nic nesevřelo, Protokol A
+            funguje jako dřív.</td>
         </tr>
         <tr>
           <td>… jednotka a dva prahy</td>
@@ -591,7 +602,7 @@
         <tr><td>run_id</td><td>Identifikátor běhu. Stejný nese název záznamu i složka snímků, takže se k sobě nemusí dohledávat podle času.</td></tr>
         <tr><td>success, error, duration_s</td><td>Hlavní měřená veličina, případná chyba a délka běhu.</td></tr>
         <tr><td>goal_early_exit</td><td>Běh skončil proto, že inspektor viděl splněný cíl dřív, než plán došel — tyhle běhy jde při analýze odlišit nebo odfiltrovat.</td></tr>
-        <tr><td>steps[]</td><td>Jeden záznam na <b>pokus</b> (ne na krok plánu): krok, verdikt, značka, důvod ukončení, odůvodnění inspektora, <code class="inline">phys</code> / <code class="inline">vis</code> / <code class="inline">conflict</code> zvlášť, <code class="inline">outcome</code>, <code class="inline">reflex_retry</code> a časové okno <code class="inline">t_start</code> / <code class="inline">t_end</code> a <code class="inline">images</code> — cesty ke snímkům, na kterých verdikt tohoto pokusu doopravdy stojí (po <code class="inline">[unclear]</code> se přesnímkovává, takže to jsou ty novější).</td></tr>
+        <tr><td>steps[]</td><td>Jeden záznam na <b>pokus</b> (ne na krok plánu): krok, verdikt, značka, důvod ukončení, odůvodnění inspektora, <code class="inline">phys</code> / <code class="inline">vis</code> / <code class="inline">conflict</code> zvlášť, <code class="inline">outcome</code>, <code class="inline">reflex_retry</code> a časové okno <code class="inline">t_start</code> / <code class="inline">t_end</code> a <code class="inline">images</code> — cesty ke snímkům, na kterých verdikt tohoto pokusu doopravdy stojí (u běhů před 2026-09-26 se po <code class="inline">[unclear]</code> přesnímkovávalo, takže to jsou ty novější).</td></tr>
         <tr><td>initial_images</td><td>Snímky výchozí scény — ty, ze kterých plánoval CEO úvodní plán.</td></tr>
         <tr><td>plan_checks[]</td><td>Jeden záznam na každý plán: co plánovač navrhl, co říkalo čidlo, byl-li rozpor a změnila-li výzva jeho názor.</td></tr>
         <tr><td>done_checks[]</td><td>Jeden záznam na každé tvrzení „cíl je splněný": verdikt inspektora, jeho odůvodnění, trval-li plánovač na svém a co naplánoval potom.</td></tr>

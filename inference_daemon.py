@@ -12,7 +12,9 @@ same execution stack — only the loaded weights differ.
 
 stdin commands
     SET_POLICY:<path>   hot-swap weights, keeping robot + cameras connected
-    SET_TASK:<task>     start executing a task (policy is conditioned on it)
+    SET_TASK:<task>[|grasp][|reset][|release][|timeout=N]
+                        start executing a task (policy is conditioned on it);
+                        the flags choose how the step is recognised as done
     SNAP                emit one base64 JPEG of the current camera frame
     STOP                freeze motors, back to WAITING
     QUIT                exit
@@ -36,6 +38,10 @@ Step termination (why a step ends without anybody telling it to):
                  (contact with an object), used for grasping steps so the
                  policy does not keep squeezing. Reads Present_Load or
                  Present_Current, whichever the hardware actually populates.
+                 For |release steps the same load is read the other way round:
+                 the step is done when a gripped load has GONE and the gripper
+                 stopped (release_detect.py), and Protocol A may not end it
+                 while the object is still gripped.
 Once a step ends (either protocol, a timeout, or an explicit STOP) the arm's
 current position is captured and re-issued every tick until the next SET_TASK
 (see freeze_robot()) — otherwise whatever the orchestrator's LLM/VLM round
@@ -61,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from bus_guard import BusGuard
+from release_detect import FREE_FRAC, HOLD_FRAC, ReleaseTracker
 from temporal_ensemble import apply_temporal_ensemble
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
@@ -291,6 +298,10 @@ PROTOCOL_B_GRACE_S = 0.75      # seconds since SET_TASK before Protocol B is eva
 # makes the exact value of PROTOCOL_B_LOAD_LIMIT much less fragile, since a
 # transient can no longer satisfy patience just by climbing through it.
 PROTOCOL_B_STABILITY_SLOPE = 30.0  # |load_slope| must stay under this to count as "settled"
+# |release steps (carry the held object and let it go) end on the load LEAVING the
+# gripper, not on the arm arriving — the evidence and the rule are in release_detect.py.
+# Its two load bounds (HOLD_FRAC / FREE_FRAC of PROTOCOL_B_LOAD_LIMIT) live there too,
+# because the orchestrator needs the very same numbers to judge the step afterwards.
 use_protocol_a = True
 use_protocol_b = True
 # Pozn.: dřív tu byla záložní heuristika GRASP_WORDS, která úchopový krok
@@ -304,6 +315,8 @@ state = "WAITING"
 active_task = ""
 active_is_grasp = False   # ukončovat krok protokolem B (sevření objektu)?
 active_is_reset = False   # protokol A měří fyzický klid (rychlost), ne odstup od predikce?
+active_is_release = False  # krok končí až tím, že gripper předmět pustí (viz release_detect.py)
+_release_tracker: ReleaseTracker | None = None   # vzniká v main() až po načtení prahů z příkazové řádky
 robot = None
 policy = None
 preprocessor = None
@@ -755,7 +768,7 @@ def freeze_robot() -> None:
 # ── stdin command loop ──────────────────────────────────────────────────────
 
 def stdin_reader(max_seconds: float) -> None:
-    global state, active_task, active_is_grasp, active_is_reset, task_deadline, task_started_at, _any_task_started
+    global state, active_task, active_is_grasp, active_is_reset, active_is_release, task_deadline, task_started_at, _any_task_started
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -767,6 +780,7 @@ def stdin_reader(max_seconds: float) -> None:
             task = parts[0].strip()
             is_grasp = False
             is_reset = False
+            is_release = False
             timeout_s = 0.0
             for p in parts[1:]:
                 p = p.strip()
@@ -774,6 +788,8 @@ def stdin_reader(max_seconds: float) -> None:
                     is_grasp = True
                 elif p == "reset":
                     is_reset = True
+                elif p == "release":
+                    is_release = True
                 elif p.startswith("timeout="):
                     try:
                         timeout_s = float(p[len("timeout="):])
@@ -788,6 +804,9 @@ def stdin_reader(max_seconds: float) -> None:
             active_task = task
             active_is_grasp = is_grasp
             active_is_reset = is_reset
+            active_is_release = is_release
+            if _release_tracker is not None:
+                _release_tracker.reset()
             _any_task_started = True
             if policy is not None and hasattr(policy, "reset"):
                 try:
@@ -799,7 +818,8 @@ def stdin_reader(max_seconds: float) -> None:
             task_started_at = time.time()
             state = "RUNNING"
             print(f"[STATUS] TASK_STARTED: {task}", flush=True)
-            _log_telemetry(event="task_started", task=task, is_grasp=is_grasp, is_reset=is_reset, timeout_s=eff_timeout)
+            _log_telemetry(event="task_started", task=task, is_grasp=is_grasp, is_reset=is_reset,
+                           is_release=is_release, timeout_s=eff_timeout)
 
         elif line.startswith("SET_POLICY:"):
             path = line[len("SET_POLICY:"):].strip()
@@ -832,8 +852,8 @@ def stdin_reader(max_seconds: float) -> None:
 # ── Main loop ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global state, active_task, active_is_grasp, active_is_reset, device, simulated, use_triggers
-    global use_protocol_a, use_protocol_b
+    global state, active_task, active_is_grasp, active_is_reset, active_is_release, device, simulated, use_triggers
+    global use_protocol_a, use_protocol_b, _release_tracker
     global PROTOCOL_A_THRESHOLD, PROTOCOL_A_TARGET_THRESHOLD, PROTOCOL_A_PATIENCE, PROTOCOL_A_GRASP_PATIENCE_EXTRA, PROTOCOL_A_GRACE_S, PROTOCOL_B_LOAD_LIMIT, PROTOCOL_B_PATIENCE, PROTOCOL_B_GRACE_S, PROTOCOL_B_STABILITY_SLOPE, TEMPORAL_ENSEMBLE_COEFF
     global idle_load_baseline, _baseline_samples, _load_history, _telemetry_log_fh
 
@@ -931,6 +951,14 @@ def main() -> None:
     PROTOCOL_B_PATIENCE = args.protocol_b_patience
     PROTOCOL_B_GRACE_S = args.protocol_b_grace
     PROTOCOL_B_STABILITY_SLOPE = args.protocol_b_stability
+    # After the thresholds above are final: the tracker's bounds are derived from
+    # PROTOCOL_B_LOAD_LIMIT, and its patiences/stillness reuse Protocol A/B's own.
+    _release_tracker = ReleaseTracker(
+        hold_rise=HOLD_FRAC * PROTOCOL_B_LOAD_LIMIT,
+        free_rise=FREE_FRAC * PROTOCOL_B_LOAD_LIMIT,
+        hold_patience=PROTOCOL_B_PATIENCE,
+        settle_ticks=PROTOCOL_A_PATIENCE,
+        still_delta=PROTOCOL_A_THRESHOLD)
 
     def _cam_entry(name: str, index: str, width: int, height: int, fps: int) -> dict:
         try:
@@ -1031,6 +1059,7 @@ def main() -> None:
             settle_patience = PROTOCOL_A_PATIENCE
             grasp_hold = 0
             prev_joints = None
+            _release_tracker.reset()
             _load_history.clear()
             if not simulated and robot is not None:
                 try:
@@ -1144,6 +1173,11 @@ def main() -> None:
             # "hasn't started yet" as "already at the predicted target" — the
             # first predicted action is right next to the current pose.
             grace_elapsed_a = (time.time() - task_started_at) >= PROTOCOL_A_GRACE_S
+            # How far the gripper alone moved since last tick — a |release step is
+            # not finished until it has stopped too (see release_detect.py).
+            grip_step = (abs(float(joints[-1]) - float(prev_joints[-1]))
+                         if prev_joints is not None and prev_joints.size == joints.size
+                         else float("inf"))
             prev_joints = joints.copy()
             settle_patience = PROTOCOL_A_PATIENCE + (PROTOCOL_A_GRASP_PATIENCE_EXTRA if active_is_grasp else 0)
 
@@ -1186,11 +1220,23 @@ def main() -> None:
             load_settled = abs(load_slope) < PROTOCOL_B_STABILITY_SLOPE
             over_limit = baseline_ready and grace_elapsed and rise > PROTOCOL_B_LOAD_LIMIT and load_settled
             grasp_hold = grasp_hold + 1 if over_limit else 0
+            # |release steps: has the gripper let go of what it carried? Same
+            # evidence guards as Protocol B (baseline known, startup transient
+            # over) plus not on a tick whose robot I/O failed (repeated readings).
+            if active_is_release and use_protocol_b and baseline_ready and grace_elapsed and not obs_failed:
+                _release_tracker.update(rise, grip_step, load_settled)
+            release_holding = active_is_release and use_protocol_b and _release_tracker.holding
+            release_done = active_is_release and use_protocol_b and _release_tracker.released
             if use_triggers and use_protocol_b and active_is_grasp and grasp_hold >= PROTOCOL_B_PATIENCE:
                 reason = (f"Protokol B (zátěž gripperu {load:.0f}, nárůst {rise:.0f} "
                           f"nad klid {baseline:.0f} > limit {PROTOCOL_B_LOAD_LIMIT:.0f}, "
                           f"usazeno slope {load_slope:.0f}, drženo {grasp_hold}/{PROTOCOL_B_PATIENCE} snímků)")
-            elif use_triggers and use_protocol_a and not active_is_grasp and settled >= settle_patience and grace_elapsed_a:
+            elif use_triggers and release_done:
+                reason = (f"Protokol B (uvolnění: zátěž gripperu klesla na {load:.0f}, nárůst {rise:.0f} "
+                          f"pod {_release_tracker.free_rise:.0f} po sevření nad {_release_tracker.hold_rise:.0f}, "
+                          f"gripper stojí {_release_tracker.settle_ticks}/{_release_tracker.settle_ticks} snímků)")
+            elif (use_triggers and use_protocol_a and not active_is_grasp and not release_holding
+                  and settled >= settle_patience and grace_elapsed_a):
                 max_d = float(np.max(deltas)) if deltas.size else 0.0
                 basis = "klouby se přestaly hýbat" if use_velocity_settle else "klouby dosedly na predikci"
                 reason = f"Protokol A ({basis}, max pohyb {max_d:.5f}/tik, drženo {settled}/{settle_patience})"
@@ -1211,6 +1257,8 @@ def main() -> None:
                                loop_overruns=sum(1 for x in _loop if x > period * 1000 * 1.05))
                 loop_ms.clear()
                 state, active_task, active_is_grasp, active_is_reset, settled, grasp_hold = "WAITING", "", False, False, 0, 0
+                active_is_release = False
+                _release_tracker.reset()
                 prev_joints = None
 
         # Telemetry ~5x per second
@@ -1237,6 +1285,8 @@ def main() -> None:
                 f"trend:{(load_trend if state == 'RUNNING' else 0.0):.0f}",
                 flush=True)
             _log_telemetry(event="tick", state=state, task=active_task, is_grasp=active_is_grasp, is_reset=active_is_reset,
+                           is_release=active_is_release,
+                           release_gripped=_release_tracker.gripped, release_released=_release_tracker.released,
                            load=load, baseline=(idle_load_baseline if idle_load_baseline is not None else None),
                            rise=(load - idle_load_baseline) if idle_load_baseline is not None else None,
                            settled=settled, protocol_a_patience=settle_patience,
