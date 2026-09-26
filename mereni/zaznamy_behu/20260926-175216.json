@@ -1,0 +1,284 @@
+{
+  "run_id": "20260926-175216",
+  "success": true,
+  "error": "",
+  "duration_s": 66.2,
+  "steps": [
+    {
+      "attempt": 1,
+      "replan": 0,
+      "step": "catch_cube",
+      "success": true,
+      "tag": "SUCCESS",
+      "reason": "Protokol B (zátěž gripperu 421, nárůst 421 nad klid 0 > limit 300, usazeno slope 0, drženo 3/3 snímků)",
+      "insp_reason": "The robot appears to be holding a green cube in its gripper, which aligns with the expected outcome of Step 1.",
+      "phys": "CONFIRM",
+      "vis": "SUCCESS",
+      "conflict": "",
+      "outcome": "success",
+      "reflex_retry": false,
+      "t_start": 1790437974.922,
+      "t_end": 1790437980.63,
+      "images": [
+        "images/20260926-175216/a001_1.jpg",
+        "images/20260926-175216/a001_2.jpg"
+      ]
+    },
+    {
+      "attempt": 2,
+      "replan": 0,
+      "step": "carry_cube",
+      "success": true,
+      "tag": "SUCCESS",
+      "reason": "Protokol B (uvolnění: zátěž gripperu klesla na 65, nárůst 65 pod 150 po sevření nad 198, gripper stojí 7/7 snímků)",
+      "insp_reason": "The green cube is visible in the red bowl, but it appears to be partially inside rather than fully settled at the bottom.",
+      "phys": "CONFIRM",
+      "vis": "SUCCESS",
+      "conflict": "",
+      "outcome": "success",
+      "reflex_retry": false,
+      "t_start": 1790437985.646,
+      "t_end": 1790437989.127,
+      "images": [
+        "images/20260926-175216/a002_1.jpg",
+        "images/20260926-175216/a002_2.jpg"
+      ]
+    },
+    {
+      "attempt": 3,
+      "replan": 0,
+      "step": "homing",
+      "success": true,
+      "tag": "SUCCESS",
+      "reason": "Protokol A (klouby se přestaly hýbat, max pohyb 0.00000/tik, drženo 7/7)",
+      "insp_reason": "The gripper appears to be in its default idle pose with no visible load.",
+      "phys": "CONFIRM",
+      "vis": "SUCCESS",
+      "conflict": "",
+      "outcome": "success",
+      "reflex_retry": false,
+      "t_start": 1790437993.372,
+      "t_end": 1790437998.419,
+      "images": [
+        "images/20260926-175216/a003_1.jpg",
+        "images/20260926-175216/a003_2.jpg"
+      ]
+    }
+  ],
+  "plan_checks": [
+    {
+      "plan": [
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "holding": null,
+      "conflict": "",
+      "corrected": false
+    }
+  ],
+  "done_checks": [],
+  "initial_images": [
+    "images/20260926-175216/init_1.jpg",
+    "images/20260926-175216/init_2.jpg"
+  ],
+  "plan_history": [
+    {
+      "plan": [
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "reasoning": "The green cube needs to be picked up from the white board and placed into the red bowl. After placement, the homing skill must be executed as per the goal description.",
+      "first_attempt": 1,
+      "repeat_of": null
+    }
+  ],
+  "scene_checks": [],
+  "llm_calls": [
+    {
+      "layer": "planner",
+      "purpose": "initial_plan",
+      "model": "google/gemma-4-e4b",
+      "t": 1790437958.325,
+      "s": 15.194,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437980.634,
+      "s": 5.009,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437989.131,
+      "s": 4.238,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437998.425,
+      "s": 3.885,
+      "ok": true,
+      "images": 2
+    }
+  ],
+  "policy_swaps": [
+    {
+      "step": "catch_cube",
+      "phase": "preload",
+      "t": 1790437973.519,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "preload",
+      "t": 1790437973.519,
+      "s": 0.749
+    },
+    {
+      "step": "homing",
+      "phase": "preload",
+      "t": 1790437974.267,
+      "s": 0.655
+    },
+    {
+      "step": "catch_cube",
+      "phase": "step",
+      "t": 1790437974.922,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "step",
+      "t": 1790437985.646,
+      "s": 0.001
+    },
+    {
+      "step": "homing",
+      "phase": "step",
+      "t": 1790437993.372,
+      "s": 0.0
+    }
+  ],
+  "cost_summary": {
+    "planner_calls": 1,
+    "planner_s": 15.19,
+    "inspector_calls": 3,
+    "inspector_s": 13.13,
+    "policy_swaps": 6,
+    "policy_swap_s": 1.41,
+    "skill_s": 14.24,
+    "run_s": 66.2,
+    "orchestration_s": 29.73,
+    "unaccounted_s": 22.24
+  },
+  "config": {
+    "python": "C:/Users/green/miniconda3/envs/lerobot/python.exe",
+    "device": "cuda",
+    "robot_type": "so101_follower",
+    "robot_port": "COM3",
+    "robot_id": "my_follower_arm",
+    "teleop_type": "so101_leader",
+    "teleop_port": "COM4",
+    "teleop_id": "my_leader_arm",
+    "camera_name": "top",
+    "camera_index": "0",
+    "camera_width": 640,
+    "camera_height": 480,
+    "camera_fps": 30,
+    "camera2_name": "wrist",
+    "camera2_index": "1",
+    "camera2_width": 640,
+    "camera2_height": 480,
+    "camera2_fps": 30,
+    "fps": 30,
+    "data_strategy": "split",
+    "task_slug": "diplomka_2",
+    "task_description": "Robot se nachází na bílé desce se statickým osvětlením, na desce je jedna zelená kostka a jedna červená miska, cílem úlohy je umístit tuto kostku z desky do misky.",
+    "scene_description": "Rameno SO-101 na stole, před ním kostka a krabice, kamera shora.",
+    "episodes": 1,
+    "resume_episodes": 1,
+    "episode_time_s": 20,
+    "reset_time_s": 8,
+    "policy_type": "act",
+    "train_steps": 50000,
+    "batch_size": 8,
+    "save_freq": 5000,
+    "output_root": "outputs/training",
+    "lm_url": "http://localhost:1234/v1",
+    "llm_model": "google/gemma-4-e4b",
+    "vlm_model": "qwen2.5-vl-7b-instruct",
+    "max_replans": 5,
+    "planner_vision": true,
+    "planner_reasoning": true,
+    "plan_state_check": true,
+    "done_visual_check": true,
+    "uncertain_retry": true,
+    "planner_memory": true,
+    "scene_change_check": true,
+    "save_images": true,
+    "protocol_a_enabled": true,
+    "protocol_a_threshold_rad": 0.5,
+    "protocol_a_target_threshold_rad": 5.25,
+    "protocol_a_patience": 7,
+    "protocol_a_grasp_patience_extra": 5,
+    "protocol_a_grace_s": 1,
+    "protocol_b_enabled": true,
+    "protocol_b_limit_ma": 300,
+    "protocol_b_patience": 3,
+    "protocol_b_grace_s": 0.75,
+    "protocol_b_deadband_frac": 0.25,
+    "protocol_b_stability_slope": 30,
+    "holding_limit_ma": 30,
+    "calibration_min_runs": 3,
+    "gripper_state_in_context": true,
+    "temporal_ensemble": false,
+    "temporal_ensemble_coeff": 0.01,
+    "baseline_policy_path": "outputs\\training\\diplomka_2_120ep_act",
+    "skip_planner": false,
+    "skip_inspector": false
+  },
+  "catalog": [
+    {
+      "slug": "catch_cube",
+      "description": "Robot vyjede a z libovolné pozice zamíří směrem k zelené kostce, kterou následně uchopí čeelistmi.",
+      "grasp": true,
+      "reset": false,
+      "release": false,
+      "policy_path": "outputs\\training\\diplomka_2_catch_cube_120ep_act",
+      "verify_hint": "Robot drží zelenou kostku v čelistech",
+      "train_steps": 45600
+    },
+    {
+      "slug": "carry_cube",
+      "description": "Robot drží v čelistech zelenou kostku a přenáší ji nad červenou misku, do které ji upouští.",
+      "grasp": false,
+      "reset": false,
+      "release": true,
+      "policy_path": "outputs\\training\\diplomka_2_carry_cube_120ep_act",
+      "verify_hint": "Robot je nad červenou miskou a kostka je umístěna v červené misce.",
+      "train_steps": 27600
+    },
+    {
+      "slug": "homing",
+      "description": "Robot z libovolné pozice najíždí zpět do té výchozí",
+      "grasp": false,
+      "reset": true,
+      "release": false,
+      "policy_path": "outputs\\training\\diplomka_2_homing_120ep_act",
+      "verify_hint": "Robot je ve výchozí pozici.",
+      "train_steps": 76800
+    }
+  ]
+}

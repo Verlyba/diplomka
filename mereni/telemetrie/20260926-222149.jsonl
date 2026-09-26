@@ -1,0 +1,2 @@
+{"event": "daemon_start", "policy_path": "outputs\\training\\diplomka_2_homing_60ep_act", "protocol_a_threshold": 0.5, "protocol_a_target_threshold": 5.25, "protocol_a_patience": 7, "protocol_a_grace_s": 1.0, "temporal_ensemble_coeff": null, "protocol_b_limit": 300.0, "protocol_b_patience": 3, "protocol_b_grace_s": 0.75, "t": 1790454109.0240765}
+{"event": "task_started", "task": "homing", "is_grasp": false, "is_reset": true, "is_release": false, "timeout_s": 20.0, "t": 1790454109.0240765}

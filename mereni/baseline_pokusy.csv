@@ -1,0 +1,19 @@
+ID,Datum,Cas,Model / checkpoint,Epizod,Doba pokusu (s),POCITA SE?,VAS USUDEK - USPECH?,Poznamka,radek_v_sesitu
+20260926-184956#1,2026-09-26,18:49,diplomka_2_120ep_act,120,18.5,ANO,ANO,"Robot se mirne zasekl o misku, ale task uspesne dokoncil",5
+20260926-185206#1,2026-09-26,18:52,diplomka_2_120ep_act,120,38.6,ANO,NE,"Robot netrefil kostku a pak pouze popojížděl dál, ukončeno po čase uživatelem.",6
+20260926-185318#1,2026-09-26,18:53,diplomka_2_120ep_act,120,26.5,ANO,NE,"Robot najel ke kostce a omylem ji odstřelil stranou na plochu, poté se nedokázal zotavit a pokoušel se úkol dokončit. Ukončeno mnou.",7
+20260926-185530#1,2026-09-26,18:55,diplomka_2_120ep_act,120,10.6,NE,NE,"Nevím zda se to uložilo jako pokus, ale robot měl přetížený motor, takže se ani nespustil.",8
+20260926-185704#1,2026-09-26,18:57,diplomka_2_120ep_act,120,23.3,ANO,ANO,Robot se trefil,9
+20260926-185846#1,2026-09-26,18:58,diplomka_2_120ep_act,120,16.3,NE,NE,"zakladna se posunula, pokus nepocitat",10
+20260926-190024#1,2026-09-26,19:00,diplomka_2_120ep_act,120,40,ANO,NE,Robot špatně najel ke kostce a pak ji neuspesne jen odsouval. Ukonceno mnou.,11
+20260926-190215#1,2026-09-26,19:02,diplomka_2_120ep_act,120,25.4,ANO,NE,Robot špatně najel ke kostce a pak ji neuspesne jen odsouval. Ukonceno mnou.,12
+20260926-190328#1,2026-09-26,19:03,diplomka_2_120ep_act,120,13.8,ANO,NE,Robot špatně najel ke kostce a pak ji neuspesne jen odsouval a shodil z pracovni plochy. Ukonceno mnou.,13
+20260926-190437#1,2026-09-26,19:04,diplomka_2_120ep_act,120,16.9,ANO,ANO,Vše správně,14
+20260926-190546#1,2026-09-26,19:05,diplomka_2_120ep_act,120,30.8,ANO,NE,"Model špatně najel, tentokrát se ani nepřiblížil, stejně jako v tomto místě orchestrace, málo dat.",15
+20260926-190737#1,2026-09-26,19:07,diplomka_2_120ep_act,120,27.2,ANO,NE,Robot špatně najel ke kostce a pak ji neuspesne jen odsouval. Ukonceno mnou.,16
+20260926-190910#1,2026-09-26,19:09,diplomka_2_120ep_act,120,17.2,ANO,ANO,Vše správně,17
+20260926-191013#1,2026-09-26,19:10,diplomka_2_120ep_act,120,30,ANO,ANO,Model se trefil,18
+20260926-191132#1,2026-09-26,19:11,diplomka_2_120ep_act,120,18.5,ANO,NE,Robot špatně najel ke kostce a pak ji neuspesne jen odsouval. Ukonceno mnou.,19
+20260926-191257#1,2026-09-26,19:12,diplomka_2_120ep_act,120,49.5,ANO,ANO,"Model se trefil, dal kostku do misky a pak nad ní dlouho stál a snažil se ji uchytit, proto tak extrémně dlouhý čas při úspěchu.",20
+20260926-191504#1,2026-09-26,19:15,diplomka_2_120ep_act,120,21.2,ANO,NE,Model si správně najel ke kostce ale špatně ji uchytil. Ukončeno mnou,21
+20260926-191623#1,2026-09-26,19:16,diplomka_2_120ep_act,120,15.5,ANO,ANO,"Stejně jako při posledním běhu orchestrace v CS 15 model v nejvíce krajním bodě správně uchytil, na druhé straně v tomto bodě nedokázal kvůli málo datům ani najet.",22

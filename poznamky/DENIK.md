@@ -607,3 +607,237 @@ není ověřené: starý model naplánuje celý dojezd naráz z prvního čisté
 a odjede ho naslepo, kdežto s krátkým chunkem se přeplánovává z mezisnímků za rychlého pohybu
 (zakrytí kostky ramenem, neobvyklé úhly zápěstní kamery), a chyba se tak kumuluje. `chunk_size=15`
 byl navíc zvolen jen podle podílu paddingu, druhá strana kompromisu se nezvažovala.
+
+## 2026-09-25 (noc) — `carry_cube` končí s kostkou v čelistech: krok s příznakem `release`
+
+**Pozorování (uživatel):** carry_cube často nestihne kostku pustit a zůstane stát nad miskou;
+inspektor to někdy pozná a někdy ne.
+
+**Příčina (ověřeno v telemetrii, ne odhad).** Běžný krok (`carry_cube` nemá příznak `grasp` ani
+`reset`) ukončuje Protokol A, když je 5 kloubů ramene do `protocol_a_target_threshold_rad` od
+predikovaného cíle po `protocol_a_patience` tiků. Gripper se do toho záměrně nepočítá. Rameno ale
+dojede nad misku DŘÍV, než se gripper otevře — přesně stejná situace, jaká je u úchopu popsaná v
+komentáři v `inference_daemon.py` (rameno stojí dřív, než čelisti dozavírají). Protokol A tedy
+vystřelil, `freeze_robot()` zmrazil pózu a kostka zůstala sevřená.
+Ze 18 kroků carry_cube ukončených Protokolem A (telemetrie 19.–25. 9.): **7 skončilo s kostkou
+sevřenou** (zátěž gripperu na konci 280–488, gripper 17–19°), **4 uprostřed pouštění** (zátěž už
+klesala, gripper se ještě hýbal; u `20260925-204909` byl gripper na 19,9° a cíl na 28,2°, tedy
+kostka ještě v čelistech), 2 až po puštění a 5 bez sevření na začátku (opakovaný pokus, gripper
+už byl otevřený). Staré běhy z 6. 9. (Protokol A tehdy pro tenhle typ kroku nikdy nevystřelil, krok
+běžel do limitu 20 s) kostku pustily ve 13 ze 14 pokusů, zátěž při tom spadla z 213–500 na
+0–101. Když se předčasně ukončený krok zopakoval, gripper se otevřel do 1,0 s — model tedy pouštět
+umí, jen ho krok předtím utnul.
+
+**Vedlejší nález, který s tím souvisí — příznak `success` běhu nadhodnocuje.** U 13 běhů, které
+systém označil za úspěšné a k nimž jsou uložené snímky (od 6. 9.), jsem ručně prošel závěrečné
+snímky z horní kamery i z kamery na gripperu. V 9 leží kostka v misce, ve 4 je pořád sevřená v
+čelistech nad okrajem: `20260919-204911`, `20260925-211035`, `20260925-213502`,
+`20260925-214347`. Inspektor u nich buď řekl `SUCCESS` (213502, 214347), nebo krok označil za
+selhání a závěrečná kontrola cíle (`done_checks`) ho přesto potvrdila (204911, 211035). Horní
+kamera nerozliší „kostka drží nad miskou“ od „kostka leží v misce“. **Tohle je můj vizuální
+odhad ze snímků, ne měření — před použitím v práci ho potvrď vlastníma očima.**
+
+**Oprava.** Nový příznak kroku `release` (vedle `grasp` a `reset`), zaškrtávátko „pustit“ v
+Nastavení, `SET_TASK:<krok>|release`. Rozhodnutí je záměrně ve stejném duchu jako u úchopu — o
+způsobu ukončení rozhoduje zaškrtnutý příznak v konfiguraci, ne hádání podle názvu kroku.
+- `release_detect.py` (`ReleaseTracker`): „drží“ = zátěž nad 66 % limitu Protokolu B na PLATÓ
+  (ne rostoucí hrana) po `protocol_b_patience` tiků; „pustil“ = poté zátěž pod 50 % limitu a
+  zároveň se gripper přestal hýbat po `protocol_a_patience` tiků. Hranice leží v naměřené mezeře
+  (plató sevření nikdy pod 213, usazený uvolněný gripper nikdy nad 101; 143–165 se vyskytlo jen při
+  pohybu čelistí, což podmínka „gripper stojí“ vylučuje). Otevření gripperu o minimální úhel se
+  NEpožaduje: v `20260925-215320` se kostka pustila při posunu gripperu o 1,2° (zátěž 500 → 72) a
+  snímek z gripperu ji ukazuje v misce.
+- `inference_daemon.py`: dokud předmět „drží“ a nepustil, Protokol A krok ukončit nesmí; krok
+  končí `Protokol B (uvolnění: …)`. Když se v kroku nic nesevřelo, Protokol A funguje jako dřív.
+  Časový limit platí stále. Do telemetrie přibyla pole `is_release`, `release_gripped`,
+  `release_released`.
+- `orchestrator.py`: `release_evidence()` — uvolnění potvrzené démonem je fyzický CONFIRM, krok,
+  který skončil s pořád zatíženými čelistmi, je DENY, cokoli jiného NONE (rozhoduje kamera). Do
+  promptu plánovače i inspektora přibyla u release kroků věta, že předmět mezi čelistmi NENÍ
+  puštěný. Beze změny zůstala tabulka `fuse_evidence()` — inspektor smí DENY přebít jistým
+  `SUCCESS`, takže ten falešný `SUCCESS` u 213502/214347 může projít i s fyzickým DENY.
+- V `config.json`, `projects/diplomka_1.json` a `projects/diplomka_2.json` je `release: true`
+  u `carry_cube` (tyhle soubory jsou v `.gitignore`).
+
+**Ověření: pouze offline, na robotu NEotestováno.** Pravidlo bylo přehráno přes všechny
+carry_cube kroky z telemetrie (`tests/test_release_detect.py` používá skutečné křivky; přehrání je
+v 5 Hz, démon jede 30 Hz, takže se patience přepočítala na telemetrické tiky):
+- ze 11 kroků, které Protokol A ukončil, dokud kostka ještě držela nebo se pouštěla, by se
+  ukončení zablokovalo ve všech 11; ze 7 kroků skončených po puštění nebo bez sevření (5 + 2)
+  by se nezablokoval žádný;
+- u 7 z 14 starých kroků se tracker ozbrojil a puštění detekoval za 3,6–4,0 s, tedy v době,
+  kdy se gripper opravdu otevřel; u dalších 7 zátěž při přenosu nikdy nedosáhla plató nad 198
+  (kostka držená bez silného stisku, nebo krok začal s otevřeným gripperem), tracker se
+  neozbrojil a chování je jako dřív — **před těmito kroky oprava nechrání**.
+- simulovaný démon: příznak `|release` se přečte, telemetrie má nová pole, nic nespadlo.
+
+**Rizika / na co se dívat při prvním živém běhu.** (1) Když model po dojezdu gripper neotevře,
+krok poběží do časového limitu (u carry_cube výchozích 20 s), než přijde selhání — dřív skončil
+hned a selhání odhalil až inspektor. (2) Pokles zátěže bez pootevření gripperu (kostka vyklouzne
+uprostřed přenosu) se čte jako puštění; o tom, kam kostka spadla, pak rozhodne inspektor. (3)
+Změna mění měřicí přístroj: doby kroku `carry_cube` před a po tomhle datu nejsou srovnatelné
+(odhad: kroky poběží o 0,2–2 s déle, než původně končily, podle dob puštění 3,6–4,0 s ve starých bězích a předčasných konců ve 2,0–3,6 s). (4) Hranice 66 % / 50 % limitu jsou
+odvozené z jednoho typu kostky a jednoho gripperu.
+
+## 2026-09-26 — první ostré měření (120 epizod): přiřazení běhů k řádkům sešitu a co je pravda
+
+**Rozhodnutí uživatele: při rozporu mezi automatickým verdiktem systému (pole `success` v
+`runs/*.json`) a úsudkem uživatele platí úsudek uživatele.** Do Souhrnu v `zaznam_behu_2.xlsx` jde
+jen on (list Souhrn to tak říká už v záhlaví). Rozdíly jsou chyby systému, ne uživatele. Zároveň
+platí, že aplikace se během měření dál nemění (kód v `orchestrator.py`, `inference_daemon.py`,
+`server.py`, `web/` a `release_detect.py` je od tohoto data zamrzlý).
+
+**Rozsah měření a přiřazení k logům.** Sešit `zaznam_behu_2.xlsx`, vše na 120 epizodách.
+- Orchestrace `cs15` (`diplomka_2`): 16 započítaných běhů, `20260926-164147` … `180139`.
+- Orchestrace `cs100` (`diplomka_1`): 5 běhů, `20260926-180826` … `181830`, všechny s `POCITA SE?` = NE
+  (zkušební; prompt u prvních dvou ještě neobsahoval návrat do homingu).
+- Baseline (`diplomka_2_120ep_act`, tedy `cs15`): 18 pokusů, telemetrie `20260926-184956` … `191623`;
+  z toho 2 nepočítané (řádek 8 – přetížený motor, rameno se za 10,6 s pohnulo o 0,4°; řádek 10 –
+  posunutá základna).
+- Nezařazeno: 184825 (3 kratší pokusy před prvním řádkem), 191238 (démon bez úlohy), běh
+  `20260926-163206` (4. soubor dne; podle poznámek v řádku 5 tabulka začíná až 164147).
+- Přiřazení bylo ověřeno třemi nezávislými způsoby: poznámky uživatele sedí na logy (třetí úchop,
+  opakovaný homing, úspěch až po pátém re-plánu); polohy kostky u `cs100` řádků 21–25 opakují polohy
+  řádků 5, 6, 7, 14, 8 s odchylkou do 8 px (z úvodních snímků, detekce zelené kostky); u baseline je
+  řádek 8 jediný pokus bez pohybu ramene. Šestnáct poloh `cs15` je navzájem různých.
+- Podrobnosti řádek po řádku jsou v listu Kontrola v `zaznam_behu_2_doplneno.xlsx`.
+
+**Kde se systém a uživatel liší (4 z 21 běhů; mezi 16 započítanými `cs15` sedí verdikt 13× z 16).**
+Závěrečné snímky (horní kamera i zápěstí) jsem ručně prošel; uživatelův úsudek sedí u všech 21.
+- `20260926-165409` (systém NE, uživatel ANO): kostka je v misce, běh skončil chybou plánovače
+  „homing podruhé za sebou“, protože inspektor 2× chybně označil homing za selhání.
+- `20260926-174723` a `20260926-175015` (systém ANO, uživatel NE): fyzika u úchopu DENY (zátěž
+  nepřešla práh), přesto inspektor napsal „drží kostku“ → SUCCESS; přenos bez fyzického důkazu
+  (nic se nesevřelo), inspektor „gripper je v misce“ → SUCCESS. Kostka leží na desce mimo misku.
+- `20260926-181830` (`cs100`, systém ANO, uživatel NE): přenos potvrdila fyzika (uvolnění po dojezdu,
+  31 tiků klidu, gripper 40,7°), inspektor byl UNCLEAR, ale kostka spadla mimo misku (spodní okraj
+  desky). Pravidlo z 2026-09-25 říká jen „čelisti pustily“, ne „kam“. V započítaných datech `cs15`
+  se to nestalo (přenos rozhodnutý jen fyzikou + UNCLEAR je jen v řádku 22 a 25, oba `cs100`).
+- Systém tedy `cs15` nadhodnotil (12× ANO proti 11× ANO uživatele) a část jeho správných verdiktů
+  stojí na chybných důvodech; to je nález pro kapitolu o inspektorovi.
+
+**Homing chybně selhává při kostce v misce** (`163206` #3, `164147` #7, `165409` #9 a #10): inspektor
+píše „gripper drží předmět“, fyzika (protokol A) je CONFIRM, a protože při konfliktu CONFIRM + jistý
+FAIL rozhoduje inspektor, krok selže → další plán → zbytečné kroky. Ovlivňuje Dobu běhu a počet
+re-plánů, ne úsudek uživatele. **Zůstává jako známá vlastnost nástroje během měření, není opravena.**
+
+**Baseline.** Řádek 11 (`20260926-190024`) měl původně úsudek ANO, což odporovalo poznámce
+(„jen odsouval“) i telemetrii (žádné trvalé sevření, 40 s do ručního ukončení); uživatel uvedl, že
+ho opravil. `Doba pokusu` u baseline je čas od SET_TASK po poslední záznam telemetrie, tj. do chvíle,
+kdy uživatel daemon zastavil, takže u úspěchů zahrnuje stání po dokončení. Přesnější indicii dává
+okamžik, kdy se gripper naposledy pustil (mediánově ~10 s u úspěchů); je to odvozeno ze zátěže
+gripperu, není to důkaz. Konečná čísla patří do Souhrnu v sešitu, sem je nepíšu.
+
+**Pokrytí trénovacími daty v testovaných polohách** (z prvních snímků 120 demonstrací): všech 21
+poloh má demonstrace poblíž (nejbližší 3–22 px při velikosti kostky ~35 px). Nejřidší je řádek 12
+(levý dolní roh, 4 demonstrace do 60 px) a řádek 20 (protější horní roh, 5). Vysvětlení „málo
+trénovacích dat“ uvedené v poznámkách se tak potvrzuje u řádku 12, ale ne u řádku 14 (16 demonstrací
+do 60 px, běžné pokrytí). Řídký roh v řádku 20 uspěl na první pokus, stejně řídký v řádku 12 ani
+jednou. Nejhůř pokrytých 8 poloh mělo 3/8 úspěšných prvních úchopů (podle systému), nejlépe
+pokrytých 8 mělo 4/8; z 16 poloh to tedy žádný jasný vztah nevykazuje.
+
+## 2026-09-26 (večer) — dvě změny inspektora na přání uživatele: bez druhého dotazu, všechny snímky uložené
+
+Aplikace byla od začátku měření zamrzlá (viz předchozí záznam); uživatel výslovně požádal o tyhle
+dvě změny. **Měřicí přístroj se tím změnil: běhy pořízené po tomto zápisu nejsou v době kroku,
+počtu volání inspektora a ve vzácných případech i v rozhodnutí kroku srovnatelné s běhy z 26. 9.
+odpoledne až večer (`164147` … `181830`), které ještě měly druhý dotaz.** Už naměřená data tím
+neztrácejí platnost, jen jsou pořízená s předchozí verzí.
+
+**1. Inspektor se po `[unclear]` už neptá podruhé.** Dřív se po nejasném verdiktu pořídil nový
+snímek a VLM se zeptal znovu (`verify_step_resnapshot`). Z 21 běhů z 26. 9.: 27 opakování ze 132
+ověření kroků (20 %), 113 s celkem (5,4 s na běh, 2,6 % času). Po druhém pohledu se inspektor
+rozhodl v 19 z 27 případů (70 %), což ukazuje, že se snímek od prvního obvykle lišil (první se
+pořizuje hned po konci kroku, když se ještě usazuje rameno a padá kostka, a kamera má zpoždění);
+to je ale jen odvození, první snímky se neukládaly. V 20 z 27 případů už fyzika rozhodla
+(DENY/CONFIRM) a opakování ji ani jednou nepřebilo, takže nezměnilo výsledek kroku, jen znění
+důvodu pro plánovač. Rozhodnutí měnilo jen 7 případů bez fyzického důkazu (`carry_cube`, fyzika
+NONE): 3× z nich vyšlo `FAIL`, 4× zůstalo `[unclear]`. Teď jde `[unclear]` bez fyzického důkazu
+rovnou do pravidla `uncertain` (krok se jednou zopakuje bez CEO, `uncertain_retry`). Účel volání
+`verify_step_resnapshot` se ve starších záznamech `llm_calls` dál vyskytuje, nové ho nemají.
+Test: `tests/test_verify_single_pass.py`.
+
+**2. Každý snímek, který jde modelu, je uložený a dohledatelný.** Do každého záznamu v
+`llm_calls` přibylo pole `image_paths` (cesty k souborům ve stejném pořadí jako snímky, prázdný
+řetězec = snímek se nepodařilo uložit). Snímky, které už existují (pod pokusem `a00N`, jako
+výchozí scéna `init`, u kontroly cíle `done`), se jen dohledají podle obsahu, takže se nic
+neukládá dvakrát; co uložené nebylo, se uloží pod `call<číslo>_<účel>`. Kromě toho se snímky
+pokusu ukládají už před dotazem na inspektora (dřív až po něm), aby na ně volání ukazovalo.
+Týká se to všech modelů (plánovač i inspektor), protože jdou přes stejné místo. Nemění to
+rozhodování systému, jen záznam. Test: `tests/test_llm_call_images.py`.
+
+**Poznámka pro sešit:** u nových řádků `Orchestrace` doporučuji do Poznámky napsat „po odebrání
+re-snapshotu“ (nebo dát pole `image_paths`/absenci `verify_step_resnapshot` jako rozlišení verze),
+ať jsou dvě verze přístroje v datech vidět.
+
+## 2026-09-26 (noc) — první série s 60 epizodami; pád démona v běhu 221749 a upravená doba
+
+**Série 60ep (`diplomka_2_*_60ep_act`, orchestrace).** Řádky 26–42 sešitu `zaznam_behu_2_doplneno.xlsx`
+odpovídají běhům `20260926-212027` … `225113` v pořadí, řádek 35 běh nemá a řádek 36 je běh `221749`
+s pádem démona (uživatel to potvrdil); řádek 26 je běh zastavený uživatelem před prvním krokem. Přiřazení je ověřené vzorem úsudků ANO/NE, poznámkami
+i závěrečnými snímky. Série prochází polohy č. 1, 2, 3, 4, 6, 7, 8, 9, 10, 11 z 16 křížků
+(poloha č. 5, střed kostky ~(195, 307) px, chybí; poloha č. 8 je „mrtvý“ roh vlevo dole, kde
+neuspěl i `cs15` na 120 epizodách). Po doplnění všech 16 poloh: 8 úspěchů z 16 (50 %, Wilson 28–72 %) proti 11/16 (69 %, 44–86 %) u 120ep;
+Fisherův test p = 0,47, rozdíl není významný. Běh `220442` skončil chybou LM Studia
+`HTTP Error 400` po 2 re-plánech z 5 (uživatel řekl, že se neřeší).
+
+**Řádek 35 nemá záznam.** Žádný běh v `runs/` ani `telemetry/` mu neodpovídá; série pokrývá 15 z 16
+křížků a chybí č. 5, takže řádek 35 (ANO, „Podařilo se na první pokus. Paráda.“) patří vyloučením
+poloze 5. V sešitu je z něj jen Podmínka, Model a Epizod = 60 (aby se úsudek započítal).
+
+**Běh `20260926-221749` (60ep, poloha č. 10) skončil chybou před homingem.** Kroky `catch_cube` a
+`carry_cube` prošly na první pokus a kostka leží v misce (snímek `a002_1`). Před homingem se výměna
+modelu (`SET_POLICY`) nepotvrdila, po 180 s se démon restartoval a restartovaný démon spadl na
+`UnboundLocalError: deltas` (`inference_daemon.py:1276`); běh skončil `error: "Daemon neběží."`,
+`success: false`, uložená doba 262,6 s.
+- Příčina 1 (pravděpodobná, neprokázaná): dvě vlákna démona píšou na stdout bez zámku, text
+  `[STATUS] POLICY_LOADED` se slepil s telemetrickým řádkem a orchestrátor, který zná jen řádky
+  začínající `[STATUS] `, ho nepoznal. Důkaz je nepřímý (chybějící potvrzení, prázdný řádek, démon
+  dál běžel a tikal); historie událostí drží jen 500 záznamů a přepsala ji telemetrie.
+- Příčina 2 (jistá): proměnná `deltas` se v hlavní smyčce nastavuje jen ve větvi běžícího kroku a
+  telemetrie ji čte i v tiku, kdy se stav právě přepnul na RUNNING; čerstvě spuštěný démon, který
+  dostane první úkol hned po `DAEMON_READY`, na to narazí. Chyba tam byla už dřív, restart po
+  výpadku ji jen odkryl.
+- **Oprava zatím není provedena** (aplikace je zamrzlá, čekáme na výslovné rozhodnutí uživatele).
+
+**Úprava doby u řádku 36 (běh 221749) — NENÍ naměřená hodnota.** Na pokyn uživatele je v sešitě
+`Doba behu` = 54,9 s = skutečných 46,6 s do konce ověření `carry_cube` (z `llm_calls` a času konce
+běhu) + 8,3 s průměrná doba homingu. Průměr je blok „výměna modelu + krok homing + ověření
+inspektorem“ z 16 běhů, které skončily úspěšným homingem (60ep samostatně 8,4 s, n = 3; 120ep 8,3 s,
+n = 13). Počty volání CEO (1) a inspektora (2) jsou naměřené, bez homingu. Verdikt systému u řádku
+je NE, tak jak je v záznamu. Úprava je výslovně uvedená tady i v poznámce v sešitě, protože z těchto
+zápisů se skládá text práce a nepřiznaná doplněná hodnota by se v něm četla jako naměřená. Chce-li uživatel naměřená čistá data, stačí přepsat `G36` na 46,6 nebo
+řádek z časových průměrů vyloučit.
+
+**Porovnání orchestrace `cs15`: 60 × 120 epizod (16 poloh, úsudek uživatele; mapa `poznamky/mapa_60ep_vs_120ep.png`,
+tabulka v listu Kontrola).** Obě trefily 6 poloh, jen 120ep 5, jen 60ep 2, ani jedna 3 (McNemar p = 0,45).
+Bez re-plánu uspělo 4/16 u obou. Průměrná doba běhu 265 s (60ep, N = 15, včetně upravené hodnoty
+řádku 36) proti 223 s (120ep, N = 16); u úspěšných běhů 140 s (60ep, N = 7 se záznamem) proti 198 s.
+Kde 60ep neuspělo a 120ep ano: polohy 2, 4, 6, 9, 16; opačně: 10, 12; selhaly obě: 7, 8, 13.
+**Pokrytí demonstracemi (průzkumně, práh zvolen až po pohledu na data):** u 60ep modelu, který se učil
+jen z prvních 60 epizod, mělo všech 6 poloh s ≤ 5 demonstracemi do 60 px (č. 6, 7, 8, 9, 13, 16) neúspěch,
+z 10 poloh s ≥ 6 demonstracemi uspělo 8. Bez pevně zvoleného prahu: medián počtu demonstrací u úspěšných
+poloh 10, u neúspěšných 4,5 (permutační p = 0,09). U 120ep tento vztah není tak zřetelný (medián 16 × 11).
+To podporuje vysvětlení „málo trénovacích dat“ pro 60ep, ale je to n = 16 a práh nebyl předem stanoven.
+
+## 2026-09-26 (noc) — data měření jsou v repozitáři (`mereni/`); omezení porovnání 60 ep × 120 ep
+
+**Kde jsou data.** Všechna naměřená data z 26. 9. jsou v adresáři `mereni/`, s popisem souborů,
+pravidel pro jejich čtení, výsledků a všech mezer v `mereni/README.md` — **to je první soubor, který má
+číst každý, kdo z těch dat píše text.** Skripty, kterými čísla vznikla, jsou v `analyza/`. Sešit
+`mereni/zaznam_behu_2.xlsx` má vzorce v listu Souhrn bez uložených hodnot, proto je stejný souhrn v
+`mereni/souhrn.csv`; výsledky po polohách jsou v `mereni/polohy_a_vysledky.csv`.
+Pravda je vždy úsudek uživatele, ne verdikt systému (viz záznam z 2026-09-26 výše).
+
+**Omezení, které v dřívějších záznamech u porovnání 60 ep × 120 ep chybí: změna přístroje mezi
+sériemi.** Odebrání druhého dotazu inspektora po `[unclear]` a nové pole `image_paths` (záznam „dvě
+změny inspektora“) platí od restartu serveru ve 20:10. Všechny běhy 120 ep i baseline vznikly před ním,
+všechny běhy 60 ep po něm. Rozdíl mezi 60 ep a 120 ep tedy není čistě rozdílem počtu epizod. Odhadovaný
+dopad je malý (druhý dotaz mohl změnit rozhodnutí kroku jen u kroků bez fyzického důkazu, 7 z 27
+případů, a stál asi 5 s na běh), ale vyloučit ho nelze; v textu se to musí uvést. Baseline se to netýká.
+
+**Statistický stav (podrobně v `mereni/README.md`).** Rozdíly v úspěšnosti nejsou významné (orchestrace
+120 ep 11/16, 60 ep 8/16, baseline 7/16; Fisher p = 0,29 resp. 0,47), párový test na 16 polohách má při
+naměřeném efektu sílu 19 % a k potvrzení by bylo potřeba zhruba 70 párů poloh. Významný je rozdíl v čase
+(úspěšné pokusy baseline 18,5 s × orchestrace 140 s, p = 0,00006). Všechny testy po pohledu na data jsou
+průzkumné.

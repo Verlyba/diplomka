@@ -1,0 +1,39 @@
+ID behu,Datum,Cas,Podminka,Model(y),Epizod,Doba behu (s),Re-planu,Volani CEO,Volani inspektora,Verdikt systemu,POCITA SE?,VAS USUDEK - USPECH?,Poznamka,radek_v_sesitu
+20260926-164147,2026-09-26,16:41,Orchestrace,"120, chunk 15",120,258.8,2,5,14,ANO,ANO,ANO,"Až na třetí pokus, systém chybně usoudil, že homing selhal, ale model správně vyhodnotil že úkol byl splněn",5
+20260926-164738,2026-09-26,16:47,Orchestrace,"120, chunk 15",120,321.5,4,5,18,ANO,ANO,ANO,"Opět na třetí pokus, tentokrát homing vyhodnocen správně. Model si při opětovných pokusech mírně posunul kostku, což mohlo mít vliv na úspěšnost běhu.",6
+20260926-165409,2026-09-26,16:54,Orchestrace,"120, chunk 15",120,316.7,3,6,17,NE,ANO,ANO,"Model uspěl opět na třetí pokus, ovšem na konci neustále volal homing příkaz dokola, přestože robot již ve výchozí pozici byl, což má přímý vliv na délku běhu.",7
+20260926-170037,2026-09-26,17:00,Orchestrace,"120, chunk 15",120,496.3,5,10,21,ANO,ANO,ANO,"Model uspěl až na poslední pátý pokus, neúspěšně najížděl vždy mimo kostku, pomohla mu až náhoda, takový poloviční úspěch.",8
+20260926-171015,2026-09-26,17:10,Orchestrace,"120, chunk 15",120,69.5,0,1,5,ANO,ANO,ANO,Úspěch na první pokus.,9
+20260926-171213,2026-09-26,17:12,Orchestrace,"120, chunk 15",120,54.5,0,1,3,ANO,ANO,ANO,Úspěch na první pokus.,10
+20260926-171340,2026-09-26,17:13,Orchestrace,"120, chunk 15",120,478.7,5,9,17,NE,ANO,NE,Model po několika neúspěšných pokusech posunul kostku mimo pracovní oblast,11
+20260926-172233,2026-09-26,17:22,Orchestrace,"120, chunk 15",120,407,4,8,15,NE,ANO,NE,"Model ani jednou nenajel správně ke kostce, protože její umístění je v prostoru s malým počtem trénovacích dat.",12
+20260926-173124,2026-09-26,17:31,Orchestrace,"120, chunk 15",120,266.2,3,6,11,ANO,ANO,ANO,Na třetí pokus po mírném vychýlení kostky z původní polohy uspěl.,13
+20260926-173645,2026-09-26,17:36,Orchestrace,"120, chunk 15",120,343.1,5,6,16,NE,ANO,NE,Kostka byla dál od robota ve větší vzdálenosti u misky. Robot ji při každém pokusu přejel.,14
+20260926-174349,2026-09-26,17:43,Orchestrace,"120, chunk 15",120,140.4,1,3,7,ANO,ANO,ANO,,15
+20260926-174723,2026-09-26,17:47,Orchestrace,"120, chunk 15",120,83.6,0,1,5,ANO,ANO,NE,"VLM jednou špatně vyhodnotil úspěšnost catch_cube a poté opět špatně vyhodnotil, že je kostka v misce a ukončil běh jako úspěch, který to rozhodně nebyl.",16
+20260926-175015,2026-09-26,17:50,Orchestrace,"120, chunk 15",120,81.1,0,1,5,ANO,ANO,NE,"VLM jednou špatně vyhodnotil úspěšnost catch_cube a poté opět špatně vyhodnotil, že je kostka v misce a ukončil běh jako úspěch, který to rozhodně nebyl.",17
+20260926-175216,2026-09-26,17:52,Orchestrace,"120, chunk 15",120,66.2,0,1,3,ANO,ANO,ANO,"Na první pokus, v pořádku.",18
+20260926-175353,2026-09-26,17:53,Orchestrace,"120, chunk 15",120,131,1,3,6,ANO,ANO,ANO,,19
+20260926-180139,2026-09-26,18:01,Orchestrace,"120, chunk 15",120,60.9,0,1,3,ANO,ANO,ANO,"Robot na první pokus správně chytil a umístil kostku do misky. Postřeh pro pozdější kontrolu je, že se jednalo o úplně krajní pozici, kde robot na druhé straně ani jednou úspěšně nenajel. Zkontrolovat z tréninkových dat.",20
+20260926-180826,2026-09-26,18:08,Orchestrace,120 cs 100,120,51.5,0,1,3,ANO,NE,ANO,"úspěch na první pokus ale robot se nevrátil do homingu, zapomněl jsem to napsat do promptu",21
+20260926-181139,2026-09-26,18:11,Orchestrace,120 cs 100,120,48.3,0,1,3,ANO,NE,ANO,"úspěch na první pokus ale robot se nevrátil do homingu, zapomněl jsem to napsat do promptu",22
+20260926-181310,2026-09-26,18:13,Orchestrace,120 cs 100,120,171.7,2,4,8,ANO,NE,ANO,robot po neuspechu posunul kostku a pak uz ji chytil,23
+20260926-181639,2026-09-26,18:16,Orchestrace,120 cs 100,120,54.5,0,1,3,ANO,NE,ANO,"Na místě, kde robot při CS15 ani jednou neuspěl, to chytil na poprvé a uspěl s přehledem, zkontroluj tento běh.",24
+20260926-181830,2026-09-26,18:18,Orchestrace,120 cs 100,120,447.6,5,8,20,ANO,NE,NE,"Robot se ani jednou netrefil, myslím že na stejném místě jako model s CS15, který ale uspěl po posunutí kostky",25
+20260926-212027,2026-09-26,21:20,Orchestrace,60 cs15,60,23.2,0,1,0,NE,NE,NE,"zapomněl jsem změnit prompt, sám jsem hned ukončil",26
+20260926-212145,2026-09-26,21:21,Orchestrace,60 cs15,60,275,3,5,12,ANO,ANO,ANO,"První pokus a vypadá to brutálně marně, robot cca zamíří ke kostce, netrefí ji a pak odeje úplně někam do boku. Zkusím ještě další pokus z diplomka_1 s chunksize 100 zda pomůže. Beru zpět, na třetí pokus se robot trefil přesně a hodil kostku do misky a úkol dokončil. Ale začíná mi vrtat hlavou proč nejčastěji se trefí právě na třetí pokus, přitom kostka je na stejném místě a model by měl být deterministický.",27
+20260926-212754,2026-09-26,21:27,Orchestrace,60 cs15,60,459.5,5,9,19,NE,ANO,NE,"Vždy začal najíždět správně, měl i kostku mezi čelistmi a pak před zavřením odjel mimo. Škoda",28
+20260926-213634,2026-09-26,21:36,Orchestrace,60 cs15,60,135.4,1,3,6,ANO,ANO,ANO,"Vždy když to vypadá marně, robot to prostě chytí a já jsem překvapen. Takže nice.",29
+20260926-213929,2026-09-26,21:39,Orchestrace,60 cs15,60,437.4,5,9,16,NE,ANO,NE,V této pozici se robot ke kostce téměř ani nepřiblížil,30
+20260926-214823,2026-09-26,21:48,Orchestrace,60 cs15,60,442.4,5,8,16,NE,ANO,NE,V této pozici se robot ke kostce téměř ani nepřiblížil,31
+20260926-215721,2026-09-26,21:57,Orchestrace,60 cs15,60,409.8,5,8,16,NE,ANO,NE,,32
+20260926-220442,2026-09-26,22:04,Orchestrace,60 cs15,60,219,2,5,7,NE,ANO,NE,Opět místo kde se orchestrace nejvíce trápí.,33
+20260926-220934,2026-09-26,22:09,Orchestrace,60 cs15,60,422.4,4,8,18,ANO,ANO,NE,"Systém vyhodnotil homing jako poslední krok jako úspěch, což byl, ale kostka v misce nikdy nebyla.",34
+,,,Orchestrace,60 cs15,60,,,,,,ANO,ANO,Podařilo se na první pokus. Paráda.,35
+20260926-221749,2026-09-26,22:17,Orchestrace,60 cs15,60,54.9,0,1,2,NE,ANO,ANO,"Robot na první pokus umístil kostku do misky [ÚPRAVA DAT (doplnil asistent na pokyn uživatele): běh 20260926-221749 skončil chybou démona před homingem (výměna modelu se nepotvrdila, po 180 s restart a pád UnboundLocalError; v záznamu error „Daemon neběží.“) a homing neproběhl. Doba behu 54.9 s = skutečných 46.6 s do konce ověření carry_cube + 8.3 s průměrná doba homingu (výměna modelu + krok + ověření, 16 dokončených homingů). Uložená celková doba záznamu je 262.6 s (zahrnuje ~3 min čekání na chybu). Počty volání CEO/VLM jsou naměřené, bez homingu. Verdikt systému NE odpovídá záznamu.]",36
+20260926-223157,2026-09-26,22:31,Orchestrace,60 cs15,60,56.5,0,1,3,ANO,ANO,ANO,"Na první pokus, není co vytknout, je to kanec",37
+20260926-223329,2026-09-26,22:33,Orchestrace,60 cs15,60,227.9,2,5,9,ANO,ANO,ANO,,38
+20260926-224235,2026-09-26,22:42,Orchestrace,60 cs15,60,64.9,0,1,3,ANO,ANO,ANO,"Na první pokus, je to kanec",39
+20260926-224404,2026-09-26,22:44,Orchestrace,60 cs15,60,195.2,2,5,6,NE,ANO,NE,"Robot při druhém pokusu shodil kostku z pracovního prostoru, předčasně jsem ukončil.",40
+20260926-224808,2026-09-26,22:48,Orchestrace,60 cs15,60,164.2,1,3,8,ANO,ANO,ANO,"nice, úspěch",41
+20260926-225113,2026-09-26,22:51,Orchestrace,60 cs15,60,417,5,8,16,NE,ANO,NE,Robot na tuto krajní pozici neměl při tréninku prakticky žádná data.,42

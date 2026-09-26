@@ -1,0 +1,829 @@
+{
+  "run_id": "20260926-173645",
+  "success": false,
+  "error": "Krok 'catch_cube' selhal opakovaně ([unknown_failure]) — limit re-plánů vyčerpán.",
+  "duration_s": 343.1,
+  "steps": [
+    {
+      "attempt": 1,
+      "replan": 0,
+      "step": "catch_cube",
+      "success": false,
+      "tag": "[unknown_failure]",
+      "reason": "Časový limit kroku",
+      "insp_reason": "The robot appears to be in a resting position with no visible object held by its grippers. The expected outcome of holding the green cube is not confirmed.",
+      "phys": "DENY",
+      "vis": "FAIL",
+      "conflict": "",
+      "outcome": "failure",
+      "reflex_retry": false,
+      "t_start": 1790437036.605,
+      "t_end": 1790437056.624,
+      "images": [
+        "images/20260926-173645/a001_1.jpg",
+        "images/20260926-173645/a001_2.jpg"
+      ]
+    },
+    {
+      "attempt": 2,
+      "replan": 1,
+      "step": "homing",
+      "success": true,
+      "tag": "SUCCESS",
+      "reason": "Protokol A (klouby se přestaly hýbat, max pohyb 0.00000/tik, drženo 7/7)",
+      "insp_reason": "The robot's gripper appears to be in a default idle pose with no visible load, indicating it has returned to its home position.",
+      "phys": "CONFIRM",
+      "vis": "SUCCESS",
+      "conflict": "",
+      "outcome": "success",
+      "reflex_retry": false,
+      "t_start": 1790437101.534,
+      "t_end": 1790437105.111,
+      "images": [
+        "images/20260926-173645/a002_1.jpg",
+        "images/20260926-173645/a002_2.jpg"
+      ]
+    },
+    {
+      "attempt": 3,
+      "replan": 1,
+      "step": "catch_cube",
+      "success": false,
+      "tag": "[unknown_failure]",
+      "reason": "Časový limit kroku",
+      "insp_reason": "The robot's arm appears to be in a resting position with no visible object held or approaching it. There are no signs of the green cube being grasped.",
+      "phys": "DENY",
+      "vis": "FAIL",
+      "conflict": "",
+      "outcome": "failure",
+      "reflex_retry": false,
+      "t_start": 1790437110.953,
+      "t_end": 1790437130.97,
+      "images": [
+        "images/20260926-173645/a003_1.jpg",
+        "images/20260926-173645/a003_2.jpg"
+      ]
+    },
+    {
+      "attempt": 4,
+      "replan": 2,
+      "step": "homing",
+      "success": true,
+      "tag": "SUCCESS",
+      "reason": "Protokol A (klouby se přestaly hýbat, max pohyb 0.00000/tik, drženo 7/7)",
+      "insp_reason": "The gripper appears to be in a default idle pose with no visible load, indicating that it has returned to its home position.",
+      "phys": "CONFIRM",
+      "vis": "SUCCESS",
+      "conflict": "",
+      "outcome": "success",
+      "reflex_retry": false,
+      "t_start": 1790437175.917,
+      "t_end": 1790437178.517,
+      "images": [
+        "images/20260926-173645/a004_1.jpg",
+        "images/20260926-173645/a004_2.jpg"
+      ]
+    },
+    {
+      "attempt": 5,
+      "replan": 2,
+      "step": "catch_cube",
+      "success": false,
+      "tag": "[unknown_failure]",
+      "reason": "Časový limit kroku",
+      "insp_reason": "The robot's gripper appears to be in a resting position with no visible load, indicating that it did not grasp the green cube as expected.",
+      "phys": "DENY",
+      "vis": "FAIL",
+      "conflict": "",
+      "outcome": "failure",
+      "reflex_retry": false,
+      "t_start": 1790437184.472,
+      "t_end": 1790437204.488,
+      "images": [
+        "images/20260926-173645/a005_1.jpg",
+        "images/20260926-173645/a005_2.jpg"
+      ]
+    },
+    {
+      "attempt": 6,
+      "replan": 3,
+      "step": "homing",
+      "success": false,
+      "tag": "[unknown_failure]",
+      "reason": "Protokol A (klouby se přestaly hýbat, max pohyb 0.08791/tik, drženo 7/7)",
+      "insp_reason": "The gripper appears to be holding an object, which contradicts the expected outcome of being in its default idle pose.",
+      "phys": "CONFIRM",
+      "vis": "FAIL",
+      "conflict": "Fyzika krok potvrzuje (protokol A: klouby se zastavily), ale inspektor hlásí konkrétní problém [unknown_failure]: The gripper appears to be holding an object, which contradicts the expected outcome of being in its default idle pose.",
+      "outcome": "failure",
+      "reflex_retry": false,
+      "t_start": 1790437244.998,
+      "t_end": 1790437247.122,
+      "images": [
+        "images/20260926-173645/a006_1.jpg",
+        "images/20260926-173645/a006_2.jpg"
+      ]
+    },
+    {
+      "attempt": 7,
+      "replan": 4,
+      "step": "homing",
+      "success": false,
+      "tag": "[unknown_failure]",
+      "reason": "Protokol A (klouby se přestaly hýbat, max pohyb 0.00000/tik, drženo 9/7)",
+      "insp_reason": "The gripper appears to be in a closed position with an object held inside it.",
+      "phys": "CONFIRM",
+      "vis": "FAIL",
+      "conflict": "Fyzika krok potvrzuje (protokol A: klouby se zastavily), ale inspektor hlásí konkrétní problém [unknown_failure]: The gripper appears to be in a closed position with an object held inside it.",
+      "outcome": "failure",
+      "reflex_retry": false,
+      "t_start": 1790437282.918,
+      "t_end": 1790437283.95,
+      "images": [
+        "images/20260926-173645/a007_1.jpg",
+        "images/20260926-173645/a007_2.jpg"
+      ]
+    },
+    {
+      "attempt": 8,
+      "replan": 5,
+      "step": "homing",
+      "success": true,
+      "tag": "SUCCESS",
+      "reason": "Protokol A (klouby se přestaly hýbat, max pohyb 0.00000/tik, drženo 29/7)",
+      "insp_reason": "The gripper appears to be in a default idle pose with no visible load.",
+      "phys": "CONFIRM",
+      "vis": "SUCCESS",
+      "conflict": "",
+      "outcome": "success",
+      "reflex_retry": false,
+      "t_start": 1790437317.674,
+      "t_end": 1790437318.693,
+      "images": [
+        "images/20260926-173645/a008_1.jpg",
+        "images/20260926-173645/a008_2.jpg"
+      ]
+    },
+    {
+      "attempt": 9,
+      "replan": 5,
+      "step": "catch_cube",
+      "success": false,
+      "tag": "[unknown_failure]",
+      "reason": "Časový limit kroku",
+      "insp_reason": "The robot's gripper appears to be in a resting position on the table surface, with no visible object held or approaching it.",
+      "phys": "DENY",
+      "vis": "FAIL",
+      "conflict": "",
+      "outcome": "failure",
+      "reflex_retry": false,
+      "t_start": 1790437323.561,
+      "t_end": 1790437343.571,
+      "images": [
+        "images/20260926-173645/a009_1.jpg",
+        "images/20260926-173645/a009_2.jpg"
+      ]
+    }
+  ],
+  "plan_checks": [
+    {
+      "plan": [
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "holding": null,
+      "conflict": "",
+      "corrected": false
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "holding": false,
+      "conflict": "",
+      "corrected": false
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "holding": false,
+      "conflict": "",
+      "corrected": false
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "holding": false,
+      "conflict": "",
+      "corrected": false
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube"
+      ],
+      "holding": false,
+      "conflict": "",
+      "corrected": false
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube"
+      ],
+      "holding": false,
+      "conflict": "",
+      "corrected": false
+    }
+  ],
+  "done_checks": [],
+  "initial_images": [
+    "images/20260926-173645/init_1.jpg",
+    "images/20260926-173645/init_2.jpg"
+  ],
+  "plan_history": [
+    {
+      "plan": [
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "reasoning": "The goal has not yet been satisfied as the green cube is still on the white board. The robot must first grasp the cube using 'catch_cube', then transport it to and release it into the bowl using 'carry_cube', and finally execute 'homing' as requested by the task description.",
+      "first_attempt": 1,
+      "repeat_of": null
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "reasoning": "The previous attempt to grasp the cube failed with an unknown error; therefore, we must first use 'homing' to reset the robot to a known safe position before retrying the critical grasping step ('catch_cube'). If successful, the sequence will proceed to transport and release the cube ('carry_cube'), followed by the final required homing action.",
+      "first_attempt": 2,
+      "repeat_of": null
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "reasoning": "The goal is not yet satisfied as the green cube remains on the white board. Since the previous attempts to grasp the cube failed repeatedly, we must first use 'homing' again to ensure the robot starts from a known, optimal position before retrying the critical grasping step ('catch_cube'), followed by transport and final homing.",
+      "first_attempt": 4,
+      "repeat_of": 2
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube",
+        "homing"
+      ],
+      "reasoning": "The goal has not been satisfied as the green cube remains on the white board. Since 'catch_cube' has failed three times repeatedly, we must use 'homing' one last time to ensure the robot starts from a known, optimal position before retrying the critical grasping step ('catch_cube'), followed by transport and final homing.",
+      "first_attempt": 6,
+      "repeat_of": 2
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube"
+      ],
+      "reasoning": "Multiple attempts to grasp the cube have failed, and the last homing step resulted in an ambiguous state reported by the inspector. To ensure a stable start for the next attempt, we must first use 'homing' to return the robot to a known position before retrying the critical grasping step ('catch_cube') followed by transport ('carry_cube').",
+      "first_attempt": 7,
+      "repeat_of": null
+    },
+    {
+      "plan": [
+        "homing",
+        "catch_cube",
+        "carry_cube"
+      ],
+      "reasoning": "Multiple attempts to grasp the green cube have failed repeatedly, and the previous 'homing' steps resulted in ambiguous states. To ensure a stable start for the next attempt, we must first use 'homing' to return the robot to a known position before retrying the critical grasping step ('catch_cube') followed by transport ('carry_cube').",
+      "first_attempt": 8,
+      "repeat_of": 5
+    }
+  ],
+  "scene_checks": [
+    {
+      "attempt": 1,
+      "step": "catch_cube",
+      "verdict": "unchanged",
+      "inspector_reason": "Both objects remain stationary, with no visible movement between them."
+    },
+    {
+      "attempt": 3,
+      "step": "catch_cube",
+      "verdict": "unchanged",
+      "inspector_reason": "Both objects, the green cube and red bowl, remain in their original positions with no visible movement or change between the two images."
+    },
+    {
+      "attempt": 5,
+      "step": "catch_cube",
+      "verdict": "unchanged",
+      "inspector_reason": "Both objects, the green cube and red bowl, remain stationary with no visible movement between the two images."
+    },
+    {
+      "attempt": 6,
+      "step": "homing",
+      "verdict": "changed",
+      "inspector_reason": "The green cube has been moved from its original position to the right side of the frame, while the red bowl remains stationary."
+    },
+    {
+      "attempt": 7,
+      "step": "homing",
+      "verdict": "changed",
+      "inspector_reason": "A green cube has been placed next to the red bowl, which is still in its original position."
+    }
+  ],
+  "llm_calls": [
+    {
+      "layer": "planner",
+      "purpose": "initial_plan",
+      "model": "google/gemma-4-e4b",
+      "t": 1790437016.622,
+      "s": 18.412,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437056.63,
+      "s": 6.219,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step_resnapshot",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437062.854,
+      "s": 4.079,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "scene_change",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437066.937,
+      "s": 3.592,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "planner",
+      "purpose": "replan",
+      "model": "google/gemma-4-e4b",
+      "t": 1790437070.528,
+      "s": 31.004,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437105.115,
+      "s": 5.833,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437130.975,
+      "s": 4.538,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "scene_change",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437135.516,
+      "s": 4.117,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "planner",
+      "purpose": "replan",
+      "model": "google/gemma-4-e4b",
+      "t": 1790437139.634,
+      "s": 36.282,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437178.521,
+      "s": 5.948,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437204.492,
+      "s": 4.403,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step_resnapshot",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437208.899,
+      "s": 4.01,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "scene_change",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437212.912,
+      "s": 3.841,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "planner",
+      "purpose": "replan",
+      "model": "google/gemma-4-e4b",
+      "t": 1790437216.753,
+      "s": 28.245,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437247.126,
+      "s": 5.103,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "scene_change",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437252.231,
+      "s": 3.973,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "planner",
+      "purpose": "replan",
+      "model": "google/gemma-4-e4b",
+      "t": 1790437256.205,
+      "s": 26.712,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437283.955,
+      "s": 5.342,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "scene_change",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437289.299,
+      "s": 3.93,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "planner",
+      "purpose": "replan",
+      "model": "google/gemma-4-e4b",
+      "t": 1790437293.229,
+      "s": 24.443,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437318.698,
+      "s": 4.861,
+      "ok": true,
+      "images": 2
+    },
+    {
+      "layer": "inspector",
+      "purpose": "verify_step",
+      "model": "qwen2.5-vl-7b-instruct",
+      "t": 1790437343.576,
+      "s": 4.667,
+      "ok": true,
+      "images": 2
+    }
+  ],
+  "policy_swaps": [
+    {
+      "step": "catch_cube",
+      "phase": "preload",
+      "t": 1790437035.035,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "preload",
+      "t": 1790437035.035,
+      "s": 0.761
+    },
+    {
+      "step": "homing",
+      "phase": "preload",
+      "t": 1790437035.795,
+      "s": 0.81
+    },
+    {
+      "step": "catch_cube",
+      "phase": "step",
+      "t": 1790437036.605,
+      "s": 0.001
+    },
+    {
+      "step": "homing",
+      "phase": "preload",
+      "t": 1790437101.533,
+      "s": 0.002
+    },
+    {
+      "step": "catch_cube",
+      "phase": "preload",
+      "t": 1790437101.534,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "preload",
+      "t": 1790437101.534,
+      "s": 0.0
+    },
+    {
+      "step": "homing",
+      "phase": "step",
+      "t": 1790437101.534,
+      "s": 0.0
+    },
+    {
+      "step": "catch_cube",
+      "phase": "step",
+      "t": 1790437110.953,
+      "s": 0.0
+    },
+    {
+      "step": "homing",
+      "phase": "preload",
+      "t": 1790437175.916,
+      "s": 0.001
+    },
+    {
+      "step": "catch_cube",
+      "phase": "preload",
+      "t": 1790437175.917,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "preload",
+      "t": 1790437175.917,
+      "s": 0.0
+    },
+    {
+      "step": "homing",
+      "phase": "step",
+      "t": 1790437175.917,
+      "s": 0.0
+    },
+    {
+      "step": "catch_cube",
+      "phase": "step",
+      "t": 1790437184.472,
+      "s": 0.001
+    },
+    {
+      "step": "homing",
+      "phase": "preload",
+      "t": 1790437244.998,
+      "s": 0.0
+    },
+    {
+      "step": "catch_cube",
+      "phase": "preload",
+      "t": 1790437244.998,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "preload",
+      "t": 1790437244.998,
+      "s": 0.0
+    },
+    {
+      "step": "homing",
+      "phase": "step",
+      "t": 1790437244.998,
+      "s": 0.0
+    },
+    {
+      "step": "homing",
+      "phase": "preload",
+      "t": 1790437282.918,
+      "s": 0.0
+    },
+    {
+      "step": "catch_cube",
+      "phase": "preload",
+      "t": 1790437282.918,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "preload",
+      "t": 1790437282.918,
+      "s": 0.0
+    },
+    {
+      "step": "homing",
+      "phase": "step",
+      "t": 1790437282.918,
+      "s": 0.0
+    },
+    {
+      "step": "homing",
+      "phase": "preload",
+      "t": 1790437317.673,
+      "s": 0.0
+    },
+    {
+      "step": "catch_cube",
+      "phase": "preload",
+      "t": 1790437317.673,
+      "s": 0.0
+    },
+    {
+      "step": "carry_cube",
+      "phase": "preload",
+      "t": 1790437317.673,
+      "s": 0.001
+    },
+    {
+      "step": "homing",
+      "phase": "step",
+      "t": 1790437317.674,
+      "s": 0.0
+    },
+    {
+      "step": "catch_cube",
+      "phase": "step",
+      "t": 1790437323.561,
+      "s": 0.0
+    }
+  ],
+  "cost_summary": {
+    "planner_calls": 6,
+    "planner_s": 165.1,
+    "inspector_calls": 16,
+    "inspector_s": 74.46,
+    "policy_swaps": 27,
+    "policy_swap_s": 1.58,
+    "skill_s": 90.41,
+    "run_s": 343.14,
+    "orchestration_s": 241.13,
+    "unaccounted_s": 11.59
+  },
+  "config": {
+    "python": "C:/Users/green/miniconda3/envs/lerobot/python.exe",
+    "device": "cuda",
+    "robot_type": "so101_follower",
+    "robot_port": "COM3",
+    "robot_id": "my_follower_arm",
+    "teleop_type": "so101_leader",
+    "teleop_port": "COM4",
+    "teleop_id": "my_leader_arm",
+    "camera_name": "top",
+    "camera_index": "0",
+    "camera_width": 640,
+    "camera_height": 480,
+    "camera_fps": 30,
+    "camera2_name": "wrist",
+    "camera2_index": "1",
+    "camera2_width": 640,
+    "camera2_height": 480,
+    "camera2_fps": 30,
+    "fps": 30,
+    "data_strategy": "split",
+    "task_slug": "diplomka_2",
+    "task_description": "Robot se nachází na bílé desce se statickým osvětlením, na desce je jedna zelená kostka a jedna červená miska, cílem úlohy je umístit tuto kostku z desky do misky.",
+    "scene_description": "Rameno SO-101 na stole, před ním kostka a krabice, kamera shora.",
+    "episodes": 1,
+    "resume_episodes": 1,
+    "episode_time_s": 20,
+    "reset_time_s": 8,
+    "policy_type": "act",
+    "train_steps": 50000,
+    "batch_size": 8,
+    "save_freq": 5000,
+    "output_root": "outputs/training",
+    "lm_url": "http://localhost:1234/v1",
+    "llm_model": "google/gemma-4-e4b",
+    "vlm_model": "qwen2.5-vl-7b-instruct",
+    "max_replans": 5,
+    "planner_vision": true,
+    "planner_reasoning": true,
+    "plan_state_check": true,
+    "done_visual_check": true,
+    "uncertain_retry": true,
+    "planner_memory": true,
+    "scene_change_check": true,
+    "save_images": true,
+    "protocol_a_enabled": true,
+    "protocol_a_threshold_rad": 0.5,
+    "protocol_a_target_threshold_rad": 5.25,
+    "protocol_a_patience": 7,
+    "protocol_a_grasp_patience_extra": 5,
+    "protocol_a_grace_s": 1,
+    "protocol_b_enabled": true,
+    "protocol_b_limit_ma": 300,
+    "protocol_b_patience": 3,
+    "protocol_b_grace_s": 0.75,
+    "protocol_b_deadband_frac": 0.25,
+    "protocol_b_stability_slope": 30,
+    "holding_limit_ma": 30,
+    "calibration_min_runs": 3,
+    "gripper_state_in_context": true,
+    "temporal_ensemble": false,
+    "temporal_ensemble_coeff": 0.01,
+    "baseline_policy_path": "outputs\\training\\diplomka_2_120ep_act",
+    "skip_planner": false,
+    "skip_inspector": false
+  },
+  "catalog": [
+    {
+      "slug": "catch_cube",
+      "description": "Robot vyjede a z libovolné pozice zamíří směrem k zelené kostce, kterou následně uchopí čeelistmi.",
+      "grasp": true,
+      "reset": false,
+      "release": false,
+      "policy_path": "outputs\\training\\diplomka_2_catch_cube_120ep_act",
+      "verify_hint": "Robot drží zelenou kostku v čelistech",
+      "train_steps": 45600
+    },
+    {
+      "slug": "carry_cube",
+      "description": "Robot drží v čelistech zelenou kostku a přenáší ji nad červenou misku, do které ji upouští.",
+      "grasp": false,
+      "reset": false,
+      "release": true,
+      "policy_path": "outputs\\training\\diplomka_2_carry_cube_120ep_act",
+      "verify_hint": "Robot je nad červenou miskou a kostka je umístěna v červené misce.",
+      "train_steps": 27600
+    },
+    {
+      "slug": "homing",
+      "description": "Robot z libovolné pozice najíždí zpět do té výchozí",
+      "grasp": false,
+      "reset": true,
+      "release": false,
+      "policy_path": "outputs\\training\\diplomka_2_homing_120ep_act",
+      "verify_hint": "Robot je ve výchozí pozici.",
+      "train_steps": 76800
+    }
+  ]
+}
