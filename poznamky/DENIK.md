@@ -898,3 +898,34 @@ zpětně sedí na dříve ručně použité `--steps=299800` u 120ep baseline; s
 dočasném adresáři se symlinkem; sestavení fresh/resume příkazu; zámek), `--dry-run` proti
 reálným datům na tomhle stroji. **Trénink samotný (`train_queue.py -y`) NEBYL spuštěn** — čeká
 na uživatele, ať frontu vidí a potvrdí, než poběží bez dozoru.
+
+## 2026-09-27 (pokrač.) — chunk_size 50 -> 30: padding u cs100 je vyšší, ne nižší
+
+Uživatel se zeptal, jaký je padding při cs30 a jestli je u cs100 vyšší, nebo nižší než u cs50.
+Dopočteno na skutečných datech (min. délka epizody, `min(chunk_size, délka) / délka`,
+nejhorší cíl je vždy `carry_cube`, nejkratší epizoda 79 snímků):
+
+| chunk_size | baseline | catch_cube | carry_cube | homing (120 ep) |
+| --- | --- | --- | --- | --- |
+| 15 |  2,5 % | 11,6 % |  19,0 % |  7,9 % |
+| 20 |  3,4 % | 15,5 % |  25,3 % | 10,5 % |
+| 30 |  5,0 % | 23,3 % |  38,0 % | 15,7 % |
+| 50 |  8,4 % | 38,8 % |  63,3 % | 26,2 % |
+| 100 | 16,8 % | 77,5 % | **100,0 %** | 52,4 % |
+
+**cs100 má padding nejvyšší ze všech testovaných hodnot, ne nejnižší** — u `carry_cube` leží
+při chunk_size=100 v poškozeném okně doslova celá nejkratší epizoda. Platí to i pro starší,
+subjektivně plynulejší modely (ty mají chunk_size=100 taky), takže „starý model je hladší"
+a „starý model má nejhorší padding" platí současně. To oslabuje hypotézu, že trhaný pohyb na
+chunk_size=15 způsobuje padding. Pravděpodobnější mechanismus: `n_action_steps` je v kódu vždy
+rovné `chunk_size`, takže model se ptá na nový snímek po `chunk_size` ticích (30 Hz) — cs15
+každých 0,5 s, cs30 každou 1,0 s, cs50 1,67 s, cs100 3,3 s. Menší chunk = častější přeplánování
+= vypadá trhaně; větší chunk = plynulejší, ale hůř natrénované cíle přesně v posledních
+snímcích krátkých epizod, tedy u `catch_cube`/`carry_cube` přesně v okamžiku úchopu/pouštění.
+
+**Rozhodnutí uživatele: `CHUNK_SIZE = 30`** (ne 50) — bezpečnější kompromis: padding pod 40 %
+u všech čtyř cílů, přeplánování oproti dnešním 15 se přesto zpomalí na dvojnásobek (1,0 s).
+`train_queue.py` upraven (jediná konstanta), přepočteno `--dry-run`: stejné kroky jako u cs50
+(kroky závisí jen na počtu snímků, ne na chunk_size), padding baseline 5,0 %, catch_cube
+23,3 %, carry_cube 38,0 %, homing 15,0–15,7 %. Nejde o jistotu, že 30 trhanost skutečně
+vyřeší — jen sníženém rizika oproti 50, potvrdí se to až živým testem po natrénování.

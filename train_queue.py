@@ -90,7 +90,7 @@ class QueueLock:
 # ── Rozhodnutí uživatele 2026-09-27 (poznamky/DENIK.md) ────────────────────
 SOURCE_SLUG = "diplomka_1"        # odkud se čtou demonstrace (živý dataset, beze změny)
 DEST_SLUG = "diplomka_3"          # jak se pojmenují výstupní checkpointy
-CHUNK_SIZE = 50
+CHUNK_SIZE = 30
 TIERS = (60, 120)                 # 20 epizod záměrně vynecháno
 SKILLS = ("catch_cube", "carry_cube", "homing")   # + baseline (slug=None)
 
