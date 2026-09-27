@@ -929,3 +929,41 @@ u všech čtyř cílů, přeplánování oproti dnešním 15 se přesto zpomalí
 (kroky závisí jen na počtu snímků, ne na chunk_size), padding baseline 5,0 %, catch_cube
 23,3 %, carry_cube 38,0 %, homing 15,0–15,7 %. Nejde o jistotu, že 30 trhanost skutečně
 vyřeší — jen sníženém rizika oproti 50, potvrdí se to až živým testem po natrénování.
+
+## 2026-09-27 (pokrač.) — fronta z appky: /api/train-queue/*, stránka queue.html
+
+Uživatel chtěl frontu spustit tlačítkem a vidět průběh, ne ručně v terminálu. Přidáno do
+`server.py` a nová stránka `web/queue.html` + `web/queue.js` (odkaz v navigaci na všech
+stránkách) — **výslovná žádost uživatele, viz [[feedback-app-frozen-for-measurement]]**:
+mění se `server.py` (nové, čistě přídavné routy, nic stávajícího nepřepsáno) a `web/`
+(nová stránka + řádek v navigaci třech existujících stránek), ne `orchestrator.py` ani
+`inference_daemon.py` — živého měřeného běhu orchestrace se tohle nedotýká.
+
+**`server.py`**: `GET /api/train-queue/plan` (plán 8 běhů + diskový stav, přes
+`train_queue.build_jobs()`/`checkpoint_status()` — beze změny stejná logika jako CLI
+`--dry-run`), `GET /api/train-queue/status` (běží/neběží + poslední ~40 řádků logu
+aktuálního jobu), `POST /api/train-queue/start` (spustí `train_queue.py -y` jako odpojený
+proces, stdout do `outputs/training/logs/train_queue.console.log`), `POST
+/api/train-queue/stop` (`taskkill /T /F` na PID ze zámku — `/T` je nutné, jinak by
+`lerobot_train` běžel dál jako sirotek po zabití jen rodiče).
+
+**Zdroj pravdy, že fronta běží, je `train_queue.lock` (PID uvnitř), ne stav v paměti
+serveru** — schválně, protože fronta běží klidně dny a `server.py` se restartuje po každé
+úpravě (viz poznámky pro asistenta); Popen handle z předchozího běhu serveru by dávno
+neplatil. `/api/train-queue/status` proto PID z zámku ověřuje živě (`tasklist` na Windows).
+
+**Zjištěná a opravená mezera:** tvrdé zabití (`stop`) neprojde přes vlastní
+`KeyboardInterrupt` handler `train_queue.py`, takže rozdělaný job by v
+`train_queue_status.json` zůstal navěky `"running"` — ověřeno živě (spuštěno tlačítkem,
+`lerobot_train` reálně naběhl a začal trénovat, zastaveno tlačítkem, `taskkill` smazal
+i dítě, žádný osiřelý proces nezůstal, ale status zůstal "running"). Opraveno: `stop_train_queue()`
+po úspěšném zabití sám přepíše `"running"` -> `"interrupted"` v status souboru. Diskový stav
+(co je skutečně natrénované) tím není dotčený — `checkpoint_status()` čte disk, ne tenhle
+soubor, takže by se to doučilo správně i bez týhle opravy; jde jen o to, aby stránka
+neukazovala něco, co už neběží.
+
+**Ověřeno živě, ne jen testy:** tlačítko Spustit skutečně spustilo `lerobot_train`
+(`Training: 0%|... [00:00<?, ?step/s]` v logu), tlačítko Zastavit ho čistě ukončilo (žádný
+`lerobot_train` proces nezůstal, `train_queue.lock` smazán, `outputs/training/diplomka_3_60ep_act_cs30/`
+se vůbec nevytvořil — zastaveno dřív, než stihl uložit první checkpoint). Trénink samotný
+(celá fronta na `-y`) **stále nebyl spuštěn** — jen tenhle krátký test zapojení.

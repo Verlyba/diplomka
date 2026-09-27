@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fronta tréninků — diplomka_3</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <h1><span>◆</span> Diplomka — LeRobot: baseline vs. orchestrace</h1>
+  <nav>
+    <a href="index.html">Setup</a>
+    <a href="orchestrace.html">Orchestrační schéma</a>
+    <a href="retrain.html">Retrénink (chunk_size)</a>
+    <a href="queue.html" class="active">Fronta tréninků</a>
+  </nav>
+</header>
+
+<main>
+
+  <section class="block">
+    <h2><b>i</b> Co tahle stránka dělá</h2>
+    <div class="block-body">
+      <p>
+        Ovládá <code class="inline">train_queue.py</code> — frontu 8 tréninků bez dozoru
+        (baseline + <code class="inline">catch_cube</code> + <code class="inline">carry_cube</code> +
+        <code class="inline">homing</code>, tiery 60 a 120 epizod, tier 20 vynechán) pro nový
+        projekt <b><code class="inline">diplomka_3</code></b>. Zdrojová data zůstávají pod
+        <code class="inline">diplomka_1</code> (živý dataset), mění se jen jméno výstupu — viz
+        <code class="inline">poznamky/DENIK.md</code>, 2026-09-27, kde je i zdůvodnění
+        <code class="inline">chunk_size=30</code> (kompromis mezi trhaným 15 a starým 100).
+      </p>
+      <p>
+        Fronta běží jako samostatný proces, ne uvnitř <code class="inline">server.py</code> — klidně
+        i dny. Tlačítko <b>Spustit</b> ji jen odpálí na pozadí; zavřená stránka nebo restart
+        <code class="inline">server.py</code> (běžné po každé úpravě appky) ji nezastaví. Přeskočí
+        běhy, které jsou už na disku hotové, doučí rozdělané, a na chybě jednoho běhu pokračuje
+        dalším místo zastavení celé fronty.
+      </p>
+      <div class="note">
+        Server tuhle stránku nevyžaduje k tomu, aby fronta běžela — jen k tomu, aby šla spustit a
+        sledovat z appky. Když <code class="inline">server.py</code> zrovna neběží, dole to bude
+        vidět a fronta (pokud už běžela) tím neskončí.
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>1</b> Plán (8 běhů)</h2>
+    <div class="block-body">
+      <div class="row" style="margin-bottom:14px; gap:10px; flex-wrap:wrap;">
+        <button type="button" id="start-btn" class="primary">▶ Spustit frontu</button>
+        <button type="button" id="stop-btn" class="danger" disabled>■ Zastavit</button>
+        <button type="button" id="reload-btn">🔄 Obnovit</button>
+        <span id="server-warn" style="color:var(--red); display:none;">Server neběží — spusť <code class="inline">python server.py</code>.</span>
+      </div>
+      <div id="plan"></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2><b>2</b> Průběh</h2>
+    <div class="block-body">
+      <div id="progress"></div>
+      <div class="cmd-box" style="margin-top:12px;">
+        <pre id="log-tail" style="display:none; max-height:360px; overflow:auto;"></pre>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="queue.js"></script>
+</body>
+</html>

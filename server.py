@@ -15,6 +15,10 @@ orchestration page needs:
     POST /api/run        start an orchestration run  {instruction, ...}
     POST /api/stop       stop the running orchestration
     GET  /api/status     is something running right now
+    GET  /api/train-queue/plan    planned train_queue.py jobs + disk status (2026-09-27)
+    GET  /api/train-queue/status  live progress of the running train_queue.py, if any
+    POST /api/train-queue/start   launch train_queue.py -y as a detached background process
+    POST /api/train-queue/stop    kill it (and its current lerobot_train child)
     GET  /api/runs       list the saved run logs
     GET  /api/runs/consistency  did the settings stay identical across runs
     GET  /api/calibration  measured protocol A/B values vs. the configured ones
@@ -33,6 +37,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -43,6 +48,7 @@ from urllib.parse import urlparse, parse_qs
 import calibrate_protocols as calib
 import orchestrator as orch
 import run_consistency as consistency
+import train_queue as tq
 
 HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
@@ -637,6 +643,154 @@ def stop_run() -> dict:
     return {"ok": False, "error": "Nic neběží."}
 
 
+# ── train_queue.py: spuštění jedním tlačítkem, přidáno 2026-09-27 ───────────
+#
+# Na rozdíl od RunState výše NEDRŽÍ zdroj pravdy o tom, jestli fronta běží, v
+# paměti procesu — je jím výhradně train_queue.lock (PID uvnitř), který si
+# train_queue.py píše samo. Fronta běží klidně dny; server.py se během té doby
+# restartuje (po každé úpravě kódu, viz poznamky pro asistenta) a Popen handle
+# z předchozího běhu serveru by tou dobou byl dávno pryč. Čtení PID ze zámku
+# funguje stejně, ať frontu spustil tenhle proces serveru, nebo některý dřívější.
+_train_queue_lock = threading.Lock()  # jen kolem samotného spuštění (start), ať dvě
+                                       # souběžné POST /start nezávodí o kontrolu zámku
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    # Windows nemá os.kill(pid, 0) jako "žije?" dotaz (rovnou by proces zabil,
+    # kdyby fungoval) — zeptáme se tasklist, jestli PID pořád existuje.
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                             capture_output=True, text=True, timeout=10)
+        return str(pid) in out.stdout
+    except Exception:
+        return False
+
+
+def _train_queue_pid() -> int | None:
+    if not tq.LOCK_PATH.exists():
+        return None
+    try:
+        pid = int(tq.LOCK_PATH.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return None
+    return pid if _pid_alive(pid) else None
+
+
+def train_queue_plan() -> dict:
+    cfg = load_config()
+    jobs = tq.build_jobs(cfg, only=None, only_tier=None)
+    out = []
+    for j in jobs:
+        st = tq.checkpoint_status(j["out_dir"], j["steps"])
+        state = "hotovo" if st["sufficient"] else ("doběhne" if st["trained"] else "nové")
+        out.append({"key": j["key"], "title": j["title"], "n": j["n"], "total_eps": j["total_eps"],
+                    "steps": j["steps"], "steps_done": st["steps"], "padding_frac": j["padding_frac"],
+                    "out_dir": j["out_dir"].name, "state": state})
+    return {"ok": True, "chunk_size": tq.CHUNK_SIZE, "source_slug": tq.SOURCE_SLUG,
+            "dest_slug": tq.DEST_SLUG, "tiers": list(tq.TIERS), "jobs": out}
+
+
+def train_queue_status() -> dict:
+    pid = _train_queue_pid()
+    status = tq.load_status()
+    current = None
+    for key, v in status.items():
+        if v.get("state") == "running":
+            log_path = tq.LOG_DIR / f"{key}.log"
+            tail: list[str] = []
+            if log_path.exists():
+                try:
+                    # Poslední ~40 řádků beze čtení celého (potenciálně
+                    # mnohahodinového) logu do paměti — stejný důvod jako u
+                    # čtení telemetrie/dat jinde v appce, jen prostší: soubory
+                    # tady rostou pomalu (řádky lerobot_train, ne 30×/s), takže
+                    # stačí přečíst posledních pár desítek kB od konce.
+                    with open(log_path, "rb") as f:
+                        f.seek(0, os.SEEK_END)
+                        size = f.tell()
+                        f.seek(max(0, size - 60_000))
+                        chunk = f.read().decode("utf-8", errors="replace")
+                    tail = chunk.splitlines()[-40:]
+                except OSError:
+                    pass
+            current = {"key": key, **v, "log_tail": tail}
+            break
+    return {"ok": True, "running": pid is not None, "pid": pid, "jobs": status, "current": current}
+
+
+def start_train_queue() -> dict:
+    with _train_queue_lock:
+        if _train_queue_pid() is not None:
+            return {"ok": False, "error": "Fronta už běží."}
+        tq.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        console_log = tq.LOG_DIR / "train_queue.console.log"
+        with open(console_log, "a", encoding="utf-8") as f:
+            f.write(f"\n===== spuštěno ze serveru {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+        # Vlastní stdout jde do console_log (append), ne do pipe tohohle
+        # requestu — fronta smí běžet dny, dávno přes životnost jednoho HTTP
+        # dotazu i tohohle běhu server.py (restart po každé úpravě appky).
+        log_fh = open(console_log, "a", encoding="utf-8")
+        try:
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            subprocess.Popen([sys.executable, str(HERE / "train_queue.py"), "-y"],
+                             cwd=str(HERE), stdin=subprocess.DEVNULL,
+                             stdout=log_fh, stderr=subprocess.STDOUT,
+                             creationflags=creationflags, close_fds=False)
+        finally:
+            log_fh.close()
+        # train_queue.py si píše train_queue.lock samo, hned na startu — ale
+        # dá mu to chvíli (import pyarrow, čtení datasetů); nečekáme na něj
+        # tady synchronně, GET /api/train-queue/status ho během pár vteřin uvidí.
+        return {"ok": True}
+
+
+def stop_train_queue() -> dict:
+    pid = _train_queue_pid()
+    if pid is None:
+        return {"ok": False, "error": "Fronta neběží."}
+    try:
+        if os.name == "nt":
+            # /T = i potomky (aktuálně běžící lerobot_train), jinak by GPU
+            # trénink poběžel dál jako osiřelý proces bez rodiče.
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=15)
+        else:
+            os.kill(pid, 15)
+    except Exception as e:
+        return {"ok": False, "error": f"Zabití procesu {pid} selhalo: {e}"}
+    # Tvrdé zabití taskkillem/killem neprojde přes train_queue.py vlastní
+    # KeyboardInterrupt handler, takže rozdělaný job by v train_queue_status.json
+    # zůstal navěky "running" (ověřeno živě 2026-09-27) — příští checkpoint_status()
+    # při dalším startu frontu i tak správně doučí (ten čte disk, ne tenhle
+    # soubor), ale dokud se nespustí, UI by mylně tvrdilo, že pořád běží.
+    try:
+        status = tq.load_status()
+        changed = False
+        for key, v in status.items():
+            if v.get("state") == "running":
+                v["state"] = "interrupted"
+                v["interrupted_by"] = "stop_button"
+                changed = True
+        if changed:
+            tq.save_status(status)
+    except Exception:
+        pass
+    # taskkill/kill neumožní train_queue.py doběhnout svůj vlastní `finally`
+    # (viz QueueLock.__exit__), takže zámek by tu bez tohohle zůstal ležet
+    # navěky a příští start by hlásil "už běží".
+    try:
+        tq.LOCK_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return {"ok": True}
+
+
 # ── HTTP handler ────────────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
@@ -731,6 +885,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             self._send_json({"running": run_state.running,
                              "instruction": run_state.instruction})
+        elif path == "/api/train-queue/plan":
+            try:
+                self._send_json(train_queue_plan())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
+        elif path == "/api/train-queue/status":
+            try:
+                self._send_json(train_queue_status())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/lmstudio":
             cfg = load_config()
             try:
@@ -913,6 +1077,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/stop":
             try:
                 self._send_json(stop_run())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
+        elif path == "/api/train-queue/start":
+            try:
+                self._send_json(start_train_queue())
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
+        elif path == "/api/train-queue/stop":
+            try:
+                self._send_json(stop_train_queue())
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
         else:
