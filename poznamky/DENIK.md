@@ -841,3 +841,60 @@ případů, a stál asi 5 s na běh), ale vyloučit ho nelze; v textu se to mus�
 naměřeném efektu sílu 19 % a k potvrzení by bylo potřeba zhruba 70 párů poloh. Významný je rozdíl v čase
 (úspěšné pokusy baseline 18,5 s × orchestrace 140 s, p = 0,00006). Všechny testy po pohledu na data jsou
 průzkumné.
+
+## 2026-09-27 — retrénink na chunk_size=50 pod novým projektem diplomka_3: fronta bez dozoru
+
+**Rozhodnutí uživatele.** Chunk_size=15 (viz 2026-09-25/26 výše) sice drží padding pod 20 %,
+ale živé běhy ukázaly trhaný pohyb a přesnost proti staršímu chunk_size=100 se citelně
+nezlepšila. Uživatel se rozhodl přeučit všechny čtyři modely (baseline, catch_cube,
+carry_cube, homing) na **chunk_size=50** — kompromis mezi 15 a 100 — pod novým projektem
+**diplomka_3**, a **vynechat tier 20 epizod** (na tak málo datech se model dřív netrefil ani
+jednou, testováno mimo tuhle appku na začátku projektu). Chtěl skript, který frontu tréninků
+odjede sám, protože u toho nechce sedět.
+
+**`train_queue.py`** (kořen repozitáře, samostatný skript, beze změny orchestrator.py /
+inference_daemon.py / server.py / web/): 8 tréninků (4 cíle × tiery 60 a 120), jeden po druhém,
+bez zásahu. Přeskočí, co je už natrénované na cílový počet kroků; rozdělaný checkpoint sám
+doučí (`--resume=true --config_path=.../checkpoints/last/pretrained_model/train_config.json`,
+ověřeno proti `lerobot/configs/train.py` — CLI argumenty za `config_path` přebijí uloženou
+hodnotu, takže `--steps=<nový cíl>` funguje). Na chybě jednoho běhu nezastaví celou frontu,
+jen ho označí a pokračuje dál. Stav běhu je v `train_queue_status.json`, log každého běhu
+v `outputs/training/logs/`, jednoduchý zámek (`train_queue.lock`) brání dvěma instancím běžet
+zároveň. Čte jen `config.json` a `meta/episodes/*.parquet` přímo z disku — na rozdíl od
+staršího pokusu (viz níže) nepotřebuje běžící `python server.py` po celou dobu fronty.
+
+Zdroj dat (`SOURCE_SLUG = "diplomka_1"`, živý rostoucí dataset) je ve skriptu **oddělený** od
+cíle pojmenování výstupu (`DEST_SLUG = "diplomka_3"`) — na rozdíl od `web/retrain.js`, který
+obojí odvozuje ze stejného `cfg.task_slug`, takže funguje jen tehdy, když je aktivní projekt
+doslova "diplomka_1" (jinak by hledal neexistující `local/diplomka_2`/`local/diplomka_3`
+apod.). Výstupy jdou rovnou pod jméno `diplomka_3_*_cs50`, bez kopírovacího/přejmenovacího
+kroku, jaký byl potřeba pro `diplomka_2` (tam šlo o to, aby appka "nepoznala", že je model
+předělaný — tady žádné takové maskování není, diplomka_3 je od začátku vlastní projekt).
+
+**Spočtené hodnoty** (`--dry-run`, TARGET_EPOCHS=33.4 stejně jako `web/retrain.js`): baseline
+149 900/299 800 kroků, catch_cube 45 600/90 100, carry_cube 27 500/58 500, homing 76 700/151 100
+(60/120 ep). Padding při chunk_size=50 na nejkratší epizodě: baseline 8,4 %, catch_cube 38,8 %,
+homing 25–26 %, **carry_cube 63,3 %** (má nejkratší epizody, 79 snímků v nejhorším případě) —
+vědomé rozhodnutí uživatele, ne přehlédnutí, ale stojí za sledování, jestli se u carry_cube
+neobjeví obdoba dřívějšího "padding" nálezu z 19. 9.
+
+**Založen `projects/diplomka_3.json`** (gitignored jako ostatní projekty), klon aktuálního
+`config.json` s `task_slug=diplomka_3` a `policy_path`/`baseline_policy_path` pinovanými na
+tier 120 ep (`outputs\training\diplomka_3_*_120ep_act_cs50`) — stejný vzor jako u diplomka_2.
+Dokud trénink nedoběhne, appka u něj bude hlásit "netrénováno", což je v pořádku. Tier 60 ep se
+natrénuje taky (viz fronta), ale není v projektu pinovaný — pro jeho vyzkoušení je potřeba
+přepnout `steps[].policy_path` ručně, stejně jako u diplomka_2 při přepínání mezi tiery.
+
+**Nahrazen starší `train_queue.py` z téže větve** (`origin/claude/chunk-size-training-automation-plh0l1`,
+commit 1d6c8a1, patrně z jiné relace) — sdílel cíl, ale měl dvě chyby pro tenhle konkrétní
+požadavek: (1) odvozoval zdrojový dataset i cílové pojmenování ze stejného `cfg.task_slug`,
+takže by pro `diplomka_3` nikdy neběžel (hledal by neexistující `local/diplomka_3*`);
+(2) vyžadoval běžící server po celou dobu fronty a rozdělaný checkpoint po přerušení
+nedoučil, jen přeskočil s "řeš ručně" — nevhodné pro běh, u kterého uživatel nebude sedět.
+Nahrazeno, ne rozšířeno; důvod je zapsaný i v docstringu nového souboru.
+
+Ověřeno: `py_compile`, `tests/test_train_queue.py` (výpočet kroků na skutečných hodnotách
+zpětně sedí na dříve ručně použité `--steps=299800` u 120ep baseline; stav checkpointu na
+dočasném adresáři se symlinkem; sestavení fresh/resume příkazu; zámek), `--dry-run` proti
+reálným datům na tomhle stroji. **Trénink samotný (`train_queue.py -y`) NEBYL spuštěn** — čeká
+na uživatele, ať frontu vidí a potvrdí, než poběží bez dozoru.
