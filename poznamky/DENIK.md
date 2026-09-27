@@ -990,3 +990,25 @@ a jen `diplomka_3_catch_cube_60ep_cs30` (45 600 kroků, `local/diplomka_1_catch_
 60 epizod) — potvrzeno v `Get-CimInstance Win32_Process`: jediný `lerobot_train` proces,
 žádný druhý souběžně. Stránka správně ukázala baseline jako „přerušeno" a `catch_cube`
 60 ep jako „probíhá" s živým logem od kroku 1.
+
+## 2026-09-27 (pokrač.) — `run_model.py`: spustit jeden natrénovaný model samostatně
+
+`catch_cube` 60 ep, `cs30` doběhl (`train_queue_status.json`: `done`, 45 600/45 600 kroků,
+`outputs/training/diplomka_3_catch_cube_60ep_act_cs30/checkpoints/last` → `045600`).
+Uživatel chtěl skript jen na jeho ruční ověření — bez CEO/inspektora/re-plánů, jak to dělal
+celý 26. 9. ručně přes orchestraci s pinovaným krokem.
+
+**`run_model.py`** (kořen repozitáře, samostatný skript, beze změny orchestrator.py /
+inference_daemon.py / server.py / web/): spustí `inference_daemon.py` se stejnými argumenty,
+jaké by sestavil `orchestrator.Daemon.start()` (robot/kamery/protokoly A a B z `config.json`
+— `cameras_json()`/`daemon_command()` jsou úmyslně zkopírované, ne importované, stejný důvod
+jako u `train_queue.py`), a v smyčce posílá `SET_TASK` na Enter uživatele (`q` pro konec).
+Příznaky `|grasp`/`|reset`/`|release` a výchozí timeout se čtou z katalogu kroků v
+`config.json` podle `--step` (výchozí `catch_cube`), takže krok skončí stejným protokolem
+jako v ostré orchestraci, ne časovým limitem jako u starších ručních `--no-triggers` příkazů.
+Výchozí `--policy` je dnešní `diplomka_3_catch_cube_60ep_act_cs30`.
+
+Ověřeno: `py_compile`, `tests/test_run_model.py` (příznaky/timeout per krok, `cameras_json`,
+sestavení příkazu — pro `catch_cube` vychází bajt po bajtu stejný příkaz jako živý log
+orchestrace z 26. 9., jen s novou cestou k checkpointu). **Na robotu NEspuštěno** — spustí ho
+uživatel sám (posunulo by to rameno, do reálného ovládání robota jsem bez vyžádání nezasahoval).
