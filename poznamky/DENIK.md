@@ -967,3 +967,26 @@ neukazovala něco, co už neběží.
 `lerobot_train` proces nezůstal, `train_queue.lock` smazán, `outputs/training/diplomka_3_60ep_act_cs30/`
 se vůbec nevytvořil — zastaveno dřív, než stihl uložit první checkpoint). Trénink samotný
 (celá fronta na `-y`) **stále nebyl spuštěn** — jen tenhle krátký test zapojení.
+
+## 2026-09-27 (pokrač.) — pozastavení baseline, omezení fronty na jeden cíl/tier
+
+Uživatel nechal frontu běžet (`diplomka_3_60ep_cs30`, baseline), chtěl ji ale pozastavit a
+napřed si ověřit plynulost/přesnost na nejmenším modelu (`catch_cube`, 60 ep) — teprve podle
+toho rozhodnout, jestli `chunk_size=30` sedí, nebo dotrénovat zbytek. Zastaveno tlačítkem
+Zastavit na 66 608/149 900 krocích (44 %, 3 h 19 min) — `checkpoints/last` ukazuje na
+`065000`, takže poslední uložený checkpoint je z kroku 65 000. **Resume je díky tomu
+skutečný, ne jen teoretický** (uživatel se ptal, jestli bude potřeba) — a je automatický:
+`train_queue.py` si při příštím spuštění sám přes `checkpoint_status()` pozná, že checkpoint
+existuje a je nedokončený, a použije `--resume`. Nic se k tomu ručně nastavovat nemusí.
+
+**`/api/train-queue/start` teď bere volitelné `{only, tier}`** (baseline/catch_cube/carry_cube/homing
+× 60/120), přidáno UI na `queue.html` (dva výběry nad tlačítkem Spustit, neaktivní řádky
+plánu se ztlumí). Omezení jen vybere, KTERÉ z 8 běhů se odpálí teď — nic netrénuje navíc a
+nezahazuje postup ostatních (rozdělané/hotové běhy z fronty bez omezení se chovají úplně
+stejně, ať se pustí zvlášť, nebo v celé frontě).
+
+Ověřeno živě: `POST /api/train-queue/start {"only":"catch_cube","tier":60}` spustil přesně
+a jen `diplomka_3_catch_cube_60ep_cs30` (45 600 kroků, `local/diplomka_1_catch_cube`, prvních
+60 epizod) — potvrzeno v `Get-CimInstance Win32_Process`: jediný `lerobot_train` proces,
+žádný druhý souběžně. Stránka správně ukázala baseline jako „přerušeno" a `catch_cube`
+60 ep jako „probíhá" s živým logem od kroku 1.

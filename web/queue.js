@@ -7,6 +7,7 @@
  */
 
 let plan = null;
+let lastStatus = { ok: true, running: false, jobs: {}, current: null };
 let pollTimer = null;
 
 async function getJSON(url, opts) {
@@ -37,8 +38,16 @@ function stateBadge(state, fallback) {
   return `<span class="model-badge ${cls}" style="display:inline-block; padding:2px 10px;">${label}</span>`;
 }
 
+function scopeSelection() {
+  return {
+    only: document.getElementById('scope-only').value || null,
+    tier: document.getElementById('scope-tier').value ? parseInt(document.getElementById('scope-tier').value, 10) : null,
+  };
+}
+
 function renderPlan(planData, statusData) {
   const jobStatus = (statusData && statusData.jobs) || {};
+  const { only, tier } = scopeSelection();
   const host = document.getElementById('plan');
   const rows = planData.jobs.map((j, i) => {
     const live = jobStatus[j.key];
@@ -48,7 +57,8 @@ function renderPlan(planData, statusData) {
     const state = live ? live.state : (j.state === 'hotovo' ? 'done' : (j.state === 'doběhne' ? 'partial' : 'missing'));
     const warn = j.padding_frac > 0.35 ? ' ⚠' : '';
     const steps = live && live.steps ? `${live.steps}/${j.steps}` : String(j.steps);
-    return `<tr>
+    const inScope = (!only || j.target === only) && (!tier || j.n === tier);
+    return `<tr style="${inScope ? '' : 'opacity:.4;'}">
       <td>${i + 1}</td>
       <td>${j.title}, ${j.n} ep</td>
       <td>${steps}</td>
@@ -110,6 +120,7 @@ function renderProgress(statusData) {
 async function pollStatus() {
   try {
     const statusData = await getJSON('/api/train-queue/status');
+    lastStatus = statusData;
     document.getElementById('server-warn').style.display = 'none';
     // Plán (kroky/padding/výstup) se natahuje jen jednou nebo tlačítkem
     // Obnovit — mění se jen tím, že se natrénuje víc epizod/založí nový
@@ -129,6 +140,7 @@ async function loadPlan() {
     const planData = await getJSON('/api/train-queue/plan');
     plan = planData;
     const statusData = await getJSON('/api/train-queue/status').catch(() => ({ ok: true, running: false, jobs: {} }));
+    lastStatus = statusData;
     renderPlan(planData, statusData);
     renderProgress(statusData);
     document.getElementById('server-warn').style.display = 'none';
@@ -142,13 +154,22 @@ document.getElementById('start-btn').addEventListener('click', async () => {
   const btn = document.getElementById('start-btn');
   btn.disabled = true;
   try {
-    await getJSON('/api/train-queue/start', { method: 'POST' });
+    await getJSON('/api/train-queue/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(scopeSelection()),
+    });
     await pollStatus();
   } catch (e) {
     alert(`Nepodařilo se spustit: ${e.message}`);
     btn.disabled = false;
   }
 });
+
+// Přepočítat, které řádky jsou "v hledáčku" (viz inScope v renderPlan), i bez
+// čekání na příští poll — hned při změně výběru.
+document.getElementById('scope-only').addEventListener('change', () => { if (plan) renderPlan(plan, lastStatus); });
+document.getElementById('scope-tier').addEventListener('change', () => { if (plan) renderPlan(plan, lastStatus); });
 
 document.getElementById('stop-btn').addEventListener('click', async () => {
   if (!confirm('Zastavit frontu? Rozdělaný trénink se přeruší (příští Spustit ho doučí od posledního uloženého checkpointu).')) return;

@@ -18,6 +18,8 @@ orchestration page needs:
     GET  /api/train-queue/plan    planned train_queue.py jobs + disk status (2026-09-27)
     GET  /api/train-queue/status  live progress of the running train_queue.py, if any
     POST /api/train-queue/start   launch train_queue.py -y as a detached background process
+                                 {only?: "baseline"|"catch_cube"|"carry_cube"|"homing",
+                                  tier?: 60|120} — omitted means the unscoped full queue
     POST /api/train-queue/stop    kill it (and its current lerobot_train child)
     GET  /api/runs       list the saved run logs
     GET  /api/runs/consistency  did the settings stay identical across runs
@@ -689,9 +691,9 @@ def train_queue_plan() -> dict:
     for j in jobs:
         st = tq.checkpoint_status(j["out_dir"], j["steps"])
         state = "hotovo" if st["sufficient"] else ("doběhne" if st["trained"] else "nové")
-        out.append({"key": j["key"], "title": j["title"], "n": j["n"], "total_eps": j["total_eps"],
-                    "steps": j["steps"], "steps_done": st["steps"], "padding_frac": j["padding_frac"],
-                    "out_dir": j["out_dir"].name, "state": state})
+        out.append({"key": j["key"], "title": j["title"], "target": j["slug"] or "baseline", "n": j["n"],
+                    "total_eps": j["total_eps"], "steps": j["steps"], "steps_done": st["steps"],
+                    "padding_frac": j["padding_frac"], "out_dir": j["out_dir"].name, "state": state})
     return {"ok": True, "chunk_size": tq.CHUNK_SIZE, "source_slug": tq.SOURCE_SLUG,
             "dest_slug": tq.DEST_SLUG, "tiers": list(tq.TIERS), "jobs": out}
 
@@ -724,22 +726,38 @@ def train_queue_status() -> dict:
     return {"ok": True, "running": pid is not None, "pid": pid, "jobs": status, "current": current}
 
 
-def start_train_queue() -> dict:
+TRAIN_QUEUE_TARGETS = ["baseline"] + list(tq.SKILLS)  # co smí přijít v `only` z klienta
+
+
+def start_train_queue(only: str | None = None, tier: int | None = None) -> dict:
+    """`only`/`tier` == None znamená "beze škrtu" (celá fronta), stejně jako CLI bez
+    --only/--tier. Validováno tady (ne jen v train_queue.py), ať špatná hodnota z UI
+    skončí čitelnou chybou v odpovědi, ne tichým selháním až uvnitř odpáleného procesu."""
+    if only is not None and only not in TRAIN_QUEUE_TARGETS:
+        return {"ok": False, "error": f"Neznámý cíl '{only}' (možnosti: {', '.join(TRAIN_QUEUE_TARGETS)})."}
+    if tier is not None and tier not in tq.TIERS:
+        return {"ok": False, "error": f"Neznámý tier {tier} (možnosti: {', '.join(map(str, tq.TIERS))})."}
     with _train_queue_lock:
         if _train_queue_pid() is not None:
             return {"ok": False, "error": "Fronta už běží."}
         tq.LOG_DIR.mkdir(parents=True, exist_ok=True)
         console_log = tq.LOG_DIR / "train_queue.console.log"
+        scope = f" --only {only}" if only else ""
+        scope += f" --tier {tier}" if tier else ""
         with open(console_log, "a", encoding="utf-8") as f:
-            f.write(f"\n===== spuštěno ze serveru {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            f.write(f"\n===== spuštěno ze serveru {time.strftime('%Y-%m-%d %H:%M:%S')}{scope} =====\n")
         # Vlastní stdout jde do console_log (append), ne do pipe tohohle
         # requestu — fronta smí běžet dny, dávno přes životnost jednoho HTTP
         # dotazu i tohohle běhu server.py (restart po každé úpravě appky).
         log_fh = open(console_log, "a", encoding="utf-8")
+        argv = [sys.executable, str(HERE / "train_queue.py"), "-y"]
+        if only:
+            argv += ["--only", only]
+        if tier:
+            argv += ["--tier", str(tier)]
         try:
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-            subprocess.Popen([sys.executable, str(HERE / "train_queue.py"), "-y"],
-                             cwd=str(HERE), stdin=subprocess.DEVNULL,
+            subprocess.Popen(argv, cwd=str(HERE), stdin=subprocess.DEVNULL,
                              stdout=log_fh, stderr=subprocess.STDOUT,
                              creationflags=creationflags, close_fds=False)
         finally:
@@ -1081,7 +1099,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/train-queue/start":
             try:
-                self._send_json(start_train_queue())
+                only = body.get("only") or None
+                tier = body.get("tier")
+                tier = int(tier) if tier not in (None, "") else None
+                self._send_json(start_train_queue(only, tier))
+            except (TypeError, ValueError):
+                self._send_json({"ok": False, "error": "tier musí být číslo (60 nebo 120)."}, status=400)
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
         elif path == "/api/train-queue/stop":

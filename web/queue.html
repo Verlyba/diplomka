@@ -50,12 +50,36 @@
   <section class="block">
     <h2><b>1</b> Plán (8 běhů)</h2>
     <div class="block-body">
+      <div class="row" style="margin-bottom:10px; gap:10px; flex-wrap:wrap; align-items:center;">
+        <label class="field" style="max-width:180px;">cíl
+          <select id="scope-only">
+            <option value="">celá fronta (8 běhů)</option>
+            <option value="baseline">jen baseline</option>
+            <option value="catch_cube">jen catch_cube</option>
+            <option value="carry_cube">jen carry_cube</option>
+            <option value="homing">jen homing</option>
+          </select>
+        </label>
+        <label class="field" style="max-width:140px;">tier
+          <select id="scope-tier">
+            <option value="">oba (60 i 120)</option>
+            <option value="60">jen 60 ep</option>
+            <option value="120">jen 120 ep</option>
+          </select>
+        </label>
+      </div>
       <div class="row" style="margin-bottom:14px; gap:10px; flex-wrap:wrap;">
-        <button type="button" id="start-btn" class="primary">▶ Spustit frontu</button>
+        <button type="button" id="start-btn" class="primary">▶ Spustit</button>
         <button type="button" id="stop-btn" class="danger" disabled>■ Zastavit</button>
         <button type="button" id="reload-btn">🔄 Obnovit</button>
         <span id="server-warn" style="color:var(--red); display:none;">Server neběží — spusť <code class="inline">python server.py</code>.</span>
       </div>
+      <p style="color:var(--muted); font-size:12.5px; margin:-4px 0 12px;">
+        Výběr cíle/tieru jen omezí, které z 8 běhů se teď spustí — nic to netrénuje navíc a
+        nezahazuje postup ostatních. Klidně pusť jen jeden běh (např. „catch_cube" × „60 ep") a
+        zbytek dodělej později tlačítkem s „celá fronta" — rozdělané/hotové běhy se přeskočí
+        nebo doučí stejně jako dřív.
+      </p>
       <div id="plan"></div>
     </div>
   </section>
